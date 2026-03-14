@@ -1,0 +1,16 @@
+{
+  "name": "@arduconfig/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "typecheck": "tsc -b tsconfig.json --pretty false",
+    "probe:serial": "npm run build && node dist/probe-serial.js",
+    "runtime:serial": "npm run build && node dist/runtime-serial.js"
+  },
+  "dependencies": {
+    "@arduconfig/transport": "0.1.0",
+    "serialport": "^13.0.0"
+  }
+}

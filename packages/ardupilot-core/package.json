@@ -1,0 +1,17 @@
+{
+  "name": "@arduconfig/ardupilot-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "typecheck": "tsc -b tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@arduconfig/param-metadata": "0.1.0",
+    "@arduconfig/protocol-mavlink": "0.1.0",
+    "@arduconfig/transport": "0.1.0"
+  }
+}

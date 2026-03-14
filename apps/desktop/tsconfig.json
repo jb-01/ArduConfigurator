@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "declaration": true,
+    "declarationMap": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src"],
+  "references": [
+    { "path": "../../packages/transport" },
+    { "path": "../../packages/protocol-mavlink" },
+    { "path": "../../packages/param-metadata" },
+    { "path": "../../packages/ardupilot-core" }
+  ]
+}

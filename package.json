@@ -1,0 +1,27 @@
+{
+  "name": "arduconfigurator-workspace",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@11.4.2",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @arduconfig/web && npm run build --workspace @arduconfig/desktop",
+    "typecheck": "npm run typecheck --workspace @arduconfig/transport && npm run typecheck --workspace @arduconfig/protocol-mavlink && npm run typecheck --workspace @arduconfig/param-metadata && npm run typecheck --workspace @arduconfig/ardupilot-core && npm run typecheck --workspace @arduconfig/web && npm run typecheck --workspace @arduconfig/desktop",
+    "dev:web": "npm run dev --workspace @arduconfig/web",
+    "build:web": "npm run build --workspace @arduconfig/web",
+    "build:desktop": "npm run build --workspace @arduconfig/desktop"
+  },
+  "devDependencies": {
+    "@types/node": "^22.8.7",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  }
+}
