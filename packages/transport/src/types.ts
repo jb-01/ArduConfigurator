@@ -1,6 +1,6 @@
 export type Unsubscribe = () => void
 
-export type TransportKind = 'mock' | 'web-serial' | 'native-serial' | 'websocket'
+export type TransportKind = 'mock' | 'web-serial' | 'native-serial' | 'websocket' | 'tcp' | 'udp'
 
 export type TransportStatus =
   | { kind: 'idle' }

@@ -36,7 +36,19 @@ const mockParameters: ParameterState = {
   RC1_TRIM: 1500,
   RC3_MIN: 1000,
   RC3_MAX: 2000,
-  RC3_TRIM: 1500
+  RC3_TRIM: 1500,
+  SERVO1_FUNCTION: 33,
+  SERVO2_FUNCTION: 34,
+  SERVO3_FUNCTION: 35,
+  SERVO4_FUNCTION: 36,
+  SERVO5_FUNCTION: 0,
+  SERVO6_FUNCTION: 0,
+  SERVO7_FUNCTION: 0,
+  SERVO8_FUNCTION: 0,
+  SERVO9_FUNCTION: 0,
+  SERVO10_FUNCTION: 0,
+  SERVO11_FUNCTION: 0,
+  SERVO12_FUNCTION: 0
 }
 
 function envelope(sequence: number, message: MavlinkMessage): MavlinkEnvelope {
@@ -188,6 +200,34 @@ export function createArduCopterMockScenario(): MockScenario {
             if (requestedMessageId === MAVLINK_MESSAGE_IDS.SYS_STATUS) {
               responses.push(codec.encode(envelope(92, sysStatusMessage(16420, 72))))
             }
+          } else if (outbound.message.command === MAV_CMD.DO_MOTOR_TEST) {
+            const outputChannel = Math.round(outbound.message.params[0] ?? 0)
+            const throttlePercent = Number((outbound.message.params[2] ?? 0).toFixed(1))
+            const durationSeconds = Number((outbound.message.params[3] ?? 0).toFixed(1))
+            responses.push(
+              codec.encode(
+                envelope(93, {
+                  type: 'COMMAND_ACK',
+                  command: MAV_CMD.DO_MOTOR_TEST,
+                  result: MAV_RESULT.ACCEPTED,
+                  progress: 0,
+                  resultParam2: 0,
+                  targetSystem: outbound.header.systemId,
+                  targetComponent: outbound.header.componentId
+                })
+              )
+            )
+            responses.push(
+              codec.encode(
+                envelope(94, {
+                  type: 'STATUSTEXT',
+                  severity: MAV_SEVERITY.WARNING,
+                  text: `Motor test accepted for OUT${outputChannel} at ${throttlePercent}% for ${durationSeconds}s.`,
+                  statusId: 0,
+                  chunkSequence: 0
+                })
+              )
+            )
           } else if (isAccelerometerCalibration(outbound.message)) {
             responses.push(
               ...[

@@ -7,12 +7,24 @@ export type GuidedActionId =
 export type SessionProfile = 'full-power' | 'usb-bench'
 export type LiveSignalId = 'rc-input' | 'battery-telemetry'
 
+export interface ParameterValueOption {
+  value: number
+  label: string
+  description?: string
+}
+
 export interface ParameterDefinition {
   id: string
   label: string
   description: string
   category: string
   unit?: string
+  minimum?: number
+  maximum?: number
+  step?: number
+  rebootRequired?: boolean
+  notes?: string[]
+  options?: ParameterValueOption[]
 }
 
 export interface SetupSectionSessionOverride {

@@ -104,9 +104,23 @@ export const MAV_PARAM_TYPE = {
 
 export const MAV_CMD = {
   DO_SET_MODE: 176,
+  DO_MOTOR_TEST: 209,
   PREFLIGHT_CALIBRATION: 241,
   PREFLIGHT_REBOOT_SHUTDOWN: 246,
   SET_MESSAGE_INTERVAL: 511
+} as const
+
+export const MOTOR_TEST_THROTTLE_TYPE = {
+  PERCENT: 0,
+  PWM: 1,
+  PILOT: 2,
+  CAL: 3
+} as const
+
+export const MOTOR_TEST_ORDER = {
+  DEFAULT: 0,
+  SEQUENCE: 1,
+  BOARD: 2
 } as const
 
 export const MAV_RESULT = {

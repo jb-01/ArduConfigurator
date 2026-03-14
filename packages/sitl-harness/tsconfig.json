@@ -11,10 +11,6 @@
   },
   "include": ["src"],
   "references": [
-    { "path": "../../packages/transport" },
-    { "path": "../../packages/sitl-harness" },
-    { "path": "../../packages/protocol-mavlink" },
-    { "path": "../../packages/param-metadata" },
-    { "path": "../../packages/ardupilot-core" }
+    { "path": "../transport" }
   ]
 }

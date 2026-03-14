@@ -1,3 +1,7 @@
+export * from './airframe-outputs.js'
+export * from './motor-test.js'
+export * from './parameter-backups.js'
+export * from './parameter-drafts.js'
 export * from './runtime.js'
 export * from './setup-exercises.js'
 export * from './types.js'

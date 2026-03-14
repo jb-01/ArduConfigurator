@@ -4,6 +4,7 @@ import type { TransportStatus } from '@arduconfig/transport'
 export type SetupStatus = 'attention' | 'in-progress' | 'complete'
 export type ParameterSyncStatus = 'idle' | 'awaiting-vehicle' | 'requesting' | 'streaming' | 'complete'
 export type GuidedActionStatus = 'idle' | 'requested' | 'running' | 'succeeded' | 'failed'
+export type MotorTestStatus = 'idle' | 'requested' | 'running' | 'succeeded' | 'failed'
 
 export interface VehicleIdentity {
   firmware: 'ArduPilot' | 'Unknown'
@@ -25,6 +26,29 @@ export interface ParameterState {
   index: number
   count: number
   definition?: ParameterDefinition
+}
+
+export interface ParameterWriteOptions {
+  verifyTimeoutMs?: number
+  tolerance?: number
+}
+
+export interface ParameterWriteRequest {
+  paramId: string
+  paramValue: number
+}
+
+export interface ParameterWriteResult {
+  paramId: string
+  previousValue?: number
+  requestedValue: number
+  confirmedValue: number
+  confirmedAtMs: number
+}
+
+export interface ParameterBatchWriteResult {
+  applied: ParameterWriteResult[]
+  rolledBack: ParameterWriteResult[]
 }
 
 export interface ParameterSyncState {
@@ -73,6 +97,25 @@ export interface LiveVerificationState {
   batteryTelemetry: BatteryTelemetryState
 }
 
+export interface MotorTestState {
+  status: MotorTestStatus
+  summary: string
+  instructions: string[]
+  selectedOutputChannel?: number
+  selectedMotorNumber?: number
+  throttlePercent?: number
+  durationSeconds?: number
+  startedAtMs?: number
+  updatedAtMs?: number
+  completedAtMs?: number
+}
+
+export interface MotorTestRequest {
+  outputChannel: number
+  throttlePercent: number
+  durationSeconds: number
+}
+
 export interface SetupSectionState {
   id: string
   title: string
@@ -100,6 +143,7 @@ export interface ConfiguratorSnapshot {
   parameters: ParameterState[]
   setupSections: SetupSectionState[]
   guidedActions: Record<GuidedActionId, GuidedActionState>
+  motorTest: MotorTestState
   liveVerification: LiveVerificationState
   statusTexts: StatusTextEntry[]
 }

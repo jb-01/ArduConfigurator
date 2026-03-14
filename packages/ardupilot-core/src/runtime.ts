@@ -20,6 +20,8 @@ import {
   MAV_AUTOPILOT,
   MAV_CMD,
   MAV_MODE_FLAG,
+  MOTOR_TEST_ORDER,
+  MOTOR_TEST_THROTTLE_TYPE,
   MAV_PARAM_TYPE,
   MAV_RESULT,
   MAV_SEVERITY,
@@ -33,12 +35,19 @@ import type {
   ConfiguratorSnapshot,
   GuidedActionState,
   LiveVerificationState,
+  MotorTestRequest,
+  ParameterBatchWriteResult,
+  MotorTestState,
   ParameterState,
   ParameterSyncState,
+  ParameterWriteOptions,
+  ParameterWriteRequest,
+  ParameterWriteResult,
   SetupSectionState,
   StatusTextEntry,
   VehicleIdentity,
 } from './types.js'
+import { evaluateMotorTestEligibility, motorTestInstructions } from './motor-test.js'
 
 type UpdateListener = (snapshot: ConfiguratorSnapshot) => void
 
@@ -50,6 +59,22 @@ interface VehicleWaiter {
 
 interface ParameterSyncWaiter {
   resolve: (parameterStats: ConfiguratorSnapshot['parameterStats']) => void
+  reject: (error: Error) => void
+  timer: ReturnType<typeof setTimeout>
+}
+
+interface CommandAckWaiter {
+  command: number
+  resolve: (message: CommandAckMessage) => void
+  reject: (error: Error) => void
+  timer: ReturnType<typeof setTimeout>
+}
+
+interface ParameterValueWaiter {
+  paramId: string
+  expectedValue: number
+  tolerance: number
+  resolve: (parameter: ParameterState) => void
   reject: (error: Error) => void
   timer: ReturnType<typeof setTimeout>
 }
@@ -70,7 +95,11 @@ export interface ArduPilotConfiguratorRuntimeOptions {
 
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 5000
 const DEFAULT_PARAMETER_SYNC_TIMEOUT_MS = 20000
+const DEFAULT_COMMAND_ACK_TIMEOUT_MS = 3000
+const DEFAULT_PARAMETER_WRITE_TIMEOUT_MS = 3000
+const DEFAULT_PARAMETER_WRITE_TOLERANCE = 0.0001
 const MAX_GUIDED_ACTION_STATUS_TEXTS = 5
+const MOTOR_TEST_COMPLETION_BUFFER_MS = 250
 const LIVE_TELEMETRY_INTERVAL_US = 200000
 const LIVE_TELEMETRY_REQUESTS = [
   {
@@ -83,11 +112,24 @@ const LIVE_TELEMETRY_REQUESTS = [
   }
 ] as const
 
+export class ParameterBatchWriteError extends Error {
+  constructor(
+    message: string,
+    readonly result: ParameterBatchWriteResult,
+    readonly cause?: unknown
+  ) {
+    super(message)
+    this.name = 'ParameterBatchWriteError'
+  }
+}
+
 export class ArduPilotConfiguratorRuntime {
   private readonly updateListeners = new Set<UpdateListener>()
   private readonly subscriptions: Unsubscribe[]
   private readonly vehicleWaiters = new Set<VehicleWaiter>()
   private readonly parameterSyncWaiters = new Set<ParameterSyncWaiter>()
+  private readonly commandAckWaiters = new Set<CommandAckWaiter>()
+  private readonly parameterValueWaiters = new Set<ParameterValueWaiter>()
   private readonly parameters = new Map<string, ParameterState>()
   private readonly statusTexts: StatusTextEntry[] = []
 
@@ -96,9 +138,11 @@ export class ArduPilotConfiguratorRuntime {
   private vehicle?: VehicleIdentity
   private parameterSync: ParameterSyncState = createIdleParameterSync()
   private guidedActions = createIdleGuidedActions()
+  private motorTest = createIdleMotorTestState()
   private liveVerification = createIdleLiveVerification()
   private totalParameters = 0
   private liveTelemetryRequestsIssued = false
+  private motorTestTimer?: ReturnType<typeof setTimeout>
 
   constructor(
     private readonly session: MavlinkSession,
@@ -117,6 +161,8 @@ export class ArduPilotConfiguratorRuntime {
               : status.reason ?? 'Vehicle link closed before the request completed.'
           this.rejectVehicleWaiters(new Error(reason))
           this.rejectParameterSyncWaiters(new Error(reason))
+          this.rejectCommandAckWaiters(new Error(reason))
+          this.rejectParameterValueWaiters(new Error(reason))
           this.resetLiveState()
         }
         this.emit()
@@ -147,6 +193,7 @@ export class ArduPilotConfiguratorRuntime {
       parameters,
       setupSections: this.buildSetupSections(),
       guidedActions: cloneGuidedActions(this.guidedActions),
+      motorTest: cloneMotorTestState(this.motorTest),
       liveVerification: cloneLiveVerification(this.liveVerification),
       statusTexts: [...this.statusTexts]
     }
@@ -303,15 +350,11 @@ export class ArduPilotConfiguratorRuntime {
     })
   }
 
-  async setParameter(paramId: string, paramValue: number): Promise<void> {
+  async setParameter(paramId: string, paramValue: number, options: ParameterWriteOptions = {}): Promise<ParameterWriteResult> {
+    this.assertParameterWriteAllowed()
+
     const known = this.parameters.get(paramId)
-    this.parameters.set(paramId, {
-      id: paramId,
-      value: paramValue,
-      index: known?.index ?? this.parameters.size,
-      count: known?.count ?? this.totalParameters,
-      definition: this.metadata.parameters[paramId]
-    })
+    const writeVerification = this.waitForParameterValue(paramId, paramValue, options)
 
     await this.session.send({
       type: 'PARAM_SET',
@@ -322,7 +365,67 @@ export class ArduPilotConfiguratorRuntime {
       paramType: MAV_PARAM_TYPE.REAL32
     })
 
-    this.emit()
+    try {
+      const confirmed = await writeVerification
+      this.appendStatusEntry('info', `Verified parameter ${paramId} = ${formatParameterValueForLog(confirmed.value)}.`)
+      this.emit()
+      return {
+        paramId,
+        previousValue: known?.value,
+        requestedValue: paramValue,
+        confirmedValue: confirmed.value,
+        confirmedAtMs: Date.now()
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown parameter verification error.'
+      this.appendStatusEntry('warning', `Failed to verify parameter ${paramId}: ${message}`)
+      this.emit()
+      throw error
+    }
+  }
+
+  async setParameters(requests: ParameterWriteRequest[], options: ParameterWriteOptions = {}): Promise<ParameterBatchWriteResult> {
+    const result: ParameterBatchWriteResult = {
+      applied: [],
+      rolledBack: []
+    }
+
+    for (const request of requests) {
+      const known = this.parameters.get(request.paramId)
+      if (known && approximatelyEqualParameterValue(known.value, request.paramValue, options.tolerance)) {
+        continue
+      }
+
+      try {
+        const writeResult = await this.setParameter(request.paramId, request.paramValue, options)
+        result.applied.push(writeResult)
+      } catch (error) {
+        const rollbackSourceWrites = [...result.applied].reverse().filter((write) => write.previousValue !== undefined)
+        for (const appliedWrite of rollbackSourceWrites) {
+          try {
+            const rollbackResult = await this.setParameter(appliedWrite.paramId, appliedWrite.previousValue as number, options)
+            result.rolledBack.push(rollbackResult)
+          } catch (rollbackError) {
+            const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : 'Unknown rollback error.'
+            this.appendStatusEntry(
+              'error',
+              `Rollback failed for ${appliedWrite.paramId} after batch write error: ${rollbackMessage}`
+            )
+          }
+        }
+
+        const writeMessage = error instanceof Error ? error.message : 'Unknown batch write error.'
+        const rollbackSummary =
+          result.applied.length === 0
+            ? 'No earlier parameter writes needed rollback.'
+            : result.rolledBack.length === result.applied.length
+              ? `Rolled back ${result.rolledBack.length} previously applied parameter change(s).`
+              : `Rolled back ${result.rolledBack.length} of ${result.applied.length} previously applied parameter change(s).`
+        throw new ParameterBatchWriteError(`Batch write failed on ${request.paramId}: ${writeMessage} ${rollbackSummary}`, result, error)
+      }
+    }
+
+    return result
   }
 
   async runGuidedAction(actionId: GuidedActionId): Promise<void> {
@@ -336,7 +439,9 @@ export class ArduPilotConfiguratorRuntime {
           'Accelerometer calibration command queued.',
           'Accelerometer calibration command sent. Waiting for autopilot guidance.',
           defaultInstructionsForAction('calibrate-accelerometer', this.sessionProfile),
-          () => this.sendCommand(MAV_CMD.PREFLIGHT_CALIBRATION, [0, 0, 0, 0, 1, 0, 0])
+          async () => {
+            await this.sendCommand(MAV_CMD.PREFLIGHT_CALIBRATION, [0, 0, 0, 0, 1, 0, 0])
+          }
         )
         return
       case 'calibrate-compass':
@@ -345,7 +450,9 @@ export class ArduPilotConfiguratorRuntime {
           'Compass calibration command queued.',
           'Compass calibration command sent. Waiting for autopilot guidance.',
           defaultInstructionsForAction('calibrate-compass', this.sessionProfile),
-          () => this.sendCommand(MAV_CMD.PREFLIGHT_CALIBRATION, [0, 1, 0, 0, 0, 0, 0])
+          async () => {
+            await this.sendCommand(MAV_CMD.PREFLIGHT_CALIBRATION, [0, 1, 0, 0, 0, 0, 0])
+          }
         )
         return
       case 'reboot-autopilot':
@@ -354,7 +461,9 @@ export class ArduPilotConfiguratorRuntime {
           'Autopilot reboot request queued.',
           'Reboot request sent. Expect the link to drop if the autopilot accepts it.',
           defaultInstructionsForAction('reboot-autopilot', this.sessionProfile),
-          () => this.sendCommand(MAV_CMD.PREFLIGHT_REBOOT_SHUTDOWN, [1, 0, 0, 0, 0, 0, 0])
+          async () => {
+            await this.sendCommand(MAV_CMD.PREFLIGHT_REBOOT_SHUTDOWN, [1, 0, 0, 0, 0, 0, 0])
+          }
         )
         return
       default:
@@ -362,14 +471,86 @@ export class ArduPilotConfiguratorRuntime {
     }
   }
 
+  async runMotorTest(request: MotorTestRequest): Promise<void> {
+    const eligibility = evaluateMotorTestEligibility(this.getSnapshot(), request)
+    if (!eligibility.allowed) {
+      throw new Error(eligibility.reasons[0] ?? 'Motor test request is not currently allowed.')
+    }
+
+    const selectedOutput = eligibility.selectedOutput
+    const instructions = motorTestInstructions(request, selectedOutput)
+    const startedAtMs = Date.now()
+    this.motorTest = {
+      status: 'requested',
+      summary: `Queueing a motor test for OUT${request.outputChannel}.`,
+      instructions,
+      selectedOutputChannel: request.outputChannel,
+      selectedMotorNumber: selectedOutput?.motorNumber,
+      throttlePercent: request.throttlePercent,
+      durationSeconds: request.durationSeconds,
+      startedAtMs,
+      updatedAtMs: startedAtMs,
+      completedAtMs: undefined
+    }
+    this.emit()
+
+    try {
+      await this.sendCommand(
+        MAV_CMD.DO_MOTOR_TEST,
+        [request.outputChannel, MOTOR_TEST_THROTTLE_TYPE.PERCENT, request.throttlePercent, request.durationSeconds, 1, MOTOR_TEST_ORDER.BOARD, 0],
+        { waitForAck: true }
+      )
+
+      const runningAtMs = Date.now()
+      const selectedOutputLabel = selectedOutput?.motorNumber !== undefined ? `OUT${request.outputChannel} / M${selectedOutput.motorNumber}` : `OUT${request.outputChannel}`
+      this.motorTest = {
+        ...this.motorTest,
+        status: 'running',
+        summary: `Motor test running on ${selectedOutputLabel} at ${request.throttlePercent}% for ${request.durationSeconds.toFixed(1)} seconds.`,
+        instructions,
+        updatedAtMs: runningAtMs,
+        completedAtMs: undefined
+      }
+      this.appendStatusEntry(
+        'warning',
+        `Motor test started on ${selectedOutputLabel} at ${request.throttlePercent}% for ${request.durationSeconds.toFixed(1)}s.`
+      )
+      this.emit()
+      this.scheduleMotorTestCompletion()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown motor test error.'
+      this.clearMotorTestTimer()
+      this.motorTest = {
+        ...this.motorTest,
+        status: 'failed',
+        summary: message,
+        updatedAtMs: Date.now(),
+        completedAtMs: Date.now()
+      }
+      this.emit()
+      throw error
+    }
+  }
+
   destroy(): void {
     this.subscriptions.forEach((unsubscribe) => unsubscribe())
+    this.commandAckWaiters.forEach((waiter) => {
+      clearTimeout(waiter.timer)
+      waiter.reject(new Error('Runtime destroyed before command acknowledgment was received.'))
+    })
+    this.commandAckWaiters.clear()
+    this.rejectParameterValueWaiters(new Error('Runtime destroyed before parameter verification was received.'))
+    this.clearMotorTestTimer()
     this.rejectVehicleWaiters(new Error('Runtime destroyed before vehicle heartbeat was received.'))
     this.rejectParameterSyncWaiters(new Error('Runtime destroyed before parameter sync completed.'))
     this.session.destroy()
   }
 
-  private async sendCommand(command: number, params: number[]): Promise<void> {
+  private async sendCommand(
+    command: number,
+    params: number[],
+    options: { waitForAck?: boolean; ackTimeoutMs?: number } = {}
+  ): Promise<CommandAckMessage | void> {
     const message: CommandLongMessage = {
       type: 'COMMAND_LONG',
       command,
@@ -379,7 +560,11 @@ export class ArduPilotConfiguratorRuntime {
       params: params as CommandLongMessage['params']
     }
 
+    const ackPromise = options.waitForAck ? this.waitForCommandAck(command, options.ackTimeoutMs) : undefined
     await this.session.send(message)
+    if (ackPromise) {
+      return ackPromise
+    }
   }
 
   private async requestLiveTelemetryStreams(systemId: number, componentId: number): Promise<void> {
@@ -458,13 +643,15 @@ export class ArduPilotConfiguratorRuntime {
   private processParamValue(message: ParamValueMessage): void {
     const known = this.parameters.get(message.paramId)
     this.totalParameters = message.paramCount
-    this.parameters.set(message.paramId, {
+    const parameterState: ParameterState = {
       id: message.paramId,
       value: message.paramValue,
       index: message.paramIndex,
       count: message.paramCount,
       definition: this.metadata.parameters[message.paramId]
-    })
+    }
+    this.parameters.set(message.paramId, parameterState)
+    this.resolveParameterValueWaiters(parameterState)
 
     const downloaded = this.parameters.size
     const duplicateFrames = this.parameterSync.duplicateFrames + (known ? 1 : 0)
@@ -546,6 +733,8 @@ export class ArduPilotConfiguratorRuntime {
   }
 
   private processCommandAck(message: CommandAckMessage): void {
+    this.resolveCommandAckWaiters(message)
+
     if (message.command !== MAV_CMD.SET_MESSAGE_INTERVAL) {
       return
     }
@@ -620,9 +809,11 @@ export class ArduPilotConfiguratorRuntime {
     this.totalParameters = 0
     this.parameterSync = createIdleParameterSync()
     this.guidedActions = createIdleGuidedActions()
+    this.motorTest = createIdleMotorTestState()
     this.liveVerification = createIdleLiveVerification()
     this.liveTelemetryRequestsIssued = false
     this.statusTexts.splice(0)
+    this.clearMotorTestTimer()
   }
 
   private resolveVehicleWaiters(vehicle: VehicleIdentity): void {
@@ -655,6 +846,163 @@ export class ArduPilotConfiguratorRuntime {
       waiter.reject(error)
     })
     this.parameterSyncWaiters.clear()
+  }
+
+  private rejectCommandAckWaiters(error: Error): void {
+    this.commandAckWaiters.forEach((waiter) => {
+      clearTimeout(waiter.timer)
+      waiter.reject(error)
+    })
+    this.commandAckWaiters.clear()
+  }
+
+  private waitForCommandAck(command: number, timeoutMs = DEFAULT_COMMAND_ACK_TIMEOUT_MS): Promise<CommandAckMessage> {
+    return new Promise((resolve, reject) => {
+      const waiter: CommandAckWaiter = {
+        command,
+        resolve: (message) => {
+          clearTimeout(timer)
+          resolve(message)
+        },
+        reject: (error) => {
+          clearTimeout(timer)
+          reject(error)
+        },
+        timer: undefined as unknown as ReturnType<typeof setTimeout>
+      }
+
+      const timer = setTimeout(() => {
+        this.commandAckWaiters.delete(waiter)
+        reject(new Error(`Timed out waiting for ${mavCommandLabel(command)} acknowledgment after ${timeoutMs}ms.`))
+      }, timeoutMs)
+
+      waiter.timer = timer
+      this.commandAckWaiters.add(waiter)
+    })
+  }
+
+  private waitForParameterValue(
+    paramId: string,
+    expectedValue: number,
+    options: ParameterWriteOptions = {}
+  ): Promise<ParameterState> {
+    const timeoutMs = options.verifyTimeoutMs ?? DEFAULT_PARAMETER_WRITE_TIMEOUT_MS
+    const tolerance = options.tolerance ?? DEFAULT_PARAMETER_WRITE_TOLERANCE
+
+    return new Promise((resolve, reject) => {
+      const waiter: ParameterValueWaiter = {
+        paramId,
+        expectedValue,
+        tolerance,
+        resolve: (parameter) => {
+          clearTimeout(timer)
+          resolve(parameter)
+        },
+        reject: (error) => {
+          clearTimeout(timer)
+          reject(error)
+        },
+        timer: undefined as unknown as ReturnType<typeof setTimeout>
+      }
+
+      const timer = setTimeout(() => {
+        this.parameterValueWaiters.delete(waiter)
+        reject(new Error(`Timed out waiting for ${paramId} readback after ${timeoutMs}ms.`))
+      }, timeoutMs)
+
+      waiter.timer = timer
+      this.parameterValueWaiters.add(waiter)
+    })
+  }
+
+  private resolveCommandAckWaiters(message: CommandAckMessage): void {
+    const waiters = [...this.commandAckWaiters].filter((waiter) => waiter.command === message.command)
+    if (waiters.length === 0) {
+      return
+    }
+
+    waiters.forEach((waiter) => {
+      clearTimeout(waiter.timer)
+      this.commandAckWaiters.delete(waiter)
+      if (message.result === MAV_RESULT.ACCEPTED || message.result === MAV_RESULT.IN_PROGRESS) {
+        waiter.resolve(message)
+        return
+      }
+
+      waiter.reject(new Error(`Autopilot rejected ${mavCommandLabel(message.command)} (${mavResultLabel(message.result)}).`))
+    })
+  }
+
+  private resolveParameterValueWaiters(parameter: ParameterState): void {
+    const waiters = [...this.parameterValueWaiters].filter(
+      (waiter) =>
+        waiter.paramId === parameter.id &&
+        approximatelyEqualParameterValue(parameter.value, waiter.expectedValue, waiter.tolerance)
+    )
+
+    waiters.forEach((waiter) => {
+      clearTimeout(waiter.timer)
+      this.parameterValueWaiters.delete(waiter)
+      waiter.resolve(parameter)
+    })
+  }
+
+  private rejectParameterValueWaiters(error: Error): void {
+    this.parameterValueWaiters.forEach((waiter) => {
+      clearTimeout(waiter.timer)
+      waiter.reject(error)
+    })
+    this.parameterValueWaiters.clear()
+  }
+
+  private assertParameterWriteAllowed(): void {
+    if (this.connection.kind !== 'connected') {
+      throw new Error('Parameter writes require an active vehicle connection.')
+    }
+    if (!this.vehicle) {
+      throw new Error('Parameter writes require an identified vehicle heartbeat.')
+    }
+    if (this.parameterSync.status !== 'complete') {
+      throw new Error('Parameter writes require a completed parameter sync.')
+    }
+    if (this.vehicle.armed) {
+      throw new Error('Parameter writes are blocked while the vehicle is armed.')
+    }
+    if (hasActiveGuidedAction(this.guidedActions) || this.motorTest.status === 'requested' || this.motorTest.status === 'running') {
+      throw new Error('Parameter writes are blocked while another guided action or motor test is active.')
+    }
+  }
+
+  private clearMotorTestTimer(): void {
+    if (this.motorTestTimer) {
+      clearTimeout(this.motorTestTimer)
+      this.motorTestTimer = undefined
+    }
+  }
+
+  private scheduleMotorTestCompletion(): void {
+    this.clearMotorTestTimer()
+    const durationMs = Math.max((this.motorTest.durationSeconds ?? 0) * 1000, 0)
+    this.motorTestTimer = setTimeout(() => {
+      if (this.motorTest.status !== 'running') {
+        return
+      }
+
+      const selectedOutputLabel =
+        this.motorTest.selectedOutputChannel !== undefined
+          ? `OUT${this.motorTest.selectedOutputChannel}${this.motorTest.selectedMotorNumber !== undefined ? ` / M${this.motorTest.selectedMotorNumber}` : ''}`
+          : 'the selected output'
+      this.motorTest = {
+        ...this.motorTest,
+        status: 'succeeded',
+        summary: `Motor test completed on ${selectedOutputLabel}.`,
+        updatedAtMs: Date.now(),
+        completedAtMs: Date.now()
+      }
+      this.appendStatusEntry('info', `Motor test window elapsed for ${selectedOutputLabel}.`)
+      this.emit()
+      this.motorTestTimer = undefined
+    }, durationMs + MOTOR_TEST_COMPLETION_BUFFER_MS)
   }
 
   private async performCommandGuidedAction(
@@ -783,6 +1131,14 @@ function createIdleLiveVerification(): LiveVerificationState {
   }
 }
 
+function createIdleMotorTestState(): MotorTestState {
+  return {
+    status: 'idle',
+    summary: 'No motor test has been requested.',
+    instructions: ['Motor tests remain disabled until the vehicle is connected, synced, disarmed, and explicitly acknowledged as a props-off bench session.']
+  }
+}
+
 function createIdleGuidedActions(): Record<GuidedActionId, GuidedActionState> {
   return {
     'request-parameters': createIdleGuidedAction('request-parameters'),
@@ -826,6 +1182,29 @@ function cloneLiveVerification(liveVerification: LiveVerificationState): LiveVer
       ...liveVerification.batteryTelemetry
     }
   }
+}
+
+function cloneMotorTestState(motorTest: MotorTestState): MotorTestState {
+  return {
+    ...motorTest,
+    instructions: [...motorTest.instructions]
+  }
+}
+
+function hasActiveGuidedAction(guidedActions: Record<GuidedActionId, GuidedActionState>): boolean {
+  return GUIDED_ACTION_IDS.some((actionId) => {
+    const status = guidedActions[actionId].status
+    return status === 'requested' || status === 'running'
+  })
+}
+
+function approximatelyEqualParameterValue(left: number, right: number, tolerance = DEFAULT_PARAMETER_WRITE_TOLERANCE): boolean {
+  const relativeTolerance = Math.max(Math.abs(right) * 1e-6, tolerance)
+  return Math.abs(left - right) <= relativeTolerance
+}
+
+function formatParameterValueForLog(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(6).replace(/\.?0+$/, '')
 }
 
 function idleSummaryForAction(actionId: GuidedActionId): string {
@@ -1043,6 +1422,21 @@ function mavResultLabel(result: number): string {
       return 'IN_PROGRESS'
     default:
       return `UNKNOWN(${result})`
+  }
+}
+
+function mavCommandLabel(command: number): string {
+  switch (command) {
+    case MAV_CMD.PREFLIGHT_CALIBRATION:
+      return 'PREFLIGHT_CALIBRATION'
+    case MAV_CMD.PREFLIGHT_REBOOT_SHUTDOWN:
+      return 'PREFLIGHT_REBOOT_SHUTDOWN'
+    case MAV_CMD.SET_MESSAGE_INTERVAL:
+      return 'SET_MESSAGE_INTERVAL'
+    case MAV_CMD.DO_MOTOR_TEST:
+      return 'DO_MOTOR_TEST'
+    default:
+      return `COMMAND(${command})`
   }
 }
 

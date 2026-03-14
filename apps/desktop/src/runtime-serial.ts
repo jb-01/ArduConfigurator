@@ -4,13 +4,16 @@ import {
   advanceRcRangeExerciseState,
   createModeSwitchExerciseState,
   createRcRangeExerciseState,
+  deriveOutputMappingSummary,
   deriveModeSwitchEstimate,
   deriveRcAxisObservations,
+  evaluateMotorTestEligibility,
   failModeSwitchExerciseState,
   failRcRangeExerciseState,
   formatModeSlotLabel,
   formatRcAxisLabel,
   type ConfiguratorSnapshot,
+  type MotorTestRequest,
   type RcAxisId,
   type SetupStatus,
 } from '@arduconfig/ardupilot-core'
@@ -36,8 +39,18 @@ interface RuntimeSerialOptions {
   guidedAction?: GuidedActionId
   executeGuidedAction: boolean
   benchSession: boolean
+  executeMotorTest: boolean
+  propsRemoved: boolean
   readOnlyExercise?: ReadOnlyExerciseKind
   exerciseTimeoutMs: number
+  motorTestOutput?: number
+  motorTestThrottlePercent: number
+  motorTestDurationSeconds: number
+  validateParameterId?: string
+  validateParameterValue?: number
+  executeParameterValidation: boolean
+  restoreAfterValidation: boolean
+  parameterWriteVerifyTimeoutMs: number
 }
 
 interface GuidedActionDecision {
@@ -56,7 +69,14 @@ const defaults: RuntimeSerialOptions = {
   sessionProfile: 'full-power',
   executeGuidedAction: false,
   benchSession: false,
-  exerciseTimeoutMs: 15000
+  executeMotorTest: false,
+  propsRemoved: false,
+  exerciseTimeoutMs: 15000,
+  motorTestThrottlePercent: 7,
+  motorTestDurationSeconds: 1,
+  executeParameterValidation: false,
+  restoreAfterValidation: true,
+  parameterWriteVerifyTimeoutMs: 3000
 }
 
 async function main(): Promise<void> {
@@ -112,6 +132,9 @@ async function main(): Promise<void> {
       latestSnapshot = await runReadOnlyExercise(runtime, latestSnapshot, options)
     }
 
+    latestSnapshot = await maybeRunMotorTest(runtime, latestSnapshot, options)
+    latestSnapshot = await maybeValidateParameterWrite(runtime, latestSnapshot, options)
+
     renderSnapshot(latestSnapshot, options.snapshot)
 
     if (options.holdOpenMs > 0) {
@@ -146,7 +169,26 @@ function parseArgs(argv: string[]): RuntimeSerialOptions {
 
     if (argument === '--bench-session') {
       options.benchSession = true
-      options.sessionProfile = 'usb-bench'
+      continue
+    }
+
+    if (argument === '--execute-motor-test') {
+      options.executeMotorTest = true
+      continue
+    }
+
+    if (argument === '--props-removed') {
+      options.propsRemoved = true
+      continue
+    }
+
+    if (argument === '--execute-parameter-validation') {
+      options.executeParameterValidation = true
+      continue
+    }
+
+    if (argument === '--leave-validated-value') {
+      options.restoreAfterValidation = false
       continue
     }
 
@@ -197,6 +239,24 @@ function parseArgs(argv: string[]): RuntimeSerialOptions {
         break
       case 'exercise-timeout-ms':
         options.exerciseTimeoutMs = Number(rawValue)
+        break
+      case 'motor-test-output':
+        options.motorTestOutput = Number(rawValue)
+        break
+      case 'motor-test-throttle-percent':
+        options.motorTestThrottlePercent = Number(rawValue)
+        break
+      case 'motor-test-duration-s':
+        options.motorTestDurationSeconds = Number(rawValue)
+        break
+      case 'validate-parameter-id':
+        options.validateParameterId = rawValue
+        break
+      case 'validate-parameter-value':
+        options.validateParameterValue = Number(rawValue)
+        break
+      case 'parameter-write-verify-timeout-ms':
+        options.parameterWriteVerifyTimeoutMs = Number(rawValue)
         break
       default:
         break
@@ -404,6 +464,25 @@ function renderSnapshot(snapshot: ConfiguratorSnapshot, format: SnapshotFormat):
       `    - ${axis.label}: CH${axis.channelNumber} ${axis.pwm !== undefined ? `${axis.pwm} us` : 'no data'} low=${axis.lowDetected ? 'y' : 'n'} high=${axis.highDetected ? 'y' : 'n'}${axis.axisId === 'throttle' ? '' : ` center=${axis.centeredDetected ? 'y' : 'n'}`}`
     )
   })
+  const outputMapping = deriveOutputMappingSummary(snapshot)
+  console.log(
+    `  airframe: ${outputMapping.airframe.frameClassLabel} / ${outputMapping.airframe.frameTypeLabel}`
+  )
+  console.log(
+    `  outputs: motors=${outputMapping.motorOutputs.length}${outputMapping.airframe.expectedMotorCount !== undefined ? `/${outputMapping.airframe.expectedMotorCount}` : ''} aux=${outputMapping.configuredAuxOutputs.length} disabled=${outputMapping.disabledOutputs.length}`
+  )
+  outputMapping.motorOutputs.slice(0, 8).forEach((output) => {
+    console.log(`    - OUT${output.channelNumber}: ${output.functionLabel}`)
+  })
+  outputMapping.configuredAuxOutputs.slice(0, 4).forEach((output) => {
+    console.log(`    - OUT${output.channelNumber}: ${output.functionLabel}`)
+  })
+  outputMapping.notes.slice(0, 2).forEach((note) => {
+    console.log(`    note: ${note}`)
+  })
+  if (snapshot.motorTest.status !== 'idle') {
+    console.log(`  motor test: ${snapshot.motorTest.status} :: ${snapshot.motorTest.summary}`)
+  }
   console.log(
     `  parameters: ${snapshot.parameterStats.downloaded}/${snapshot.parameterStats.total} status=${snapshot.parameterStats.status} duplicates=${snapshot.parameterStats.duplicateFrames}`
   )
@@ -489,6 +568,13 @@ function logSnapshotDelta(
     seenStatusKeys.add(key)
     console.log(`[runtime] statustext ${entry.severity}: ${entry.text}`)
   })
+
+  if (
+    snapshot.motorTest.status !== previousSnapshot?.motorTest.status ||
+    snapshot.motorTest.summary !== previousSnapshot?.motorTest.summary
+  ) {
+    console.log(`[runtime] motor-test status=${snapshot.motorTest.status} summary="${snapshot.motorTest.summary}"`)
+  }
 }
 
 function sleep(durationMs: number): Promise<void> {
@@ -511,6 +597,106 @@ async function runReadOnlyExercise(
   }
 
   return snapshot
+}
+
+async function maybeRunMotorTest(
+  runtime: ArduPilotConfiguratorRuntime,
+  snapshot: ConfiguratorSnapshot,
+  options: RuntimeSerialOptions
+): Promise<ConfiguratorSnapshot> {
+  if (options.motorTestOutput === undefined) {
+    return snapshot
+  }
+
+  const request: MotorTestRequest = {
+    outputChannel: options.motorTestOutput,
+    throttlePercent: options.motorTestThrottlePercent,
+    durationSeconds: options.motorTestDurationSeconds
+  }
+  const eligibility = evaluateMotorTestEligibility(snapshot, request)
+  const reasons = [...eligibility.reasons]
+
+  if (options.executeMotorTest && !options.benchSession) {
+    reasons.push('Pass --bench-session to acknowledge this is an intentional props-off bench session.')
+  }
+  if (options.executeMotorTest && !options.propsRemoved) {
+    reasons.push('Pass --props-removed to confirm all propellers are off the vehicle.')
+  }
+
+  const mode = options.executeMotorTest ? 'execute' : 'dry-run'
+  console.log(
+    `[runtime] motor test ${mode}: OUT${request.outputChannel} throttle=${request.throttlePercent}% duration=${request.durationSeconds}s`
+  )
+  reasons.forEach((reason) => {
+    console.log(`[runtime] motor test note: ${reason}`)
+  })
+
+  if (!options.executeMotorTest) {
+    console.log('[runtime] no MAVLink command sent. Re-run with --execute-motor-test to actually send it.')
+    return snapshot
+  }
+
+  if (!eligibility.allowed || !options.benchSession || !options.propsRemoved) {
+    throw new Error('Motor test is blocked by runtime safeguards.')
+  }
+
+  await runtime.runMotorTest(request)
+  await sleep(request.durationSeconds * 1000 + 500)
+  return runtime.getSnapshot()
+}
+
+async function maybeValidateParameterWrite(
+  runtime: ArduPilotConfiguratorRuntime,
+  snapshot: ConfiguratorSnapshot,
+  options: RuntimeSerialOptions
+): Promise<ConfiguratorSnapshot> {
+  if (!options.validateParameterId || options.validateParameterValue === undefined) {
+    return snapshot
+  }
+
+  const parameter = snapshot.parameters.find((candidate) => candidate.id === options.validateParameterId)
+  const mode = options.executeParameterValidation ? 'execute' : 'dry-run'
+  console.log(
+    `[runtime] parameter validation ${mode}: ${options.validateParameterId} -> ${options.validateParameterValue}${
+      options.restoreAfterValidation ? ' (restore original value afterward)' : ''
+    }`
+  )
+
+  if (!parameter) {
+    throw new Error(`Parameter ${options.validateParameterId} is not present in the current synced snapshot.`)
+  }
+
+  console.log(`[runtime] parameter validation current: ${parameter.id}=${parameter.value}`)
+
+  if (!options.executeParameterValidation) {
+    console.log('[runtime] no MAVLink parameter write sent. Re-run with --execute-parameter-validation to actually write it.')
+    return snapshot
+  }
+
+  if (!options.benchSession) {
+    throw new Error('Pass --bench-session to acknowledge this is an intentional disarmed bench session before validating a real parameter write.')
+  }
+
+  if (Object.is(parameter.value, options.validateParameterValue)) {
+    console.log('[runtime] parameter validation note: requested value already matches the live controller value.')
+    return snapshot
+  }
+
+  const writeResult = await runtime.setParameter(parameter.id, options.validateParameterValue, {
+    verifyTimeoutMs: options.parameterWriteVerifyTimeoutMs
+  })
+  console.log(
+    `[runtime] parameter validation verified: ${writeResult.paramId}=${writeResult.confirmedValue} (previous=${writeResult.previousValue ?? 'unknown'})`
+  )
+
+  if (options.restoreAfterValidation && writeResult.previousValue !== undefined) {
+    const rollbackResult = await runtime.setParameter(parameter.id, writeResult.previousValue, {
+      verifyTimeoutMs: options.parameterWriteVerifyTimeoutMs
+    })
+    console.log(`[runtime] parameter validation restored: ${rollbackResult.paramId}=${rollbackResult.confirmedValue}`)
+  }
+
+  return runtime.getSnapshot()
 }
 
 async function runModeSwitchExercise(

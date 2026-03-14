@@ -1,28 +1,48 @@
+import type { ChangeEvent } from 'react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   ArduPilotConfiguratorRuntime,
+  MAX_MOTOR_TEST_DURATION_SECONDS,
+  MAX_MOTOR_TEST_THROTTLE_PERCENT,
   advanceModeSwitchExerciseState,
   advanceRcRangeExerciseState,
+  createParameterBackup,
   createIdleModeSwitchExerciseState,
   createIdleRcRangeExerciseState,
   createModeSwitchExerciseState,
   createRcRangeExerciseState,
+  deriveDraftValuesFromParameterBackup,
+  deriveArducopterAirframe,
+  deriveParameterDraftEntries,
   deriveModeAssignments,
   deriveModeSwitchEstimate,
+  deriveOutputMappingSummary,
   deriveRcAxisObservations,
+  evaluateMotorTestEligibility,
   failModeSwitchExerciseState,
   failRcRangeExerciseState,
   formatModeSlotLabel,
   formatRcAxisLabel,
+  groupParameterDraftEntries,
+  parseParameterBackup,
+  serializeParameterBackup,
+  summarizeParameterDraftEntries,
   type ConfiguratorSnapshot,
+  type MotorTestRequest,
+  type ParameterDraftEntry,
+  type ParameterDraftStatus,
+  type ParameterState,
   type RcRangeExerciseState,
+  type ServoOutputKind,
 } from '@arduconfig/ardupilot-core'
 import {
   arducopterMetadata,
   formatArducopterBatteryFailsafeAction,
   formatArducopterFlightMode,
   formatArducopterThrottleFailsafe,
+  type ParameterDefinition,
+  type ParameterValueOption,
   type SessionProfile,
 } from '@arduconfig/param-metadata'
 import { MavlinkSession, MavlinkV2Codec, createArduCopterMockScenario } from '@arduconfig/protocol-mavlink'
@@ -66,6 +86,17 @@ interface ModeSwitchExerciseState {
   startedAtMs?: number
   completedAtMs?: number
   failureReason?: string
+}
+
+interface ParameterNotice {
+  tone: StatusTone
+  text: string
+}
+
+interface ParameterFollowUp {
+  requiresReboot: boolean
+  changedCount: number
+  text: string
 }
 
 function createRuntime(mode: TransportMode): ArduPilotConfiguratorRuntime {
@@ -166,7 +197,11 @@ function formatBatteryTelemetry(snapshot: ConfiguratorSnapshot): string {
 }
 
 function hasRunningGuidedAction(snapshot: ConfiguratorSnapshot): boolean {
-  return Object.values(snapshot.guidedActions).some((state) => state.status === 'requested' || state.status === 'running')
+  return (
+    Object.values(snapshot.guidedActions).some((state) => state.status === 'requested' || state.status === 'running') ||
+    snapshot.motorTest.status === 'requested' ||
+    snapshot.motorTest.status === 'running'
+  )
 }
 
 function canRunGuidedAction(snapshot: ConfiguratorSnapshot, actionId: keyof typeof actionLabels): boolean {
@@ -181,6 +216,10 @@ function canRunGuidedAction(snapshot: ConfiguratorSnapshot, actionId: keyof type
   )
 
   if (hasBlockingAction || currentAction.status === 'requested' || currentAction.status === 'running') {
+    return false
+  }
+
+  if (snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running') {
     return false
   }
 
@@ -291,6 +330,72 @@ function toneForModeSwitchExercise(status: ModeSwitchExerciseStatus): StatusTone
   }
 }
 
+function toneForMotorTestStatus(status: ConfiguratorSnapshot['motorTest']['status']): StatusTone {
+  switch (status) {
+    case 'succeeded':
+      return 'success'
+    case 'failed':
+      return 'danger'
+    case 'requested':
+    case 'running':
+      return 'warning'
+    default:
+      return 'neutral'
+  }
+}
+
+function toneForParameterDraftStatus(status: ParameterDraftStatus): StatusTone {
+  switch (status) {
+    case 'staged':
+      return 'warning'
+    case 'invalid':
+      return 'danger'
+    default:
+      return 'neutral'
+  }
+}
+
+function toneForOutputKind(kind: ServoOutputKind): StatusTone {
+  switch (kind) {
+    case 'motor':
+      return 'success'
+    case 'pass-through':
+      return 'warning'
+    default:
+      return 'neutral'
+  }
+}
+
+function outputKindLabel(kind: ServoOutputKind): string {
+  switch (kind) {
+    case 'motor':
+      return 'Motor'
+    case 'pass-through':
+      return 'RC pass-through'
+    case 'peripheral':
+      return 'Peripheral'
+    case 'unused':
+      return 'Disabled'
+    default:
+      return 'Other'
+  }
+}
+
+function describeOutputAssignment(kind: ServoOutputKind, motorNumber: number | undefined): string {
+  switch (kind) {
+    case 'motor':
+      return motorNumber === undefined ? 'Primary motor output.' : `Assigned as motor ${motorNumber}.`
+    case 'pass-through':
+      return 'Mirrors an incoming RC channel rather than driving an autonomous output function.'
+    case 'peripheral':
+      return 'Mapped to a non-motor peripheral, actuator, or accessory function.'
+    case 'unused':
+      return 'Currently disabled.'
+    default:
+      return 'Configured with a function outside the curated labels used by this setup surface.'
+  }
+}
+
 function batteryHealthTone(snapshot: ConfiguratorSnapshot): StatusTone {
   const { batteryTelemetry } = snapshot.liveVerification
   if (!batteryTelemetry.verified) {
@@ -345,6 +450,90 @@ function formatRemaining(value: number | undefined): string {
   return value === undefined ? 'Unknown' : `${value}%`
 }
 
+function formatParameterValue(value: number | undefined, unit: string | undefined = undefined): string {
+  if (value === undefined) {
+    return 'Unknown'
+  }
+
+  return unit ? `${value} ${unit}` : String(value)
+}
+
+function findParameterOption(definition: ParameterDefinition | undefined, value: number | undefined): ParameterValueOption | undefined {
+  if (definition === undefined || value === undefined) {
+    return undefined
+  }
+
+  return definition.options?.find((option) => Object.is(option.value, value))
+}
+
+function formatParameterDisplayValue(parameter: ParameterState | undefined, value: number | undefined): string {
+  if (parameter === undefined) {
+    return formatParameterValue(value)
+  }
+
+  const option = findParameterOption(parameter.definition, value)
+  if (!option) {
+    return formatParameterValue(value, parameter.definition?.unit)
+  }
+
+  const rawValue = value === undefined ? '' : ` (${formatParameterValue(value, parameter.definition?.unit)})`
+  return `${option.label}${rawValue}`
+}
+
+function formatParameterDelta(delta: number | undefined, unit: string | undefined = undefined): string {
+  if (delta === undefined || Object.is(delta, 0)) {
+    return 'no change'
+  }
+
+  const prefix = delta > 0 ? '+' : ''
+  return unit ? `${prefix}${delta} ${unit}` : `${prefix}${delta}`
+}
+
+function canApplyParameterChanges(snapshot: ConfiguratorSnapshot): boolean {
+  return (
+    snapshot.connection.kind === 'connected' &&
+    snapshot.parameterStats.status === 'complete' &&
+    snapshot.vehicle !== undefined &&
+    !snapshot.vehicle.armed &&
+    !hasRunningGuidedAction(snapshot)
+  )
+}
+
+function formatParameterRange(definition: ParameterDefinition | undefined): string {
+  if (definition?.minimum === undefined && definition?.maximum === undefined) {
+    return 'No range metadata yet'
+  }
+
+  const minimum = definition.minimum === undefined ? 'unbounded' : String(definition.minimum)
+  const maximum = definition.maximum === undefined ? 'unbounded' : String(definition.maximum)
+  const unitSuffix = definition.unit ? ` ${definition.unit}` : ''
+  return `${minimum} to ${maximum}${unitSuffix}`
+}
+
+function formatParameterStep(definition: ParameterDefinition | undefined): string {
+  if (definition?.step === undefined) {
+    return 'No step metadata yet'
+  }
+
+  return definition.unit ? `${definition.step} ${definition.unit}` : String(definition.step)
+}
+
+function buildParameterBackupFilename(snapshot: ConfiguratorSnapshot): string {
+  const vehicleLabel = snapshot.vehicle?.vehicle?.toLowerCase() ?? 'vehicle'
+  const dateLabel = new Date().toISOString().replace(/[:]/g, '-').replace(/\..+$/, '')
+  return `arduconfig-${vehicleLabel}-params-${dateLabel}.json`
+}
+
+function downloadTextFile(filename: string, contents: string): void {
+  const blob = new Blob([contents], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
+
 export function App() {
   const [transportMode, setTransportMode] = useState<TransportMode>('demo')
   const [sessionProfile, setSessionProfile] = useState<SessionProfile>('full-power')
@@ -352,27 +541,60 @@ export function App() {
   const [snapshot, setSnapshot] = useState<ConfiguratorSnapshot>(runtime.getSnapshot())
   const [parameterSearch, setParameterSearch] = useState('')
   const [editedValues, setEditedValues] = useState<Record<string, string>>({})
+  const [selectedParameterId, setSelectedParameterId] = useState<string>()
+  const [parameterNotice, setParameterNotice] = useState<ParameterNotice>()
+  const [parameterFollowUp, setParameterFollowUp] = useState<ParameterFollowUp>()
   const [busyAction, setBusyAction] = useState<string>()
   const [modeSwitchActivity, setModeSwitchActivity] = useState<ModeSwitchActivity>()
   const [modeSwitchExercise, setModeSwitchExercise] = useState<ModeSwitchExerciseState>(createIdleModeSwitchExerciseState)
   const [rcRangeExercise, setRcRangeExercise] = useState<RcRangeExerciseState>(createIdleRcRangeExerciseState)
+  const [motorTestOutput, setMotorTestOutput] = useState<number>()
+  const [motorTestThrottlePercent, setMotorTestThrottlePercent] = useState(7)
+  const [motorTestDurationSeconds, setMotorTestDurationSeconds] = useState(1)
+  const [propsRemovedAcknowledged, setPropsRemovedAcknowledged] = useState(false)
+  const [testAreaAcknowledged, setTestAreaAcknowledged] = useState(false)
+  const parameterBackupInputRef = useRef<HTMLInputElement>(null)
   const previousModeSwitchRef = useRef<{ slot?: number; pwm?: number }>({})
   const webSerialSupported = WebSerialTransport.isSupported()
   const parameterSyncWidth = snapshot.parameterStats.progress === null ? 0 : snapshot.parameterStats.progress * 100
   const rcChannelDisplays = buildRcChannelDisplays(snapshot)
+  const airframe = deriveArducopterAirframe(snapshot)
   const modeAssignments = deriveModeAssignments(snapshot)
   const modeSwitchEstimate = deriveModeSwitchEstimate(snapshot)
+  const outputMapping = deriveOutputMappingSummary(snapshot)
   const rcAxisObservations = deriveRcAxisObservations(snapshot)
   const batteryMonitor = readRoundedParameter(snapshot, 'BATT_MONITOR')
   const batteryCapacity = readRoundedParameter(snapshot, 'BATT_CAPACITY')
   const batteryFailsafe = readRoundedParameter(snapshot, 'BATT_FS_LOW_ACT')
   const throttleFailsafe = readRoundedParameter(snapshot, 'FS_THR_ENABLE')
+  const configuredOutputs = [...outputMapping.motorOutputs, ...outputMapping.configuredAuxOutputs].sort(
+    (left, right) => left.channelNumber - right.channelNumber
+  )
+  const visibleDisabledOutputs = outputMapping.disabledOutputs.slice(0, 6)
+  const motorTestRequest: Partial<MotorTestRequest> = {
+    outputChannel: motorTestOutput,
+    throttlePercent: motorTestThrottlePercent,
+    durationSeconds: motorTestDurationSeconds
+  }
+  const motorTestEligibility = evaluateMotorTestEligibility(snapshot, motorTestRequest)
+  const motorTestGuardReasons = [
+    ...motorTestEligibility.reasons,
+    ...(propsRemovedAcknowledged ? [] : ['Confirm that all propellers are removed before enabling a motor test.']),
+    ...(testAreaAcknowledged ? [] : ['Confirm the vehicle is restrained and the test area is clear.'])
+  ]
+  const canRunMotorTest = motorTestGuardReasons.length === 0
+  const selectedMotorTestOutputLabel = motorTestEligibility.selectedOutput
+    ? `OUT${motorTestEligibility.selectedOutput.channelNumber}${
+        motorTestEligibility.selectedOutput.motorNumber !== undefined ? ` / M${motorTestEligibility.selectedOutput.motorNumber}` : ''
+      }`
+    : undefined
   const canRunModeSwitchExercise =
     snapshot.connection.kind === 'connected' &&
     snapshot.liveVerification.rcInput.verified &&
     modeAssignments.length >= 2 &&
     modeSwitchEstimate.channelNumber !== undefined
   const canRunRcRangeExercise = snapshot.connection.kind === 'connected' && snapshot.liveVerification.rcInput.verified
+  const canApplyDraftParameters = canApplyParameterChanges(snapshot)
 
   useEffect(() => {
     setSnapshot(runtime.getSnapshot())
@@ -393,6 +615,10 @@ export function App() {
       setModeSwitchActivity(undefined)
       setModeSwitchExercise(createIdleModeSwitchExerciseState())
       setRcRangeExercise(createIdleRcRangeExerciseState())
+      setPropsRemovedAcknowledged(false)
+      setTestAreaAcknowledged(false)
+      setParameterNotice(undefined)
+      setParameterFollowUp(undefined)
       return
     }
 
@@ -421,6 +647,21 @@ export function App() {
   }, [snapshot.connection.kind, modeSwitchEstimate.estimatedSlot, modeSwitchEstimate.pwm])
 
   useEffect(() => {
+    if (outputMapping.motorOutputs.length === 0) {
+      setMotorTestOutput(undefined)
+      return
+    }
+
+    setMotorTestOutput((current) => {
+      if (current !== undefined && outputMapping.motorOutputs.some((output) => output.channelNumber === current)) {
+        return current
+      }
+
+      return outputMapping.motorOutputs[0]?.channelNumber
+    })
+  }, [outputMapping.motorOutputs])
+
+  useEffect(() => {
     if (modeSwitchExercise.status !== 'running') {
       return
     }
@@ -444,12 +685,60 @@ export function App() {
 
     return parameter.id.toLowerCase().includes(query) || parameter.definition?.label.toLowerCase().includes(query)
   })
+  const parameterDraftEntries = useMemo(
+    () => deriveParameterDraftEntries(snapshot.parameters, editedValues),
+    [editedValues, snapshot.parameters]
+  )
+  const parameterDraftById = useMemo(
+    () => new Map(parameterDraftEntries.map((entry) => [entry.id, entry])),
+    [parameterDraftEntries]
+  )
+  const parameterDraftSummary = useMemo(() => summarizeParameterDraftEntries(parameterDraftEntries), [parameterDraftEntries])
+  const stagedParameterDrafts = useMemo(
+    () => parameterDraftEntries.filter((entry) => entry.status === 'staged'),
+    [parameterDraftEntries]
+  )
+  const invalidParameterDrafts = useMemo(
+    () => parameterDraftEntries.filter((entry) => entry.status === 'invalid'),
+    [parameterDraftEntries]
+  )
+  const stagedParameterGroups = useMemo(
+    () => groupParameterDraftEntries(parameterDraftEntries, ['staged']),
+    [parameterDraftEntries]
+  )
+  const invalidParameterGroups = useMemo(
+    () => groupParameterDraftEntries(parameterDraftEntries, ['invalid']),
+    [parameterDraftEntries]
+  )
+  const rebootRequiredDrafts = useMemo(
+    () => stagedParameterDrafts.filter((draft) => draft.definition?.rebootRequired),
+    [stagedParameterDrafts]
+  )
+  const canApplyAllDraftParameters =
+    canApplyDraftParameters && stagedParameterDrafts.length > 0 && invalidParameterDrafts.length === 0
+  const selectedParameter =
+    filteredParameters.find((parameter) => parameter.id === selectedParameterId) ?? filteredParameters[0]
+  const selectedParameterDraft = selectedParameter ? parameterDraftById.get(selectedParameter.id) : undefined
+  const selectedParameterOption = selectedParameterDraft?.nextValue !== undefined
+    ? findParameterOption(selectedParameter?.definition, selectedParameterDraft.nextValue)
+    : findParameterOption(selectedParameter?.definition, selectedParameter?.value)
   const recentModeSwitchChange = modeSwitchActivity && Date.now() - modeSwitchActivity.changedAtMs < 3000
   const modeSwitchExerciseProgress =
     modeSwitchExercise.targetSlots.length === 0 ? 0 : (modeSwitchExercise.visitedSlots.length / modeSwitchExercise.targetSlots.length) * 100
   const rcRangeExerciseCompletedCount = Object.values(rcRangeExercise.axisProgress).filter((axis) => axis.completed).length
   const rcRangeExerciseProgress =
     rcRangeExercise.targetAxes.length === 0 ? 0 : (rcRangeExerciseCompletedCount / rcRangeExercise.targetAxes.length) * 100
+
+  useEffect(() => {
+    if (filteredParameters.length === 0) {
+      setSelectedParameterId(undefined)
+      return
+    }
+
+    if (!selectedParameterId || !filteredParameters.some((parameter) => parameter.id === selectedParameterId)) {
+      setSelectedParameterId(filteredParameters[0]?.id)
+    }
+  }, [filteredParameters, selectedParameterId])
 
   async function handleConnect(): Promise<void> {
     setBusyAction('connect')
@@ -479,19 +768,163 @@ export function App() {
     }
   }
 
-  async function handleParameterWrite(paramId: string, currentValue: number): Promise<void> {
-    const nextValue = Number(editedValues[paramId] ?? currentValue)
-    if (Number.isNaN(nextValue)) {
+  function handleDiscardParameterDraft(paramId: string): void {
+    setEditedValues((existing) => {
+      if (!(paramId in existing)) {
+        return existing
+      }
+
+      const next = { ...existing }
+      delete next[paramId]
+      return next
+    })
+  }
+
+  function handleDiscardAllParameterDrafts(): void {
+    setEditedValues({})
+    setParameterNotice({
+      tone: 'neutral',
+      text: 'Cleared all local parameter drafts.'
+    })
+  }
+
+  async function handleApplyParameterDraft(draft: ParameterDraftEntry): Promise<void> {
+    if (!canApplyDraftParameters || draft.status !== 'staged' || draft.nextValue === undefined) {
       return
     }
 
-    setBusyAction(`param:${paramId}`)
+    setBusyAction(`param:${draft.id}`)
     try {
-      await runtime.setParameter(paramId, nextValue)
-      setEditedValues((existing) => {
-        const next = { ...existing }
-        delete next[paramId]
-        return next
+      const result = await runtime.setParameter(draft.id, draft.nextValue)
+      handleDiscardParameterDraft(draft.id)
+      const confirmedParameter = snapshot.parameters.find((parameter) => parameter.id === result.paramId)
+      const requiresReboot = Boolean(draft.definition?.rebootRequired)
+      setParameterNotice({
+        tone: 'success',
+        text: `Verified ${result.paramId} = ${formatParameterDisplayValue(confirmedParameter, result.confirmedValue)}.`
+      })
+      setParameterFollowUp({
+        requiresReboot,
+        changedCount: 1,
+        text: requiresReboot
+          ? 'This applied change is marked as reboot-required. Request a reboot, then pull parameters again before continuing guided setup.'
+          : 'Pull parameters again if you want a freshly confirmed post-write snapshot.'
+      })
+    } catch (error) {
+      setParameterNotice({
+        tone: 'danger',
+        text: error instanceof Error ? error.message : 'Parameter write failed.'
+      })
+    } finally {
+      setBusyAction(undefined)
+    }
+  }
+
+  async function handleApplyAllParameterDrafts(): Promise<void> {
+    if (!canApplyAllDraftParameters) {
+      return
+    }
+
+    const appliedParamIds: string[] = []
+    setBusyAction('param:apply-all')
+    try {
+      const applyingRebootRequiredCount = stagedParameterDrafts.filter((draft) => draft.definition?.rebootRequired).length
+      const result = await runtime.setParameters(
+        stagedParameterDrafts
+          .filter((draft) => draft.nextValue !== undefined)
+          .map((draft) => ({
+            paramId: draft.id,
+            paramValue: draft.nextValue as number
+          }))
+      )
+      appliedParamIds.push(...result.applied.map((entry) => entry.paramId))
+      setParameterNotice({
+        tone: 'success',
+        text:
+          result.applied.length === 0
+            ? 'No staged parameter changes needed to be written.'
+            : `Verified ${result.applied.length} staged parameter change(s).`
+      })
+      setParameterFollowUp({
+        requiresReboot: applyingRebootRequiredCount > 0,
+        changedCount: result.applied.length,
+        text:
+          applyingRebootRequiredCount > 0
+            ? `${applyingRebootRequiredCount} applied change(s) are marked as reboot-required. Request a reboot, then refresh parameters before continuing setup.`
+            : 'Refresh parameters after the batch write if you want a clean post-write snapshot.'
+      })
+    } catch (error) {
+      setParameterNotice({
+        tone: 'danger',
+        text: error instanceof Error ? error.message : 'Batch parameter write failed.'
+      })
+    } finally {
+      if (appliedParamIds.length > 0) {
+        setEditedValues((existing) => {
+          const next = { ...existing }
+          appliedParamIds.forEach((paramId) => {
+            delete next[paramId]
+          })
+          return next
+        })
+      }
+
+      setBusyAction(undefined)
+    }
+  }
+
+  function handleExportParameterBackup(): void {
+    const backup = createParameterBackup(snapshot)
+    downloadTextFile(buildParameterBackupFilename(snapshot), serializeParameterBackup(backup))
+    setParameterNotice({
+      tone: 'success',
+      text: `Exported ${backup.parameterCount} parameters to a local backup file.`
+    })
+  }
+
+  function handleOpenParameterBackup(): void {
+    parameterBackupInputRef.current?.click()
+  }
+
+  async function handleImportParameterBackup(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+    const file = event.target.files?.[0]
+    if (!file) {
+      return
+    }
+
+    try {
+      const backup = parseParameterBackup(await file.text())
+      const restore = deriveDraftValuesFromParameterBackup(snapshot.parameters, backup)
+      setEditedValues(restore.draftValues)
+      setParameterFollowUp(undefined)
+      setParameterNotice({
+        tone: restore.changedCount > 0 ? 'warning' : 'neutral',
+        text:
+          restore.changedCount > 0
+            ? `Loaded ${restore.changedCount} differing parameter value(s) from backup.${restore.unknownParameterIds.length > 0 ? ` Ignored ${restore.unknownParameterIds.length} unknown parameter(s).` : ''}`
+            : `Backup matched the current synced values.${restore.unknownParameterIds.length > 0 ? ` Ignored ${restore.unknownParameterIds.length} unknown parameter(s).` : ''}`
+      })
+    } catch (error) {
+      setParameterNotice({
+        tone: 'danger',
+        text: error instanceof Error ? error.message : 'Failed to import parameter backup.'
+      })
+    } finally {
+      event.target.value = ''
+    }
+  }
+
+  async function handleRunMotorTest(): Promise<void> {
+    if (!canRunMotorTest || motorTestOutput === undefined) {
+      return
+    }
+
+    setBusyAction('motor-test')
+    try {
+      await runtime.runMotorTest({
+        outputChannel: motorTestOutput,
+        throttlePercent: motorTestThrottlePercent,
+        durationSeconds: motorTestDurationSeconds
       })
     } finally {
       setBusyAction(undefined)
@@ -961,6 +1394,187 @@ export function App() {
       </section>
 
       <Panel
+        title="Airframe & Outputs"
+        subtitle="Review frame geometry and primary motor/peripheral assignments before any output testing. This surface stays read-only for now."
+      >
+        <div className="telemetry-stack">
+          <div className="telemetry-metric-grid">
+            <article className="telemetry-metric-card">
+              <span>Frame class</span>
+              <strong>{airframe.frameClassLabel}</strong>
+            </article>
+            <article className="telemetry-metric-card">
+              <span>Frame type</span>
+              <strong>{airframe.frameTypeLabel}</strong>
+            </article>
+            <article className="telemetry-metric-card">
+              <span>Expected motors</span>
+              <strong>{airframe.expectedMotorCount ?? 'Specialized'}</strong>
+            </article>
+            <article className="telemetry-metric-card">
+              <span>Mapped motors</span>
+              <strong>
+                {outputMapping.motorOutputs.length}
+                {airframe.expectedMotorCount !== undefined ? ` / ${airframe.expectedMotorCount}` : ''}
+              </strong>
+            </article>
+          </div>
+
+          <div className="config-pills">
+            <span>{outputMapping.configuredAuxOutputs.length} configured non-motor outputs</span>
+            <span>{outputMapping.disabledOutputs.length} disabled outputs in SERVO1-16</span>
+          </div>
+
+          <div className="output-card-grid">
+            {configuredOutputs.length > 0 ? (
+              configuredOutputs.map((output) => (
+                <article key={output.paramId} className={`output-card output-card--${output.kind}`}>
+                  <div className="output-card__header">
+                    <div>
+                      <strong>OUT{output.channelNumber}</strong>
+                      <small>
+                        {output.paramId} = {output.functionValue}
+                      </small>
+                    </div>
+                    <StatusBadge tone={toneForOutputKind(output.kind)}>{outputKindLabel(output.kind)}</StatusBadge>
+                  </div>
+                  <p>{output.functionLabel}</p>
+                  <small>{describeOutputAssignment(output.kind, output.motorNumber)}</small>
+                </article>
+              ))
+            ) : (
+              <div className="output-card output-card--other">
+                <div className="output-card__header">
+                  <div>
+                    <strong>No configured outputs</strong>
+                    <small>Inspecting SERVO1-16</small>
+                  </div>
+                  <StatusBadge tone="warning">Review needed</StatusBadge>
+                </div>
+                <p>No motor or peripheral outputs were detected in the inspected SERVO function range.</p>
+                <small>Pull parameters again or verify that the controller exposes SERVOx_FUNCTION parameters on this target.</small>
+              </div>
+            )}
+          </div>
+
+          <ul className="output-note-list">
+            {outputMapping.notes.map((note) => (
+              <li key={note}>{note}</li>
+            ))}
+          </ul>
+
+          <div className="motor-test-card">
+            <div className="switch-exercise-card__header">
+              <div>
+                <strong>Motor test guardrails</strong>
+                <p>{snapshot.motorTest.summary}</p>
+              </div>
+              <StatusBadge tone={toneForMotorTestStatus(snapshot.motorTest.status)}>{snapshot.motorTest.status}</StatusBadge>
+            </div>
+
+            <div className="motor-test-grid">
+              <label>
+                <span>Output</span>
+                <select
+                  value={motorTestOutput ?? ''}
+                  onChange={(event) => setMotorTestOutput(event.target.value ? Number(event.target.value) : undefined)}
+                  disabled={busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
+                >
+                  <option value="">Select output</option>
+                  {outputMapping.motorOutputs.map((output) => (
+                    <option key={output.paramId} value={output.channelNumber}>
+                      OUT{output.channelNumber}
+                      {output.motorNumber !== undefined ? ` / M${output.motorNumber}` : ''} · {output.functionLabel}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label>
+                <span>Throttle %</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={MAX_MOTOR_TEST_THROTTLE_PERCENT}
+                  step={1}
+                  value={motorTestThrottlePercent}
+                  onChange={(event) => setMotorTestThrottlePercent(Number(event.target.value))}
+                  disabled={busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
+                />
+              </label>
+
+              <label>
+                <span>Duration (s)</span>
+                <input
+                  type="number"
+                  min={0.1}
+                  max={MAX_MOTOR_TEST_DURATION_SECONDS}
+                  step={0.1}
+                  value={motorTestDurationSeconds}
+                  onChange={(event) => setMotorTestDurationSeconds(Number(event.target.value))}
+                  disabled={busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
+                />
+              </label>
+            </div>
+
+            <div className="config-pills">
+              <span>Single output only</span>
+              <span>Board order only</span>
+              <span>Auto-stop after {motorTestDurationSeconds.toFixed(1)}s</span>
+              <span>Throttle capped at {MAX_MOTOR_TEST_THROTTLE_PERCENT}%</span>
+              {selectedMotorTestOutputLabel ? <span>Selected: {selectedMotorTestOutputLabel}</span> : null}
+            </div>
+
+            <div className="motor-test-acknowledgments">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={propsRemovedAcknowledged}
+                  onChange={(event) => setPropsRemovedAcknowledged(event.target.checked)}
+                  disabled={busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
+                />
+                <span>All propellers are removed.</span>
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={testAreaAcknowledged}
+                  onChange={(event) => setTestAreaAcknowledged(event.target.checked)}
+                  disabled={busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
+                />
+                <span>The vehicle is restrained and the test area is clear.</span>
+              </label>
+            </div>
+
+            <ul className="output-note-list">
+              {motorTestGuardReasons.length > 0
+                ? motorTestGuardReasons.map((reason) => <li key={reason}>{reason}</li>)
+                : snapshot.motorTest.instructions.map((instruction) => <li key={instruction}>{instruction}</li>)}
+            </ul>
+
+            <div className="switch-exercise-controls">
+              <button
+                style={buttonStyle('secondary')}
+                onClick={() => void handleRunMotorTest()}
+                disabled={!canRunMotorTest || busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
+              >
+                {busyAction === 'motor-test' ? 'Sending…' : 'Run Motor Test'}
+              </button>
+            </div>
+          </div>
+
+          {visibleDisabledOutputs.length > 0 ? (
+            <p className="telemetry-note">
+              Disabled outputs in view: {visibleDisabledOutputs.map((output) => `OUT${output.channelNumber}`).join(', ')}
+              {outputMapping.disabledOutputs.length > visibleDisabledOutputs.length
+                ? `, plus ${outputMapping.disabledOutputs.length - visibleDisabledOutputs.length} more.`
+                : '.'}
+            </p>
+          ) : null}
+        </div>
+      </Panel>
+
+      <Panel
         title="Guided Setup"
         subtitle="Initial alpha priority: setup and calibration workflows for ArduCopter. Live operator prompts now stay attached to the action that generated them."
       >
@@ -1041,7 +1655,7 @@ export function App() {
         </div>
       </Panel>
 
-      <Panel title="Parameter Editor" subtitle="Secondary priority after guided setup, but already wired into the same runtime.">
+      <Panel title="Parameter Editor" subtitle="Stage changes locally, review the diff, then apply them through the shared runtime.">
         <div className="parameter-toolbar">
           <input
             value={parameterSearch}
@@ -1049,50 +1663,337 @@ export function App() {
             placeholder="Search parameters"
           />
         </div>
+
+        <div className="parameter-review">
+          <input
+            ref={parameterBackupInputRef}
+            className="parameter-backup-input"
+            type="file"
+            accept="application/json,.json"
+            onChange={(event) => void handleImportParameterBackup(event)}
+          />
+          <div className="parameter-review__summary">
+            <div className="parameter-review__stats">
+              <StatusBadge tone={parameterDraftSummary.stagedCount > 0 ? 'warning' : 'neutral'}>
+                {parameterDraftSummary.stagedCount} staged
+              </StatusBadge>
+              <StatusBadge tone={parameterDraftSummary.invalidCount > 0 ? 'danger' : 'neutral'}>
+                {parameterDraftSummary.invalidCount} invalid
+              </StatusBadge>
+              <p className="parameter-review__hint">
+                {parameterDraftSummary.totalEntries === 0
+                  ? 'Edit values below to stage local drafts before writing anything to the controller.'
+                  : parameterDraftSummary.invalidCount > 0
+                    ? 'Fix or discard invalid drafts before applying the full staged set.'
+                    : parameterDraftSummary.stagedCount > 0
+                      ? 'Review the staged diff below, then apply individual rows or the whole set.'
+                      : 'Current drafts match the live controller values and will not write anything.'}
+              </p>
+            </div>
+
+            <div className="button-row">
+              <button style={buttonStyle()} onClick={handleExportParameterBackup} disabled={busyAction !== undefined || snapshot.parameters.length === 0}>
+                Export Backup
+              </button>
+              <button
+                style={buttonStyle()}
+                onClick={handleOpenParameterBackup}
+                disabled={busyAction !== undefined || snapshot.parameters.length === 0}
+              >
+                Import Backup
+              </button>
+              <button
+                style={buttonStyle('primary')}
+                onClick={() => void handleApplyAllParameterDrafts()}
+                disabled={busyAction !== undefined || !canApplyAllDraftParameters}
+              >
+                {busyAction === 'param:apply-all' ? 'Applying…' : `Apply All (${stagedParameterDrafts.length})`}
+              </button>
+              <button
+                style={buttonStyle()}
+                onClick={handleDiscardAllParameterDrafts}
+                disabled={busyAction !== undefined || parameterDraftSummary.totalEntries === 0}
+              >
+                Discard All
+              </button>
+            </div>
+          </div>
+
+          {parameterNotice ? (
+            <div className="parameter-review__notice">
+              <StatusBadge tone={parameterNotice.tone}>{parameterNotice.tone}</StatusBadge>
+              <p>{parameterNotice.text}</p>
+            </div>
+          ) : null}
+
+          {rebootRequiredDrafts.length > 0 ? (
+            <div className="parameter-follow-up parameter-follow-up--warning">
+              <StatusBadge tone="warning">reboot</StatusBadge>
+              <p>
+                {rebootRequiredDrafts.length} staged change(s) are marked as reboot-required if applied. Plan to reboot and refresh the
+                parameter snapshot before continuing setup.
+              </p>
+            </div>
+          ) : null}
+
+          {parameterFollowUp ? (
+            <div className="parameter-follow-up">
+              <StatusBadge tone={parameterFollowUp.requiresReboot ? 'warning' : 'neutral'}>
+                {parameterFollowUp.requiresReboot ? 'follow-up' : 'refresh'}
+              </StatusBadge>
+              <p>{parameterFollowUp.text}</p>
+              <div className="button-row">
+                {parameterFollowUp.requiresReboot ? (
+                  <button
+                    style={buttonStyle()}
+                    onClick={() => void handleGuidedAction('reboot-autopilot')}
+                    disabled={busyAction !== undefined || !canRunGuidedAction(snapshot, 'reboot-autopilot')}
+                  >
+                    Request Reboot
+                  </button>
+                ) : null}
+                <button
+                  style={buttonStyle()}
+                  onClick={() => void handleGuidedAction('request-parameters')}
+                  disabled={busyAction !== undefined || !canRunGuidedAction(snapshot, 'request-parameters')}
+                >
+                  Pull Parameters
+                </button>
+                <button style={buttonStyle()} onClick={() => setParameterFollowUp(undefined)} disabled={busyAction !== undefined}>
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {parameterDraftSummary.stagedCategories.length > 0 ? (
+            <small className="parameter-review__hint">
+              Categories in review: {parameterDraftSummary.stagedCategories.join(', ')}
+            </small>
+          ) : null}
+
+          {stagedParameterGroups.length > 0 ? (
+            <div className="parameter-diff-grid">
+              {stagedParameterGroups.map((group) => (
+                <section key={group.category} className="parameter-diff-group">
+                  <header>
+                    <strong>{group.category}</strong>
+                    <span>{group.entries.length} staged</span>
+                  </header>
+
+                  {group.entries.map((draft) => (
+                    <div key={draft.id} className="parameter-diff-item">
+                      <span>
+                        <strong>{draft.id}</strong>
+                        <small>{draft.label}</small>
+                      </span>
+                      <span className="parameter-diff-values">
+                        {formatParameterValue(draft.currentValue, draft.definition?.unit)} to{' '}
+                        {formatParameterValue(draft.nextValue, draft.definition?.unit)}
+                      </span>
+                      <span className="parameter-diff-delta">{formatParameterDelta(draft.delta, draft.definition?.unit)}</span>
+                    </div>
+                  ))}
+                </section>
+              ))}
+            </div>
+          ) : null}
+
+          {invalidParameterGroups.length > 0 ? (
+            <div className="parameter-diff-grid parameter-diff-grid--invalid">
+              {invalidParameterGroups.map((group) => (
+                <section key={`invalid:${group.category}`} className="parameter-diff-group parameter-diff-group--invalid">
+                  <header>
+                    <strong>{group.category}</strong>
+                    <span>{group.entries.length} invalid</span>
+                  </header>
+
+                  {group.entries.map((draft) => (
+                    <div key={draft.id} className="parameter-diff-item">
+                      <span>
+                        <strong>{draft.id}</strong>
+                        <small>{draft.label}</small>
+                      </span>
+                      <span className="parameter-diff-values">{draft.rawValue || 'Empty draft'}</span>
+                      <span className="parameter-diff-delta">{draft.reason ?? 'Invalid value'}</span>
+                    </div>
+                  ))}
+                </section>
+              ))}
+            </div>
+          ) : null}
+        </div>
+
+        {selectedParameter ? (
+          <div className="parameter-details">
+            <div className="parameter-details__header">
+              <div>
+                <h3>{selectedParameter.definition?.label ?? selectedParameter.id}</h3>
+                <p>{selectedParameter.definition?.description ?? 'Metadata coverage for this parameter is still limited.'}</p>
+              </div>
+              <StatusBadge tone={toneForParameterDraftStatus(selectedParameterDraft?.status ?? 'unchanged')}>
+                {selectedParameterDraft?.status ?? 'unchanged'}
+              </StatusBadge>
+            </div>
+
+            <div className="parameter-details__grid">
+              <div className="parameter-details__metric">
+                <small>Current value</small>
+                <strong>{formatParameterDisplayValue(selectedParameter, selectedParameter.value)}</strong>
+              </div>
+              <div className="parameter-details__metric">
+                <small>Staged value</small>
+                <strong>
+                  {selectedParameterDraft?.nextValue !== undefined
+                    ? formatParameterDisplayValue(selectedParameter, selectedParameterDraft.nextValue)
+                    : 'No staged change'}
+                </strong>
+              </div>
+              <div className="parameter-details__metric">
+                <small>Category</small>
+                <strong>{selectedParameter.definition?.category ?? 'uncategorized'}</strong>
+              </div>
+              <div className="parameter-details__metric">
+                <small>Range</small>
+                <strong>{formatParameterRange(selectedParameter.definition)}</strong>
+              </div>
+              <div className="parameter-details__metric">
+                <small>Step</small>
+                <strong>{formatParameterStep(selectedParameter.definition)}</strong>
+              </div>
+              <div className="parameter-details__metric">
+                <small>Reboot</small>
+                <strong>{selectedParameter.definition?.rebootRequired ? 'Required after change' : 'No reboot note available'}</strong>
+              </div>
+            </div>
+
+            {selectedParameterOption ? (
+              <p className="parameter-details__option">
+                Active enum label: <strong>{selectedParameterOption.label}</strong>
+                {selectedParameterOption.description ? `, ${selectedParameterOption.description}` : ''}
+              </p>
+            ) : null}
+
+            {selectedParameter.definition?.notes && selectedParameter.definition.notes.length > 0 ? (
+              <ul className="notes">
+                {selectedParameter.definition.notes.map((note) => (
+                  <li key={note}>{note}</li>
+                ))}
+              </ul>
+            ) : null}
+
+            {selectedParameter.definition?.options && selectedParameter.definition.options.length > 0 ? (
+              <div className="parameter-option-list">
+                {selectedParameter.definition.options.slice(0, 12).map((option) => (
+                  <span key={`${selectedParameter.id}:${option.value}`}>
+                    {option.value}: {option.label}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="parameter-table">
           <div className="parameter-row parameter-row--header">
             <span>Parameter</span>
             <span>Description</span>
-            <span>Value</span>
-            <span>Write</span>
+            <span>Current</span>
+            <span>Draft</span>
+            <span>Actions</span>
           </div>
-          {filteredParameters.map((parameter) => (
-            <div key={parameter.id} className="parameter-row">
-              <span>
-                <strong>{parameter.id}</strong>
-                <small>{parameter.definition?.category ?? 'uncategorized'}</small>
-              </span>
-              <span>{parameter.definition?.description ?? 'Metadata to be expanded from upstream ArduPilot bundles.'}</span>
-              <span>
-                <input
-                  type="number"
-                  value={editedValues[parameter.id] ?? String(parameter.value)}
-                  onChange={(event) =>
-                    setEditedValues((existing) => ({
-                      ...existing,
-                      [parameter.id]: event.target.value
-                    }))
-                  }
-                />
-              </span>
-              <span>
-                <button
-                  style={buttonStyle()}
-                  onClick={() => void handleParameterWrite(parameter.id, parameter.value)}
-                  disabled={
-                    busyAction !== undefined ||
-                    snapshot.connection.kind !== 'connected' ||
-                    snapshot.parameterStats.status !== 'complete' ||
-                    snapshot.vehicle?.armed === true ||
-                    hasRunningGuidedAction(snapshot)
-                  }
-                >
-                  {busyAction === `param:${parameter.id}` ? 'Writing…' : 'Write'}
-                </button>
-              </span>
-            </div>
-          ))}
+          {filteredParameters.map((parameter) => {
+            const draft = parameterDraftById.get(parameter.id)
+            const rowClassName =
+              draft?.status === 'staged'
+                ? 'parameter-row parameter-row--staged'
+                : draft?.status === 'invalid'
+                  ? 'parameter-row parameter-row--invalid'
+                  : 'parameter-row'
+
+            return (
+              <div
+                key={parameter.id}
+                className={`${rowClassName}${selectedParameter?.id === parameter.id ? ' parameter-row--selected' : ''}`}
+                onClick={() => setSelectedParameterId(parameter.id)}
+              >
+                <span>
+                  <strong>{parameter.id}</strong>
+                  <small>{parameter.definition?.category ?? 'uncategorized'}</small>
+                </span>
+                <span>
+                  {parameter.definition?.description ?? 'Metadata to be expanded from upstream ArduPilot bundles.'}
+                  {parameter.definition?.unit ? <small>Unit: {parameter.definition.unit}</small> : null}
+                </span>
+                <span className="parameter-row__value">
+                  <strong>{formatParameterValue(parameter.value, parameter.definition?.unit)}</strong>
+                  <small>
+                    {draft?.status === 'staged'
+                      ? `Delta ${formatParameterDelta(draft.delta, parameter.definition?.unit)}`
+                      : 'Live controller value'}
+                  </small>
+                </span>
+                <span className="parameter-row__value">
+                  <input
+                    type="number"
+                    value={editedValues[parameter.id] ?? String(parameter.value)}
+                    onChange={(event) =>
+                      setEditedValues((existing) => ({
+                        ...existing,
+                        [parameter.id]: event.target.value
+                      }))
+                    }
+                  />
+                  <small
+                    className={`parameter-status-copy${
+                      draft ? ` parameter-status-copy--${draft.status}` : ' parameter-status-copy--idle'
+                    }`}
+                  >
+                    {draft?.status === 'staged'
+                      ? `Staged ${formatParameterValue(draft.nextValue, parameter.definition?.unit)}`
+                      : draft?.reason ?? 'Edit locally to stage a parameter change.'}
+                  </small>
+                </span>
+                <span>
+                  <div className="parameter-actions">
+                    {draft?.status === 'staged' ? (
+                      <>
+                        <button
+                          style={buttonStyle('primary')}
+                          onClick={() => void handleApplyParameterDraft(draft)}
+                          disabled={busyAction !== undefined || !canApplyDraftParameters}
+                        >
+                          {busyAction === `param:${parameter.id}` ? 'Writing…' : 'Apply'}
+                        </button>
+                        <button
+                          style={buttonStyle()}
+                          onClick={() => handleDiscardParameterDraft(parameter.id)}
+                          disabled={busyAction !== undefined}
+                        >
+                          Discard
+                        </button>
+                      </>
+                    ) : draft ? (
+                      <>
+                        <StatusBadge tone={toneForParameterDraftStatus(draft.status)}>{draft.status}</StatusBadge>
+                        <button
+                          style={buttonStyle()}
+                          onClick={() => handleDiscardParameterDraft(parameter.id)}
+                          disabled={busyAction !== undefined}
+                        >
+                          Clear
+                        </button>
+                      </>
+                    ) : (
+                      <span className="parameter-actions__idle">No local draft</span>
+                    )}
+                  </div>
+                </span>
+              </div>
+            )
+          })}
         </div>
+        {filteredParameters.length === 0 ? <p className="parameter-empty-state">No parameters match the current filter.</p> : null}
       </Panel>
     </main>
   )
