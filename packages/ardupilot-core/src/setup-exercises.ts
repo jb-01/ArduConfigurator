@@ -65,6 +65,15 @@ export interface RcRangeExerciseState {
   failureReason?: string
 }
 
+export type RcAxisChannelMap = Record<RcAxisId, number>
+
+export interface RcMappingCandidate {
+  channelNumber: number
+  deltaUs: number
+  baselinePwm: number
+  livePwm: number
+}
+
 const DEFAULT_MODE_CHANNEL = 5
 const DEFAULT_RC_AXIS_CHANNEL_MAP: Record<RcAxisId, number> = {
   roll: 1,
@@ -77,6 +86,8 @@ const RC_LOW_THRESHOLD = 0.15
 const RC_HIGH_THRESHOLD = 0.85
 const RC_CENTER_TOLERANCE_RATIO = 0.1
 const RC_CENTER_TOLERANCE_US = 45
+const RC_MAPPING_DELTA_THRESHOLD_US = 120
+const RC_MAPPING_DOMINANCE_MARGIN_US = 35
 
 export function deriveModeAssignments(snapshot: ConfiguratorSnapshot): ModeAssignment[] {
   const assignments: ModeAssignment[] = []
@@ -302,6 +313,68 @@ export function deriveRcAxisObservations(snapshot: ConfiguratorSnapshot): RcAxis
   })
 }
 
+export function detectDominantRcChannelChange(
+  channels: number[],
+  baselineChannels: number[],
+  options: {
+    excludedChannelNumbers?: number[]
+    minimumDeltaUs?: number
+    dominanceMarginUs?: number
+  } = {}
+): RcMappingCandidate | undefined {
+  const excluded = new Set(options.excludedChannelNumbers ?? [])
+  const threshold = options.minimumDeltaUs ?? RC_MAPPING_DELTA_THRESHOLD_US
+  const dominanceMargin = options.dominanceMarginUs ?? RC_MAPPING_DOMINANCE_MARGIN_US
+
+  const candidates = channels
+    .map((livePwm, index) => {
+      const channelNumber = index + 1
+      const baselinePwm = baselineChannels[index]
+      if (excluded.has(channelNumber) || !isValidPwm(livePwm) || !isValidPwm(baselinePwm)) {
+        return undefined
+      }
+
+      return {
+        channelNumber,
+        deltaUs: Math.abs(livePwm - baselinePwm),
+        baselinePwm,
+        livePwm
+      }
+    })
+    .filter((candidate): candidate is RcMappingCandidate => candidate !== undefined)
+    .sort((left, right) => right.deltaUs - left.deltaUs)
+
+  const strongest = candidates[0]
+  if (!strongest || strongest.deltaUs < threshold) {
+    return undefined
+  }
+
+  const nextStrongest = candidates[1]
+  if (nextStrongest && strongest.deltaUs - nextStrongest.deltaUs < dominanceMargin) {
+    return undefined
+  }
+
+  return strongest
+}
+
+export function deriveRcMapDraftValues(
+  detectedChannelMap: Partial<RcAxisChannelMap>,
+  currentChannelMap: RcAxisChannelMap
+): Record<string, string> {
+  const drafts: Record<string, string> = {}
+
+  RC_AXIS_ORDER.forEach((axisId) => {
+    const detectedChannelNumber = detectedChannelMap[axisId]
+    if (detectedChannelNumber === undefined || detectedChannelNumber === currentChannelMap[axisId]) {
+      return
+    }
+
+    drafts[rcMapParamId(axisId)] = String(detectedChannelNumber)
+  })
+
+  return drafts
+}
+
 export function createIdleRcRangeExerciseState(): RcRangeExerciseState {
   return {
     status: 'idle',
@@ -455,7 +528,7 @@ function nextModeSwitchTarget(targetSlots: number[], visitedSlots: number[]): nu
   return targetSlots.find((slot) => !visitedSlots.includes(slot))
 }
 
-function deriveRcAxisChannelMap(snapshot: ConfiguratorSnapshot): Record<RcAxisId, number> {
+export function deriveRcAxisChannelMap(snapshot: ConfiguratorSnapshot): RcAxisChannelMap {
   return {
     roll: readRoundedParameter(snapshot, 'RCMAP_ROLL') ?? DEFAULT_RC_AXIS_CHANNEL_MAP.roll,
     pitch: readRoundedParameter(snapshot, 'RCMAP_PITCH') ?? DEFAULT_RC_AXIS_CHANNEL_MAP.pitch,
@@ -503,4 +576,17 @@ function clamp01(value: number): number {
 
 function isValidPwm(value: number | undefined): value is number {
   return value !== undefined && value !== 0xffff && value >= 800 && value <= 2200
+}
+
+function rcMapParamId(axisId: RcAxisId): string {
+  switch (axisId) {
+    case 'roll':
+      return 'RCMAP_ROLL'
+    case 'pitch':
+      return 'RCMAP_PITCH'
+    case 'throttle':
+      return 'RCMAP_THROTTLE'
+    case 'yaw':
+      return 'RCMAP_YAW'
+  }
 }

@@ -20,6 +20,19 @@ export interface StatusTextEntry {
   text: string
 }
 
+export interface PreArmIssueState {
+  text: string
+  severity: StatusTextEntry['severity']
+  firstSeenAtMs: number
+  lastSeenAtMs: number
+}
+
+export interface PreArmStatusState {
+  healthy: boolean
+  issues: PreArmIssueState[]
+  lastUpdatedAtMs?: number
+}
+
 export interface ParameterState {
   id: string
   value: number
@@ -154,5 +167,6 @@ export interface ConfiguratorSnapshot {
   guidedActions: Record<GuidedActionId, GuidedActionState>
   motorTest: MotorTestState
   liveVerification: LiveVerificationState
+  preArmStatus: PreArmStatusState
   statusTexts: StatusTextEntry[]
 }

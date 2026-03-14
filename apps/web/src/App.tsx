@@ -12,13 +12,17 @@ import {
   createIdleRcRangeExerciseState,
   createModeSwitchExerciseState,
   createRcRangeExerciseState,
+  deriveEscSetupSummary,
   deriveDraftValuesFromParameterBackup,
   deriveArducopterAirframe,
   deriveParameterDraftEntries,
   deriveModeAssignments,
   deriveModeSwitchEstimate,
   deriveOutputMappingSummary,
+  deriveRcAxisChannelMap,
   deriveRcAxisObservations,
+  deriveRcMapDraftValues,
+  detectDominantRcChannelChange,
   evaluateMotorTestEligibility,
   failModeSwitchExerciseState,
   failRcRangeExerciseState,
@@ -43,6 +47,8 @@ import {
   formatArducopterBatteryFailsafeAction,
   formatArducopterFlightMode,
   formatArducopterThrottleFailsafe,
+  normalizeFirmwareMetadata,
+  type AppViewId,
   type ParameterDefinition,
   type ParameterValueOption,
   type SessionProfile,
@@ -61,6 +67,14 @@ const actionLabels = {
 type TransportMode = 'demo' | 'web-serial'
 type StatusTone = 'neutral' | 'success' | 'warning' | 'danger'
 type ModeSwitchExerciseStatus = 'idle' | 'running' | 'passed' | 'failed'
+
+interface AppViewDescriptor {
+  id: AppViewId
+  label: string
+  description: string
+  badge: string
+  tone: StatusTone
+}
 
 interface RcChannelDisplay {
   channelNumber: number
@@ -92,6 +106,7 @@ interface ModeSwitchExerciseState {
 
 type OrientationExerciseStatus = 'idle' | 'running' | 'passed' | 'failed'
 type OrientationExerciseStepId = 'level' | 'pitch-forward' | 'roll-right'
+type RcMappingStatus = 'idle' | 'running' | 'ready' | 'failed'
 type RcCalibrationStatus = 'idle' | 'capturing' | 'ready' | 'failed'
 type MotorVerificationStatus = 'idle' | 'running' | 'passed' | 'failed'
 
@@ -120,6 +135,23 @@ interface RcCalibrationAxisCapture {
 interface RcCalibrationSessionState {
   status: RcCalibrationStatus
   captures: Record<RcAxisId, RcCalibrationAxisCapture>
+  startedAtMs?: number
+  completedAtMs?: number
+  failureReason?: string
+}
+
+interface RcMappingAxisCapture {
+  axisId: RcAxisId
+  label: string
+  detectedChannelNumber?: number
+  deltaUs?: number
+}
+
+interface RcMappingSessionState {
+  status: RcMappingStatus
+  baselineChannels: number[]
+  captures: Record<RcAxisId, RcMappingAxisCapture>
+  currentTargetAxis?: RcAxisId
   startedAtMs?: number
   completedAtMs?: number
   failureReason?: string
@@ -161,7 +193,14 @@ interface SetupConfirmationRecord {
 }
 
 interface SetupFlowActionDescriptor {
-  kind: 'guided' | 'scroll' | 'mode-switch-exercise' | 'rc-range-exercise' | 'confirm-step' | 'clear-confirmation'
+  kind:
+    | 'guided'
+    | 'scroll'
+    | 'mode-switch-exercise'
+    | 'rc-range-exercise'
+    | 'rc-mapping-exercise'
+    | 'confirm-step'
+    | 'clear-confirmation'
   label: string
   tone?: 'primary' | 'secondary'
   disabled?: boolean
@@ -228,20 +267,6 @@ function formatOrientationLabel(value: number | undefined): string {
 
 function formatDegrees(value: number | undefined): string {
   return value === undefined ? 'Unknown' : `${value.toFixed(1)}°`
-}
-
-function extractPreArmIssues(statusTexts: ConfiguratorSnapshot['statusTexts']): string[] {
-  const issues: string[] = []
-  statusTexts.forEach((entry) => {
-    const normalized = entry.text.trim()
-    if (!/prearm/i.test(normalized)) {
-      return
-    }
-    if (!issues.includes(normalized)) {
-      issues.push(normalized)
-    }
-  })
-  return issues
 }
 
 function createIdleOrientationExerciseState(): OrientationExerciseState {
@@ -396,10 +421,80 @@ function createIdleRcCalibrationSessionState(observations: RcAxisObservation[] =
   }
 }
 
+function createIdleRcMappingSessionState(): RcMappingSessionState {
+  return {
+    status: 'idle',
+    baselineChannels: [],
+    captures: Object.fromEntries(
+      RC_CALIBRATION_AXIS_ORDER.map((axisId) => [
+        axisId,
+        {
+          axisId,
+          label: formatRcAxisLabel(axisId)
+        }
+      ])
+    ) as Record<RcAxisId, RcMappingAxisCapture>
+  }
+}
+
+function createRcMappingSessionState(snapshot: ConfiguratorSnapshot): RcMappingSessionState {
+  if (!snapshot.liveVerification.rcInput.verified) {
+    return failRcMappingSessionState(createIdleRcMappingSessionState(), 'Live RC telemetry is not available yet.')
+  }
+
+  return {
+    ...createIdleRcMappingSessionState(),
+    status: 'running',
+    baselineChannels: [...snapshot.liveVerification.rcInput.channels],
+    currentTargetAxis: RC_CALIBRATION_AXIS_ORDER[0],
+    startedAtMs: Date.now()
+  }
+}
+
+function failRcMappingSessionState(current: RcMappingSessionState, reason: string): RcMappingSessionState {
+  return {
+    ...current,
+    status: 'failed',
+    failureReason: reason,
+    completedAtMs: Date.now()
+  }
+}
+
 function rcCalibrationCaptureComplete(capture: RcCalibrationAxisCapture): boolean {
   return capture.axisId === 'throttle'
     ? capture.lowObserved && capture.highObserved
     : capture.lowObserved && capture.highObserved && capture.centeredObserved && capture.trimPwm !== undefined
+}
+
+function escCalibrationPathLabel(path: ReturnType<typeof deriveEscSetupSummary>['calibrationPath']): string {
+  switch (path) {
+    case 'analog-calibration':
+      return 'Analog ESC calibration'
+    case 'digital-protocol':
+      return 'Digital protocol review'
+    default:
+      return 'Manual ESC review'
+  }
+}
+
+function escCalibrationInstructions(escSetup: ReturnType<typeof deriveEscSetupSummary>): string[] {
+  switch (escSetup.calibrationPath) {
+    case 'analog-calibration':
+      return [
+        'Remove props and disconnect USB before running the offline all-at-once ESC calibration flow.',
+        'After calibration, reconnect, review the PWM range, and rerun motor-order verification before first flight.'
+      ]
+    case 'digital-protocol':
+      return [
+        'DShot-style protocols do not use PWM endpoint calibration.',
+        'Review MOT_PWM_TYPE and the spin thresholds, then confirm the digital-protocol setup before flight.'
+      ]
+    default:
+      return [
+        'Review the ESC protocol and motor-range values manually because the current snapshot does not match a known path.',
+        'Only sign off after the protocol, PWM range, and spin thresholds make sense for this build.'
+      ]
+  }
 }
 
 function panelAnchorForSetupSection(sectionId: string): { panelId: string; panelLabel: string } {
@@ -420,6 +515,22 @@ function panelAnchorForSetupSection(sectionId: string): { panelId: string; panel
       return { panelId: 'setup-panel-power', panelLabel: 'Power & Failsafe' }
     default:
       return { panelId: 'setup-panel-guided', panelLabel: 'Guided Setup' }
+  }
+}
+
+function appViewForPanel(panelId: string): AppViewId {
+  switch (panelId) {
+    case 'setup-panel-link':
+    case 'setup-panel-guided':
+      return 'setup'
+    case 'setup-panel-rc':
+      return 'receiver'
+    case 'setup-panel-outputs':
+      return 'outputs'
+    case 'setup-panel-power':
+      return 'power'
+    default:
+      return 'parameters'
   }
 }
 
@@ -883,8 +994,10 @@ function downloadTextFile(filename: string, contents: string): void {
 }
 
 export function App() {
+  const metadataCatalog = useMemo(() => normalizeFirmwareMetadata(arducopterMetadata), [])
   const [transportMode, setTransportMode] = useState<TransportMode>('demo')
   const [sessionProfile, setSessionProfile] = useState<SessionProfile>('full-power')
+  const [activeViewId, setActiveViewId] = useState<AppViewId>('setup')
   const runtime = useMemo(() => createRuntime(transportMode), [transportMode])
   const [snapshot, setSnapshot] = useState<ConfiguratorSnapshot>(runtime.getSnapshot())
   const [parameterSearch, setParameterSearch] = useState('')
@@ -897,6 +1010,7 @@ export function App() {
   const [modeSwitchActivity, setModeSwitchActivity] = useState<ModeSwitchActivity>()
   const [modeSwitchExercise, setModeSwitchExercise] = useState<ModeSwitchExerciseState>(createIdleModeSwitchExerciseState)
   const [rcRangeExercise, setRcRangeExercise] = useState<RcRangeExerciseState>(createIdleRcRangeExerciseState)
+  const [rcMappingSession, setRcMappingSession] = useState<RcMappingSessionState>(createIdleRcMappingSessionState)
   const [rcCalibrationSession, setRcCalibrationSession] = useState<RcCalibrationSessionState>(createIdleRcCalibrationSessionState)
   const [motorTestOutput, setMotorTestOutput] = useState<number>()
   const [motorTestThrottlePercent, setMotorTestThrottlePercent] = useState(7)
@@ -915,13 +1029,15 @@ export function App() {
   const modeAssignments = deriveModeAssignments(snapshot)
   const modeSwitchEstimate = deriveModeSwitchEstimate(snapshot)
   const outputMapping = deriveOutputMappingSummary(snapshot)
+  const escSetup = deriveEscSetupSummary(snapshot)
+  const currentRcAxisChannelMap = deriveRcAxisChannelMap(snapshot)
   const rcAxisObservations = deriveRcAxisObservations(snapshot)
   const batteryMonitor = readRoundedParameter(snapshot, 'BATT_MONITOR')
   const batteryCapacity = readRoundedParameter(snapshot, 'BATT_CAPACITY')
   const batteryFailsafe = readRoundedParameter(snapshot, 'BATT_FS_LOW_ACT')
   const boardOrientation = readRoundedParameter(snapshot, 'AHRS_ORIENTATION')
   const throttleFailsafe = readRoundedParameter(snapshot, 'FS_THR_ENABLE')
-  const activePreArmIssues = useMemo(() => extractPreArmIssues(snapshot.statusTexts), [snapshot.statusTexts])
+  const activePreArmIssues = snapshot.preArmStatus.issues
   const configuredOutputs = [...outputMapping.motorOutputs, ...outputMapping.configuredAuxOutputs].sort(
     (left, right) => left.channelNumber - right.channelNumber
   )
@@ -949,6 +1065,7 @@ export function App() {
     modeAssignments.length >= 2 &&
     modeSwitchEstimate.channelNumber !== undefined
   const canRunRcRangeExercise = snapshot.connection.kind === 'connected' && snapshot.liveVerification.rcInput.verified
+  const canRunRcMappingExercise = snapshot.connection.kind === 'connected' && snapshot.liveVerification.rcInput.verified
   const canRunOrientationExercise = snapshot.connection.kind === 'connected' && snapshot.liveVerification.attitudeTelemetry.verified
   const canCaptureRcCalibration = snapshot.connection.kind === 'connected' && snapshot.liveVerification.rcInput.verified
   const canRunMotorVerification =
@@ -986,6 +1103,7 @@ export function App() {
       setOrientationExercise(createIdleOrientationExerciseState())
       setModeSwitchExercise(createIdleModeSwitchExerciseState())
       setRcRangeExercise(createIdleRcRangeExerciseState())
+      setRcMappingSession(createIdleRcMappingSessionState())
       setRcCalibrationSession(createIdleRcCalibrationSessionState())
       setMotorVerification(createIdleMotorVerificationState())
       setPropsRemovedAcknowledged(false)
@@ -1164,6 +1282,19 @@ export function App() {
   )
   const canApplyAllDraftParameters =
     canApplyDraftParameters && stagedParameterDrafts.length > 0 && invalidParameterDrafts.length === 0
+  const rcMappingCandidate = useMemo(() => {
+    if (rcMappingSession.status !== 'running' || rcMappingSession.currentTargetAxis === undefined) {
+      return undefined
+    }
+
+    const excludedChannelNumbers = Object.values(rcMappingSession.captures)
+      .map((capture) => capture.detectedChannelNumber)
+      .filter((channelNumber): channelNumber is number => channelNumber !== undefined)
+
+    return detectDominantRcChannelChange(snapshot.liveVerification.rcInput.channels, rcMappingSession.baselineChannels, {
+      excludedChannelNumbers
+    })
+  }, [rcMappingSession, snapshot.liveVerification.rcInput.channels])
   const selectedParameter =
     filteredParameters.find((parameter) => parameter.id === selectedParameterId) ?? filteredParameters[0]
   const selectedParameterDraft = selectedParameter ? parameterDraftById.get(selectedParameter.id) : undefined
@@ -1233,6 +1364,20 @@ export function App() {
   }
 
   function scrollToPanel(panelId: string): void {
+    const targetViewId = appViewForPanel(panelId)
+    if (targetViewId !== activeViewId) {
+      setActiveViewId(targetViewId)
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          document.getElementById(panelId)?.scrollIntoView({
+            behavior: 'smooth',
+            block: 'start'
+          })
+        })
+      })
+      return
+    }
+
     document.getElementById(panelId)?.scrollIntoView({
       behavior: 'smooth',
       block: 'start'
@@ -1470,6 +1615,107 @@ export function App() {
     )
   }
 
+  function handleStartRcMappingExercise(): void {
+    if (!canRunRcMappingExercise) {
+      return
+    }
+
+    setRcMappingSession(createRcMappingSessionState(snapshot))
+    clearSetupSectionConfirmation('radio')
+  }
+
+  function handleResetRcMappingExercise(): void {
+    setRcMappingSession(createIdleRcMappingSessionState())
+  }
+
+  function handleConfirmRcMappingCandidate(): void {
+    if (rcMappingSession.status !== 'running' || rcMappingSession.currentTargetAxis === undefined) {
+      return
+    }
+
+    if (!rcMappingCandidate) {
+      setParameterNotice({
+        tone: 'warning',
+        text: `Move the ${formatRcAxisLabel(rcMappingSession.currentTargetAxis)} axis by itself until one receiver channel clearly dominates.`
+      })
+      return
+    }
+
+    setRcMappingSession((current) => {
+      if (current.status !== 'running' || current.currentTargetAxis === undefined) {
+        return current
+      }
+
+      const captures: Record<RcAxisId, RcMappingAxisCapture> = {
+        ...current.captures,
+        [current.currentTargetAxis]: {
+          ...current.captures[current.currentTargetAxis],
+          detectedChannelNumber: rcMappingCandidate.channelNumber,
+          deltaUs: rcMappingCandidate.deltaUs
+        }
+      }
+      const nextTargetAxis = RC_CALIBRATION_AXIS_ORDER.find((axisId) => captures[axisId].detectedChannelNumber === undefined)
+
+      return nextTargetAxis === undefined
+        ? {
+            ...current,
+            status: 'ready',
+            captures,
+            currentTargetAxis: undefined,
+            completedAtMs: Date.now(),
+            failureReason: undefined
+          }
+        : {
+            ...current,
+            captures,
+            currentTargetAxis: nextTargetAxis
+          }
+    })
+    clearSetupSectionConfirmation('radio')
+  }
+
+  function handleFailRcMappingExercise(): void {
+    setRcMappingSession((current) =>
+      current.status === 'running' && current.currentTargetAxis !== undefined
+        ? failRcMappingSessionState(
+            current,
+            `Did not get a clear dominant channel while moving ${formatRcAxisLabel(current.currentTargetAxis)}.`
+          )
+        : current
+    )
+  }
+
+  function handleStageRcMappingDrafts(): void {
+    if (rcMappingSession.status !== 'ready') {
+      return
+    }
+
+    const detectedChannelMap = Object.fromEntries(
+      RC_CALIBRATION_AXIS_ORDER.map((axisId) => [axisId, rcMappingSession.captures[axisId].detectedChannelNumber])
+    ) as Partial<Record<RcAxisId, number>>
+    const nextDrafts = deriveRcMapDraftValues(detectedChannelMap, currentRcAxisChannelMap)
+    const draftIds = Object.keys(nextDrafts)
+
+    if (draftIds.length === 0) {
+      setParameterNotice({
+        tone: 'neutral',
+        text: 'Observed RC mapping already matches the current RCMAP_* values.'
+      })
+      return
+    }
+
+    setEditedValues((current) => ({
+      ...current,
+      ...nextDrafts
+    }))
+    clearSetupSectionConfirmation('radio')
+    setSelectedParameterId(draftIds[0] ?? selectedParameterId)
+    setParameterNotice({
+      tone: 'warning',
+      text: `Staged ${draftIds.length} RCMAP_* change(s). Apply them, reboot, refresh parameters, then rerun RC endpoint capture.`
+    })
+  }
+
   function handleStartRcCalibrationCapture(): void {
     if (!canCaptureRcCalibration) {
       return
@@ -1683,6 +1929,38 @@ export function App() {
           ? ['Check AHRS_ORIENTATION and board mounting, then rerun the orientation exercise.']
           : ['The app will verify level, forward pitch, and right roll against the live ATTITUDE stream.']
 
+  const rcMappingSummary = (() => {
+    if (rcMappingSession.status === 'ready') {
+      return 'Detected one receiver channel for each primary axis and ready to stage RCMAP_* drafts if needed.'
+    }
+    if (rcMappingSession.status === 'failed') {
+      return rcMappingSession.failureReason ?? 'RC mapping exercise failed.'
+    }
+    if (rcMappingSession.status === 'running') {
+      return rcMappingSession.currentTargetAxis === undefined
+        ? 'RC mapping exercise is ready for review.'
+        : `Move ${formatRcAxisLabel(rcMappingSession.currentTargetAxis)} by itself until one channel clearly dominates.`
+    }
+    if (!snapshot.liveVerification.rcInput.verified) {
+      return 'Waiting for live RC telemetry before channel remapping can start.'
+    }
+    return 'Run the RC mapping exercise to detect which receiver channels actually carry roll, pitch, throttle, and yaw.'
+  })()
+
+  const rcMappingInstructions =
+    rcMappingSession.status === 'running'
+      ? [
+          `Current target: ${formatRcAxisLabel(rcMappingSession.currentTargetAxis ?? 'roll')}.`,
+          rcMappingCandidate
+            ? `Current dominant channel: CH${rcMappingCandidate.channelNumber} (${Math.round(rcMappingCandidate.deltaUs)}us delta).`
+            : 'Move only the requested axis until one channel clearly dominates.'
+        ]
+      : rcMappingSession.status === 'ready'
+        ? ['Stage any needed RCMAP_* changes, then reboot and refresh before rerunning endpoint capture.']
+        : rcMappingSession.status === 'failed'
+          ? ['Center the sticks, move only one axis at a time, and rerun the mapping exercise.']
+          : ['The app watches raw RC channel movement directly, independent of the current RCMAP_* parameters.']
+
   const rcCalibrationSummary = (() => {
     if (rcCalibrationSession.status === 'ready') {
       return 'Observed full stick travel and ready-to-stage RC endpoint values.'
@@ -1717,6 +1995,16 @@ export function App() {
     return 'Use guarded single-output motor tests to verify motor order and direction before the first props-on flight.'
   })()
 
+  const escReviewSummary = (() => {
+    if (escSetup.calibrationPath === 'analog-calibration') {
+      return 'This output protocol still needs the offline ESC calibration review before first flight.'
+    }
+    if (escSetup.calibrationPath === 'digital-protocol') {
+      return 'Digital motor outputs do not use PWM endpoint calibration, but the motor range still needs review.'
+    }
+    return 'ESC protocol and motor-range settings need a manual review before first flight.'
+  })()
+
   const setupConfirmationSignatures = useMemo<Record<string, string>>(
     () => ({
       airframe: JSON.stringify({
@@ -1737,6 +2025,12 @@ export function App() {
         })),
         notes: outputMapping.notes
       }),
+      'esc-range': JSON.stringify({
+        calibrationPath: escSetup.calibrationPath,
+        pwmTypeValue: escSetup.pwmTypeValue,
+        notes: escSetup.notes,
+        relevantParameters: escSetup.relevantParameters
+      }),
       accelerometer: JSON.stringify({
         status: snapshot.guidedActions['calibrate-accelerometer'].status,
         completedAtMs: snapshot.guidedActions['calibrate-accelerometer'].completedAtMs
@@ -1746,6 +2040,14 @@ export function App() {
         completedAtMs: snapshot.guidedActions['calibrate-compass'].completedAtMs
       }),
       radio: JSON.stringify({
+        rcMap: currentRcAxisChannelMap,
+        detectedMap:
+          rcMappingSession.status === 'ready'
+            ? RC_CALIBRATION_AXIS_ORDER.map((axisId) => ({
+                axisId,
+                channelNumber: rcMappingSession.captures[axisId].detectedChannelNumber
+              }))
+            : undefined,
         mappings: rcAxisObservations.map((observation) => ({
           axisId: observation.axisId,
           channelNumber: observation.channelNumber
@@ -1766,7 +2068,8 @@ export function App() {
       power: JSON.stringify({
         batteryMonitor,
         batteryCapacity,
-        batteryVerified: snapshot.liveVerification.batteryTelemetry.verified
+        batteryVerified: snapshot.liveVerification.batteryTelemetry.verified,
+        preArmIssues: snapshot.preArmStatus.issues.map((issue) => issue.text)
       })
     }),
     [
@@ -1777,10 +2080,18 @@ export function App() {
       batteryCapacity,
       batteryFailsafe,
       batteryMonitor,
+      currentRcAxisChannelMap,
+      escSetup.calibrationPath,
+      escSetup.notes,
+      escSetup.pwmTypeValue,
+      escSetup.relevantParameters,
       outputMapping.configuredAuxOutputs,
       outputMapping.motorOutputs,
       outputMapping.notes,
       rcAxisObservations,
+      rcMappingSession.captures,
+      rcMappingSession.status,
+      snapshot.preArmStatus.issues,
       snapshot.guidedActions,
       snapshot.liveVerification.batteryTelemetry.verified,
       snapshot.liveVerification.rcInput.verified,
@@ -1797,6 +2108,8 @@ export function App() {
 
     return record
   }
+
+  const escReviewConfirmation = getSetupConfirmationRecord('esc-range')
 
   function confirmSetupSection(sectionId: string): void {
     const signature = setupConfirmationSignatures[sectionId]
@@ -1862,6 +2175,7 @@ export function App() {
   const setupFlowSections = useMemo<SetupFlowSectionDescriptor[]>(() => {
     const airframeConfirmation = getSetupConfirmationRecord('airframe')
     const outputsConfirmation = getSetupConfirmationRecord('outputs')
+    const escRangeConfirmation = getSetupConfirmationRecord('esc-range')
     const accelerometerConfirmation = getSetupConfirmationRecord('accelerometer')
     const compassConfirmation = getSetupConfirmationRecord('compass')
     const radioConfirmation = getSetupConfirmationRecord('radio')
@@ -1995,6 +2309,13 @@ export function App() {
             },
             {
               label:
+                escSetup.calibrationPath === 'analog-calibration'
+                  ? 'ESC calibration and motor-range review confirmed'
+                  : 'Motor protocol and range review confirmed',
+              met: escRangeConfirmation !== undefined
+            },
+            {
+              label:
                 snapshot.sessionProfile === 'usb-bench'
                   ? 'Motor order verification deferred in USB bench sessions'
                   : 'Motor order and direction verification passed',
@@ -2002,11 +2323,14 @@ export function App() {
             }
           ]
           summary = `${outputMapping.motorOutputs.length} mapped motor outputs, ${outputMapping.configuredAuxOutputs.length} configured auxiliary outputs.`
-          detail = outputMapping.notes[0] ?? 'Review the output map before any motor test or props-on activity, then sign off the reviewed mapping.'
+          detail =
+            outputMapping.notes[0]
+            ?? 'Review the output map, verify motor order, then confirm the ESC calibration or motor-range path before any props-on activity.'
           evidence = [
             ...outputMapping.notes.slice(0, 2),
             `Motor verification: ${motorVerification.status}`,
-            `Review: ${outputsConfirmation ? `confirmed at ${formatConfirmationTime(outputsConfirmation.confirmedAtMs)}` : 'pending operator confirmation'}`
+            `Output review: ${outputsConfirmation ? `confirmed at ${formatConfirmationTime(outputsConfirmation.confirmedAtMs)}` : 'pending operator confirmation'}`,
+            `ESC review: ${escRangeConfirmation ? `confirmed at ${formatConfirmationTime(escRangeConfirmation.confirmedAtMs)}` : 'pending operator confirmation'}`
           ].slice(0, 4)
           actions.unshift({
             kind: outputsConfirmation ? 'clear-confirmation' : 'confirm-step',
@@ -2017,6 +2341,18 @@ export function App() {
               outputMapping.motorOutputs.length === 0 ||
               outputMapping.notes.some((note) => note.startsWith('Missing motor assignments:')) ||
               (airframe.expectedMotorCount !== undefined && outputMapping.motorOutputs.length !== airframe.expectedMotorCount)
+          })
+          actions.splice(1, 0, {
+            kind: escRangeConfirmation ? 'clear-confirmation' : 'confirm-step',
+            label:
+              escRangeConfirmation
+                ? 'Clear ESC Review'
+                : escSetup.calibrationPath === 'analog-calibration'
+                  ? 'Confirm ESC Calibration Review'
+                  : 'Confirm ESC Range Review',
+            tone: 'secondary',
+            sectionId: 'esc-range',
+            disabled: outputMapping.motorOutputs.length === 0
           })
           actions.unshift({
             kind: 'scroll',
@@ -2112,12 +2448,16 @@ export function App() {
               met: snapshot.liveVerification.rcInput.verified
             },
             {
+              label: 'RC mapping exercise captured roll, pitch, throttle, and yaw',
+              met: rcMappingSession.status === 'ready'
+            },
+            {
               label: 'Stick range exercise passed',
               met: rcRangeExercise.status === 'passed'
             },
             {
-              label: 'Channel mapping is present for roll, pitch, throttle, and yaw',
-              met: rcAxisObservations.every((observation) => observation.channelNumber >= 1)
+              label: 'RC endpoint capture completed',
+              met: rcCalibrationSession.status === 'ready'
             },
             {
               label: 'Operator reviewed RC mapping and calibration values',
@@ -2125,28 +2465,44 @@ export function App() {
             }
           ]
           summary =
-            rcRangeExercise.status === 'passed'
-              ? 'Stick range exercise passed with live receiver input.'
+            rcMappingSession.status === 'running'
+              ? rcMappingSummary
               : rcRangeExercise.status === 'running'
                 ? rcRangeExerciseSummary
+                : rcCalibrationSession.status === 'capturing'
+                  ? rcCalibrationSummary
+                  : rcRangeExercise.status === 'passed' && rcCalibrationSession.status === 'ready'
+                    ? 'RC mapping, stick range, and endpoint capture are ready for operator review.'
                 : snapshot.liveVerification.rcInput.verified
-                  ? 'Live RC telemetry is present, but the full stick-range exercise still needs to pass.'
-                  : 'Waiting for live RC telemetry before the stick-range exercise can start.'
+                  ? 'Live RC telemetry is present, but the full mapping and calibration flow still needs to complete.'
+                  : 'Waiting for live RC telemetry before the RC mapping flow can start.'
           detail =
-            rcRangeExercise.status === 'failed'
-              ? rcRangeExercise.failureReason ?? 'Stick range exercise failed.'
-              : 'Use the live RC panel to exercise roll, pitch, yaw, and throttle through their expected ranges.'
+            rcMappingSession.status === 'failed'
+              ? rcMappingSession.failureReason ?? 'RC mapping exercise failed.'
+              : rcRangeExercise.status === 'failed'
+                ? rcRangeExercise.failureReason ?? 'Stick range exercise failed.'
+                : rcCalibrationSession.status === 'failed'
+                  ? rcCalibrationSession.failureReason ?? 'RC endpoint capture failed.'
+                  : 'Detect the true roll/pitch/throttle/yaw channels first, then verify stick travel, capture endpoints, and sign off the full radio review.'
           evidence = [
             snapshot.liveVerification.rcInput.verified
               ? `${snapshot.liveVerification.rcInput.channelCount} RC channels live`
               : 'No live RC telemetry yet',
-            `Exercise: ${rcRangeExercise.status}`,
+            `Mapping: ${rcMappingSession.status}`,
+            `Ranges: ${rcRangeExercise.status}`,
+            `Endpoints: ${rcCalibrationSession.status}`,
             `Review: ${radioConfirmation ? `confirmed at ${formatConfirmationTime(radioConfirmation.confirmedAtMs)}` : 'pending operator confirmation'}`
-          ]
+          ].slice(0, 4)
+          actions.unshift({
+            kind: 'rc-mapping-exercise',
+            label: rcMappingSession.status === 'ready' ? 'Run RC Mapping Again' : 'Start RC Mapping',
+            tone: 'primary',
+            disabled: !canRunRcMappingExercise || rcMappingSession.status === 'running'
+          })
           actions.unshift({
             kind: 'rc-range-exercise',
             label: rcRangeExercise.status === 'passed' ? 'Run Stick Exercise Again' : 'Start Stick Exercise',
-            tone: 'primary',
+            tone: 'secondary',
             disabled: !canRunRcRangeExercise || rcRangeExercise.status === 'running'
           })
           actions.splice(1, 0, {
@@ -2154,11 +2510,20 @@ export function App() {
             label: radioConfirmation ? 'Clear RC Review' : 'Confirm RC Review',
             tone: 'secondary',
             sectionId: 'radio',
-            disabled: !snapshot.liveVerification.rcInput.verified
+            disabled:
+              !snapshot.liveVerification.rcInput.verified ||
+              rcMappingSession.status !== 'ready' ||
+              rcRangeExercise.status !== 'passed' ||
+              rcCalibrationSession.status !== 'ready'
           })
           actions.splice(1, 0, {
             kind: 'scroll',
-            label: rcCalibrationSession.status === 'ready' ? 'Stage RC Calibration' : 'Run RC Calibration',
+            label:
+              rcCalibrationSession.status === 'ready'
+                ? 'Stage RC Calibration'
+                : rcMappingSession.status === 'ready'
+                  ? 'Run RC Calibration'
+                  : 'Review RC Mapping',
             panelId: panel.panelId
           })
           break
@@ -2262,8 +2627,8 @@ export function App() {
               met: powerConfirmation !== undefined
             },
             {
-              label: 'No active pre-arm safety issues are present in recent status text',
-              met: activePreArmIssues.length === 0
+              label: 'No active pre-arm safety issues are present',
+              met: snapshot.preArmStatus.healthy
             }
           ]
           summary = snapshot.liveVerification.batteryTelemetry.verified
@@ -2278,7 +2643,7 @@ export function App() {
           evidence = [
             `Battery monitor: ${describeBatteryMonitor(batteryMonitor)}`,
             `Health: ${batteryHealthLabel(snapshot)}`,
-            activePreArmIssues.length > 0 ? `Pre-arm: ${activePreArmIssues.length} issue(s)` : 'Pre-arm: clear',
+            snapshot.preArmStatus.healthy ? 'Pre-arm: clear' : `Pre-arm: ${snapshot.preArmStatus.issues.length} issue(s)`,
             `Review: ${powerConfirmation ? `confirmed at ${formatConfirmationTime(powerConfirmation.confirmedAtMs)}` : 'pending operator confirmation'}`
           ]
           actions.unshift({
@@ -2352,25 +2717,34 @@ export function App() {
     airframe.frameTypeIgnored,
     airframe.frameTypeLabel,
     airframe.frameTypeValue,
-    activePreArmIssues.length,
     batteryCapacity,
     batteryFailsafe,
     batteryMonitor,
     boardOrientation,
     busyAction,
     canRunModeSwitchExercise,
+    canRunRcMappingExercise,
     canRunRcRangeExercise,
+    currentRcAxisChannelMap,
+    escSetup,
     modeAssignments.length,
     modeSwitchEstimate.channelNumber,
     modeSwitchEstimate.estimatedSlot,
     modeSwitchExercise.failureReason,
     modeSwitchExercise.status,
     modeSwitchExerciseSummary,
+    motorVerification.status,
     outputMapping.configuredAuxOutputs.length,
     outputMapping.motorOutputs.length,
     outputMapping.notes,
     parameterFollowUp,
     orientationExercise.status,
+    rcCalibrationSession.failureReason,
+    rcCalibrationSession.status,
+    rcMappingSession.currentTargetAxis,
+    rcMappingSession.failureReason,
+    rcMappingSession.status,
+    rcMappingSummary,
     rcRangeExercise.failureReason,
     rcRangeExercise.status,
     rcRangeExerciseSummary,
@@ -2378,6 +2752,7 @@ export function App() {
     setupConfirmations,
     setupFlowFollowUp,
     snapshot,
+    snapshot.preArmStatus,
     snapshot.liveVerification.attitudeTelemetry.verified,
     snapshot.sessionProfile,
     snapshot.motorTest.status,
@@ -2395,6 +2770,80 @@ export function App() {
   const completedSetupSectionCount = setupFlowSections.filter((section) => section.status === 'complete').length
   const setupFlowProgress = setupFlowSections.length === 0 ? 0 : (completedSetupSectionCount / setupFlowSections.length) * 100
   const guidedSetupComplete = setupFlowSections.length > 0 && completedSetupSectionCount === setupFlowSections.length
+  const appViews = useMemo<AppViewDescriptor[]>(
+    () =>
+      metadataCatalog.appViews.map((view) => {
+        switch (view.id) {
+          case 'setup':
+            return {
+              id: view.id,
+              label: view.label,
+              description: view.description,
+              badge: `${completedSetupSectionCount}/${setupFlowSections.length || 0}`,
+              tone: guidedSetupComplete ? 'success' : 'warning'
+            }
+          case 'receiver':
+            return {
+              id: view.id,
+              label: view.label,
+              description: view.description,
+              badge: snapshot.liveVerification.rcInput.verified ? 'live' : 'pending',
+              tone: snapshot.liveVerification.rcInput.verified ? 'success' : 'warning'
+            }
+          case 'outputs':
+            return {
+              id: view.id,
+              label: view.label,
+              description: view.description,
+              badge: `${outputMapping.motorOutputs.length} motors`,
+              tone: outputMapping.motorOutputs.length > 0 ? 'neutral' : 'warning'
+            }
+          case 'power':
+            return {
+              id: view.id,
+              label: view.label,
+              description: view.description,
+              badge: snapshot.preArmStatus.healthy ? 'clear' : `${snapshot.preArmStatus.issues.length} issues`,
+              tone: snapshot.preArmStatus.healthy ? 'success' : 'warning'
+            }
+          case 'parameters':
+            return {
+              id: view.id,
+              label: view.label,
+              description: view.description,
+              badge: stagedParameterDrafts.length > 0 ? `${stagedParameterDrafts.length} staged` : `${snapshot.parameters.length}`,
+              tone: stagedParameterDrafts.length > 0 ? 'warning' : 'neutral'
+            }
+          default:
+            return {
+              id: view.id,
+              label: view.label,
+              description: view.description,
+              badge: '',
+              tone: 'neutral'
+            }
+        }
+      }),
+    [
+      completedSetupSectionCount,
+      guidedSetupComplete,
+      metadataCatalog.appViews,
+      outputMapping.motorOutputs.length,
+      setupFlowSections.length,
+      snapshot.liveVerification.rcInput.verified,
+      snapshot.parameters.length,
+      snapshot.preArmStatus,
+      stagedParameterDrafts.length
+    ]
+  )
+
+  function formatCategoryLabel(categoryId: string | undefined): string {
+    if (!categoryId) {
+      return 'Uncategorized'
+    }
+
+    return metadataCatalog.categoryById[categoryId]?.label ?? categoryId
+  }
 
   useEffect(() => {
     if (!recommendedSetupSection) {
@@ -2426,6 +2875,10 @@ export function App() {
         return
       case 'rc-range-exercise':
         handleStartRcRangeExercise()
+        scrollToPanel('setup-panel-rc')
+        return
+      case 'rc-mapping-exercise':
+        handleStartRcMappingExercise()
         scrollToPanel('setup-panel-rc')
         return
       case 'confirm-step':
@@ -2461,6 +2914,79 @@ export function App() {
         <StatusBadge tone={toneForConnection(snapshot.connection.kind)}>{snapshot.connection.kind}</StatusBadge>
       </header>
 
+      <div className="workspace-layout">
+        <aside className="workspace-sidebar">
+          <Panel title="Session" subtitle="Always-visible runtime summary for the active vehicle session.">
+            <div className="workspace-sidebar__stack">
+              <div className="button-row">
+                <select
+                  value={transportMode}
+                  onChange={(event) => setTransportMode(event.target.value as TransportMode)}
+                  disabled={busyAction !== undefined || snapshot.connection.kind === 'connected'}
+                >
+                  <option value="demo">Demo transport</option>
+                  <option value="web-serial" disabled={!webSerialSupported}>
+                    Browser serial{webSerialSupported ? '' : ' (unsupported)'}
+                  </option>
+                </select>
+                <select value={sessionProfile} onChange={(event) => setSessionProfile(event.target.value as SessionProfile)}>
+                  <option value="full-power">Full power</option>
+                  <option value="usb-bench">USB bench</option>
+                </select>
+              </div>
+              <div className="button-row">
+                <button
+                  style={buttonStyle('primary')}
+                  onClick={() => void handleConnect()}
+                  disabled={busyAction !== undefined || snapshot.connection.kind === 'connected'}
+                >
+                  Connect
+                </button>
+                <button
+                  style={buttonStyle()}
+                  onClick={() => void handleDisconnect()}
+                  disabled={busyAction !== undefined || snapshot.connection.kind !== 'connected'}
+                >
+                  Disconnect
+                </button>
+              </div>
+              <div className="workspace-sidebar__meta">
+                <strong>{snapshot.vehicle?.vehicle ?? 'Waiting for heartbeat'}</strong>
+                <span>{snapshot.vehicle?.flightMode ?? 'No active mode yet'}</span>
+              </div>
+              <div className="config-pills">
+                <span>{snapshot.connection.kind}</span>
+                <span>{snapshot.sessionProfile === 'usb-bench' ? 'USB bench' : 'Full power'}</span>
+                <span>{snapshot.parameterStats.status === 'complete' ? `${snapshot.parameterStats.downloaded} params` : formatParameterSync(snapshot)}</span>
+                <span>{snapshot.preArmStatus.healthy ? 'Pre-arm clear' : `${snapshot.preArmStatus.issues.length} pre-arm`}</span>
+              </div>
+              <div className="sync-meter" aria-hidden="true">
+                <div className="sync-meter__fill" style={{ width: `${parameterSyncWidth}%` }} />
+              </div>
+            </div>
+          </Panel>
+
+          <nav className="workspace-nav" aria-label="Primary configurator views">
+            {appViews.map((view) => (
+              <button
+                key={view.id}
+                type="button"
+                className={`workspace-nav__item${view.id === activeViewId ? ' is-active' : ''}`}
+                onClick={() => setActiveViewId(view.id)}
+              >
+                <div>
+                  <strong>{view.label}</strong>
+                  <small>{view.description}</small>
+                </div>
+                <StatusBadge tone={view.tone}>{view.badge}</StatusBadge>
+              </button>
+            ))}
+          </nav>
+        </aside>
+
+        <div className="workspace-main">
+      {activeViewId === 'setup' ? (
+      <>
       <section className="grid two-up">
         <div id="setup-panel-link">
           <Panel
@@ -2671,8 +3197,12 @@ export function App() {
           </div>
         </Panel>
       ) : null}
+      </>
+      ) : null}
 
-      <section className="grid two-up">
+      {(activeViewId === 'receiver' || activeViewId === 'power') ? (
+      <section className={`grid ${activeViewId === 'receiver' || activeViewId === 'power' ? 'one-up' : 'two-up'}`}>
+        {activeViewId === 'receiver' ? (
         <div id="setup-panel-rc">
           <Panel
             title="Live RC Inputs"
@@ -2858,6 +3388,104 @@ export function App() {
               </div>
             </div>
 
+            <div className="rc-mapping-card">
+              <div className="switch-exercise-card__header">
+                <div>
+                  <strong>RC channel mapping</strong>
+                  <p>{rcMappingSummary}</p>
+                </div>
+                <StatusBadge tone={toneForModeSwitchExercise(rcMappingSession.status === 'ready' ? 'passed' : rcMappingSession.status === 'running' ? 'running' : rcMappingSession.status === 'failed' ? 'failed' : 'idle')}>
+                  {rcMappingSession.status}
+                </StatusBadge>
+              </div>
+
+              <div className="config-pills">
+                {RC_CALIBRATION_AXIS_ORDER.map((axisId) => {
+                  const capture = rcMappingSession.captures[axisId]
+                  return (
+                    <span
+                      key={axisId}
+                      className={capture.detectedChannelNumber !== undefined ? 'is-complete' : rcMappingSession.currentTargetAxis === axisId ? 'is-target' : undefined}
+                    >
+                      {formatRcAxisLabel(axisId)}: RCMAP CH{currentRcAxisChannelMap[axisId]}
+                      {capture.detectedChannelNumber !== undefined ? ` -> observed CH${capture.detectedChannelNumber}` : ''}
+                    </span>
+                  )
+                })}
+              </div>
+
+              <div className="rc-range-axis-grid">
+                {RC_CALIBRATION_AXIS_ORDER.map((axisId) => {
+                  const capture = rcMappingSession.captures[axisId]
+                  const activeTarget = rcMappingSession.currentTargetAxis === axisId
+                  return (
+                    <article
+                      key={axisId}
+                      className={`rc-range-axis-card${activeTarget ? ' rc-range-axis-card--target' : ''}${capture.detectedChannelNumber !== undefined ? ' rc-range-axis-card--complete' : ''}`}
+                    >
+                      <div className="rc-range-axis-card__header">
+                        <strong>{formatRcAxisLabel(axisId)}</strong>
+                        <span>RCMAP CH{currentRcAxisChannelMap[axisId]}</span>
+                      </div>
+                      <p>
+                        {capture.detectedChannelNumber !== undefined
+                          ? `Observed CH${capture.detectedChannelNumber}${capture.deltaUs !== undefined ? ` (${Math.round(capture.deltaUs)}us delta)` : ''}`
+                          : activeTarget
+                            ? rcMappingCandidate
+                              ? `Current dominant channel CH${rcMappingCandidate.channelNumber} (${Math.round(rcMappingCandidate.deltaUs)}us delta)`
+                              : 'Move only this axis until one channel clearly dominates.'
+                            : 'Not captured yet'}
+                      </p>
+                    </article>
+                  )
+                })}
+              </div>
+
+              <ol className="switch-exercise-instructions">
+                {rcMappingInstructions.map((instruction) => (
+                  <li key={instruction}>{instruction}</li>
+                ))}
+              </ol>
+
+              <div className="switch-exercise-controls">
+                <button
+                  style={buttonStyle('primary')}
+                  onClick={handleStartRcMappingExercise}
+                  disabled={!canRunRcMappingExercise || rcMappingSession.status === 'running'}
+                >
+                  {rcMappingSession.status === 'ready' ? 'Run Again' : 'Start Mapping'}
+                </button>
+                <button
+                  style={buttonStyle('secondary')}
+                  onClick={handleConfirmRcMappingCandidate}
+                  disabled={rcMappingSession.status !== 'running' || rcMappingCandidate === undefined}
+                >
+                  Confirm Detected Channel
+                </button>
+                <button
+                  style={buttonStyle('secondary')}
+                  onClick={handleStageRcMappingDrafts}
+                  disabled={rcMappingSession.status !== 'ready'}
+                >
+                  Stage RCMAP Changes
+                </button>
+                <button
+                  style={buttonStyle()}
+                  onClick={handleResetRcMappingExercise}
+                  disabled={rcMappingSession.status === 'idle'}
+                >
+                  Reset
+                </button>
+                <button
+                  style={buttonStyle('secondary')}
+                  onClick={handleFailRcMappingExercise}
+                  disabled={rcMappingSession.status !== 'running'}
+                >
+                  Mark Failed
+                </button>
+              </div>
+            </div>
+
             <div className="rc-calibration-card">
               <div className="switch-exercise-card__header">
                 <div>
@@ -2972,10 +3600,12 @@ export function App() {
                 </article>
               ))}
             </div>
-          </div>
+            </div>
           </Panel>
         </div>
+        ) : null}
 
+        {activeViewId === 'power' ? (
         <div id="setup-panel-power">
           <Panel
             title="Power & Failsafe"
@@ -3025,8 +3655,8 @@ export function App() {
                   <strong>Pre-arm safety</strong>
                   <p>
                     {activePreArmIssues.length === 0
-                      ? 'No recent pre-arm issues detected in status text.'
-                      : `${activePreArmIssues.length} recent pre-arm issue(s) need to be cleared before first flight.`}
+                      ? 'No active pre-arm issues are present in the shared runtime state.'
+                      : `${activePreArmIssues.length} active pre-arm issue(s) need to be cleared before first flight.`}
                   </p>
                 </div>
                 <StatusBadge tone={activePreArmIssues.length === 0 ? 'success' : 'warning'}>
@@ -3037,7 +3667,7 @@ export function App() {
               {activePreArmIssues.length > 0 ? (
                 <ul className="output-note-list">
                   {activePreArmIssues.map((issue) => (
-                    <li key={issue}>{issue}</li>
+                    <li key={issue.text}>{issue.text}</li>
                   ))}
                 </ul>
               ) : (
@@ -3051,8 +3681,11 @@ export function App() {
           </div>
           </Panel>
         </div>
+        ) : null}
       </section>
+      ) : null}
 
+      {activeViewId === 'outputs' ? (
       <div id="setup-panel-outputs">
         <Panel
           title="Airframe & Outputs"
@@ -3362,6 +3995,59 @@ export function App() {
             </div>
           </div>
 
+          <div className="esc-review-card">
+            <div className="switch-exercise-card__header">
+              <div>
+                <strong>ESC calibration & motor range</strong>
+                <p>{escReviewSummary}</p>
+              </div>
+              <StatusBadge tone={escReviewConfirmation ? 'success' : escSetup.calibrationPath === 'manual-review' ? 'warning' : 'neutral'}>
+                {escReviewConfirmation ? 'confirmed' : escCalibrationPathLabel(escSetup.calibrationPath)}
+              </StatusBadge>
+            </div>
+
+            <div className="telemetry-metric-grid">
+              <article className="telemetry-metric-card">
+                <span>Protocol</span>
+                <strong>{escSetup.pwmTypeLabel}</strong>
+              </article>
+              {escSetup.relevantParameters.map((parameter) => (
+                parameter.value !== undefined ? (
+                  <article key={parameter.id} className="telemetry-metric-card">
+                    <span>{parameter.id}</span>
+                    <strong>{Number.isInteger(parameter.value) ? parameter.value : parameter.value.toFixed(2).replace(/\.?0+$/, '')}</strong>
+                  </article>
+                ) : null
+              ))}
+            </div>
+
+            <ol className="switch-exercise-instructions">
+              {escCalibrationInstructions(escSetup).map((instruction) => (
+                <li key={instruction}>{instruction}</li>
+              ))}
+            </ol>
+
+            <ul className="output-note-list">
+              {escSetup.notes.map((note) => (
+                <li key={note}>{note}</li>
+              ))}
+            </ul>
+
+            <div className="switch-exercise-controls">
+              <button
+                style={buttonStyle(escReviewConfirmation ? 'secondary' : 'primary')}
+                onClick={() => (escReviewConfirmation ? clearSetupSectionConfirmation('esc-range') : confirmSetupSection('esc-range'))}
+                disabled={outputMapping.motorOutputs.length === 0}
+              >
+                {escReviewConfirmation
+                  ? 'Clear ESC Review'
+                  : escSetup.calibrationPath === 'analog-calibration'
+                    ? 'Confirm ESC Calibration Review'
+                    : 'Confirm ESC Range Review'}
+              </button>
+            </div>
+          </div>
+
           {visibleDisabledOutputs.length > 0 ? (
             <p className="telemetry-note">
               Disabled outputs in view: {visibleDisabledOutputs.map((output) => `OUT${output.channelNumber}`).join(', ')}
@@ -3373,7 +4059,9 @@ export function App() {
         </div>
         </Panel>
       </div>
+      ) : null}
 
+      {activeViewId === 'setup' ? (
       <div id="setup-panel-guided">
         <Panel
           title="Guided Setup"
@@ -3456,7 +4144,9 @@ export function App() {
         </div>
         </Panel>
       </div>
+      ) : null}
 
+      {activeViewId === 'parameters' ? (
       <Panel title="Parameter Editor" subtitle="Stage changes locally, review the diff, then apply them through the shared runtime.">
         <div className="parameter-toolbar">
           <input
@@ -3567,7 +4257,7 @@ export function App() {
 
           {parameterDraftSummary.stagedCategories.length > 0 ? (
             <small className="parameter-review__hint">
-              Categories in review: {parameterDraftSummary.stagedCategories.join(', ')}
+              Categories in review: {parameterDraftSummary.stagedCategories.map((categoryId) => formatCategoryLabel(categoryId)).join(', ')}
             </small>
           ) : null}
 
@@ -3576,7 +4266,7 @@ export function App() {
               {stagedParameterGroups.map((group) => (
                 <section key={group.category} className="parameter-diff-group">
                   <header>
-                    <strong>{group.category}</strong>
+                    <strong>{formatCategoryLabel(group.category)}</strong>
                     <span>{group.entries.length} staged</span>
                   </header>
 
@@ -3603,7 +4293,7 @@ export function App() {
               {invalidParameterGroups.map((group) => (
                 <section key={`invalid:${group.category}`} className="parameter-diff-group parameter-diff-group--invalid">
                   <header>
-                    <strong>{group.category}</strong>
+                    <strong>{formatCategoryLabel(group.category)}</strong>
                     <span>{group.entries.length} invalid</span>
                   </header>
 
@@ -3650,7 +4340,7 @@ export function App() {
               </div>
               <div className="parameter-details__metric">
                 <small>Category</small>
-                <strong>{selectedParameter.definition?.category ?? 'uncategorized'}</strong>
+                <strong>{formatCategoryLabel(selectedParameter.definition?.category)}</strong>
               </div>
               <div className="parameter-details__metric">
                 <small>Range</small>
@@ -3718,7 +4408,7 @@ export function App() {
               >
                 <span>
                   <strong>{parameter.id}</strong>
-                  <small>{parameter.definition?.category ?? 'uncategorized'}</small>
+                  <small>{formatCategoryLabel(parameter.definition?.category)}</small>
                 </span>
                 <span>
                   {parameter.definition?.description ?? 'Metadata to be expanded from upstream ArduPilot bundles.'}
@@ -3794,6 +4484,9 @@ export function App() {
         </div>
         {filteredParameters.length === 0 ? <p className="parameter-empty-state">No parameters match the current filter.</p> : null}
       </Panel>
+      ) : null}
+        </div>
+      </div>
     </main>
   )
 }

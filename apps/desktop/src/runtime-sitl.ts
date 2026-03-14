@@ -1,4 +1,9 @@
-import { ArduPilotConfiguratorRuntime, type ConfiguratorSnapshot } from '@arduconfig/ardupilot-core'
+import {
+  ArduPilotConfiguratorRuntime,
+  deriveEscSetupSummary,
+  deriveRcAxisChannelMap,
+  type ConfiguratorSnapshot
+} from '@arduconfig/ardupilot-core'
 import { arducopterMetadata } from '@arduconfig/param-metadata'
 import { MavlinkSession, MavlinkV2Codec } from '@arduconfig/protocol-mavlink'
 import {
@@ -338,6 +343,11 @@ function renderSnapshot(snapshot: ConfiguratorSnapshot, format: SnapshotFormat):
         : 'missing'
     }`
   )
+  const rcMap = deriveRcAxisChannelMap(snapshot)
+  console.log(`  rc map: roll=CH${rcMap.roll} pitch=CH${rcMap.pitch} throttle=CH${rcMap.throttle} yaw=CH${rcMap.yaw}`)
+  console.log(`  pre-arm: ${snapshot.preArmStatus.healthy ? 'clear' : `${snapshot.preArmStatus.issues.length} issue(s)`}`)
+  const escSetup = deriveEscSetupSummary(snapshot)
+  console.log(`  esc: ${escSetup.pwmTypeLabel} / ${escSetup.calibrationPath}`)
 }
 
 function sleep(durationMs: number): Promise<void> {

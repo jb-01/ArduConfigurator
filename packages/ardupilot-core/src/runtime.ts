@@ -37,6 +37,8 @@ import type {
   GuidedActionState,
   LiveVerificationState,
   MotorTestRequest,
+  PreArmIssueState,
+  PreArmStatusState,
   ParameterBatchWriteResult,
   MotorTestState,
   ParameterState,
@@ -99,6 +101,7 @@ const DEFAULT_PARAMETER_SYNC_TIMEOUT_MS = 20000
 const DEFAULT_COMMAND_ACK_TIMEOUT_MS = 3000
 const DEFAULT_PARAMETER_WRITE_TIMEOUT_MS = 3000
 const DEFAULT_PARAMETER_WRITE_TOLERANCE = 0.0001
+const PRE_ARM_ISSUE_TTL_MS = 15000
 const MAX_GUIDED_ACTION_STATUS_TEXTS = 5
 const MOTOR_TEST_COMPLETION_BUFFER_MS = 250
 const LIVE_TELEMETRY_INTERVAL_US = 200000
@@ -136,6 +139,7 @@ export class ArduPilotConfiguratorRuntime {
   private readonly commandAckWaiters = new Set<CommandAckWaiter>()
   private readonly parameterValueWaiters = new Set<ParameterValueWaiter>()
   private readonly parameters = new Map<string, ParameterState>()
+  private readonly preArmIssues = new Map<string, PreArmIssueState>()
   private readonly statusTexts: StatusTextEntry[] = []
 
   private connection: TransportStatus
@@ -148,6 +152,7 @@ export class ArduPilotConfiguratorRuntime {
   private totalParameters = 0
   private liveTelemetryRequestsIssued = false
   private motorTestTimer?: ReturnType<typeof setTimeout>
+  private preArmExpiryTimer?: ReturnType<typeof setTimeout>
 
   constructor(
     private readonly session: MavlinkSession,
@@ -181,6 +186,7 @@ export class ArduPilotConfiguratorRuntime {
 
   getSnapshot(): ConfiguratorSnapshot {
     const parameters = [...this.parameters.values()].sort((left, right) => left.id.localeCompare(right.id))
+    const preArmStatus = this.buildPreArmStatus()
 
     return {
       connection: this.connection,
@@ -200,6 +206,7 @@ export class ArduPilotConfiguratorRuntime {
       guidedActions: cloneGuidedActions(this.guidedActions),
       motorTest: cloneMotorTestState(this.motorTest),
       liveVerification: cloneLiveVerification(this.liveVerification),
+      preArmStatus: clonePreArmStatus(preArmStatus),
       statusTexts: [...this.statusTexts]
     }
   }
@@ -546,6 +553,7 @@ export class ArduPilotConfiguratorRuntime {
     this.commandAckWaiters.clear()
     this.rejectParameterValueWaiters(new Error('Runtime destroyed before parameter verification was received.'))
     this.clearMotorTestTimer()
+    this.clearPreArmExpiryTimer()
     this.rejectVehicleWaiters(new Error('Runtime destroyed before vehicle heartbeat was received.'))
     this.rejectParameterSyncWaiters(new Error('Runtime destroyed before parameter sync completed.'))
     this.session.destroy()
@@ -704,11 +712,13 @@ export class ArduPilotConfiguratorRuntime {
   }
 
   private processStatusText(message: StatusTextMessage): void {
+    const severity = severityName(message.severity)
     this.statusTexts.unshift({
-      severity: severityName(message.severity),
+      severity,
       text: message.text
     })
     this.statusTexts.splice(12)
+    this.recordPreArmIssue(message.text, severity)
     this.processGuidedActionStatusText(message.text)
   }
 
@@ -830,8 +840,10 @@ export class ArduPilotConfiguratorRuntime {
     this.motorTest = createIdleMotorTestState()
     this.liveVerification = createIdleLiveVerification()
     this.liveTelemetryRequestsIssued = false
+    this.preArmIssues.clear()
     this.statusTexts.splice(0)
     this.clearMotorTestTimer()
+    this.clearPreArmExpiryTimer()
   }
 
   private resolveVehicleWaiters(vehicle: VehicleIdentity): void {
@@ -1109,6 +1121,73 @@ export class ArduPilotConfiguratorRuntime {
     }
     this.statusTexts.splice(12)
   }
+
+  private recordPreArmIssue(text: string, severity: StatusTextEntry['severity']): void {
+    const normalized = normalizePreArmIssueText(text)
+    if (!normalized) {
+      return
+    }
+
+    const now = Date.now()
+    const existing = this.preArmIssues.get(normalized)
+    this.preArmIssues.set(normalized, {
+      text: normalized,
+      severity,
+      firstSeenAtMs: existing?.firstSeenAtMs ?? now,
+      lastSeenAtMs: now
+    })
+    this.schedulePreArmExpiry()
+  }
+
+  private buildPreArmStatus(): PreArmStatusState {
+    this.prunePreArmIssues()
+    const issues = [...this.preArmIssues.values()].sort((left, right) => right.lastSeenAtMs - left.lastSeenAtMs)
+    return {
+      healthy: issues.length === 0,
+      issues,
+      lastUpdatedAtMs: issues[0]?.lastSeenAtMs
+    }
+  }
+
+  private prunePreArmIssues(referenceTimeMs = Date.now()): boolean {
+    let removed = false
+    this.preArmIssues.forEach((issue, key) => {
+      if (referenceTimeMs - issue.lastSeenAtMs > PRE_ARM_ISSUE_TTL_MS) {
+        this.preArmIssues.delete(key)
+        removed = true
+      }
+    })
+    return removed
+  }
+
+  private clearPreArmExpiryTimer(): void {
+    if (this.preArmExpiryTimer) {
+      clearTimeout(this.preArmExpiryTimer)
+      this.preArmExpiryTimer = undefined
+    }
+  }
+
+  private schedulePreArmExpiry(): void {
+    this.clearPreArmExpiryTimer()
+    const nextExpiryAtMs = [...this.preArmIssues.values()].reduce<number | undefined>((earliest, issue) => {
+      const candidate = issue.lastSeenAtMs + PRE_ARM_ISSUE_TTL_MS
+      return earliest === undefined ? candidate : Math.min(earliest, candidate)
+    }, undefined)
+
+    if (nextExpiryAtMs === undefined) {
+      return
+    }
+
+    const delayMs = Math.max(nextExpiryAtMs - Date.now(), 0)
+    this.preArmExpiryTimer = setTimeout(() => {
+      const changed = this.prunePreArmIssues()
+      this.preArmExpiryTimer = undefined
+      if (changed) {
+        this.emit()
+      }
+      this.schedulePreArmExpiry()
+    }, delayMs + 1)
+  }
 }
 
 function severityName(severity: number): StatusTextEntry['severity'] {
@@ -1208,6 +1287,16 @@ function cloneLiveVerification(liveVerification: LiveVerificationState): LiveVer
   }
 }
 
+function clonePreArmStatus(preArmStatus: PreArmStatusState): PreArmStatusState {
+  return {
+    healthy: preArmStatus.healthy,
+    lastUpdatedAtMs: preArmStatus.lastUpdatedAtMs,
+    issues: preArmStatus.issues.map((issue) => ({
+      ...issue
+    }))
+  }
+}
+
 function cloneMotorTestState(motorTest: MotorTestState): MotorTestState {
   return {
     ...motorTest,
@@ -1272,6 +1361,21 @@ function defaultInstructionsForAction(actionId: GuidedActionId, sessionProfile: 
 function appendGuidedActionText(statusTexts: string[], text: string): string[] {
   const next = statusTexts[0] === text ? [...statusTexts] : [text, ...statusTexts]
   return next.slice(0, MAX_GUIDED_ACTION_STATUS_TEXTS)
+}
+
+function normalizePreArmIssueText(text: string): string | undefined {
+  const normalized = text.trim()
+  const prefixedMatch = normalized.match(/^prearm[:\s-]*(.+)$/i)
+  if (prefixedMatch) {
+    return `PreArm: ${prefixedMatch[1].trim()}`
+  }
+
+  const inlineMatch = normalized.match(/\bprearm[:\s-]*(.+)$/i)
+  if (inlineMatch) {
+    return `PreArm: ${inlineMatch[1].trim()}`
+  }
+
+  return undefined
 }
 
 function matchGuidedActionText(

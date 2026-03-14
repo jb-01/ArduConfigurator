@@ -11,6 +11,7 @@
     "build": "npm run build --workspace @arduconfig/mock-sitl && npm run build --workspace @arduconfig/sitl-harness && npm run build --workspace @arduconfig/web && npm run build --workspace @arduconfig/desktop",
     "typecheck": "npm run typecheck --workspace @arduconfig/transport && npm run typecheck --workspace @arduconfig/protocol-mavlink && npm run typecheck --workspace @arduconfig/param-metadata && npm run typecheck --workspace @arduconfig/ardupilot-core && npm run typecheck --workspace @arduconfig/mock-sitl && npm run typecheck --workspace @arduconfig/sitl-harness && npm run typecheck --workspace @arduconfig/web && npm run typecheck --workspace @arduconfig/desktop",
     "test": "npm run build && node --test tests/*.test.mjs",
+    "test:guided-setup": "npm run build && node --test tests/guided-setup.test.mjs",
     "test:sitl": "npm run build && node --test tests/runtime.sitl.test.mjs",
     "dev:web": "npm run dev --workspace @arduconfig/web",
     "build:web": "npm run build --workspace @arduconfig/web",

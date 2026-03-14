@@ -4,6 +4,7 @@ import {
   ARDUCOPTER_FLIGHT_MODE_LABELS,
   ARDUCOPTER_FRAME_CLASS_LABELS,
   ARDUCOPTER_FRAME_TYPE_LABELS,
+  ARDUCOPTER_MOT_PWM_TYPE_LABELS,
   ARDUCOPTER_SERVO_FUNCTION_LABELS,
   ARDUCOPTER_THROTTLE_FAILSAFE_LABELS,
 } from './arducopter-enums.js'
@@ -17,6 +18,11 @@ const rcEndpointNotes = [
   'Receiver endpoint changes should be followed by another live RC range verification pass.'
 ]
 
+const rcMapNotes = [
+  'Changing RCMAP_* requires a reboot before the new mapping is fully applied.',
+  'After changing RC mapping, repeat RC endpoint capture before flight.'
+]
+
 function enumOptions(labelMap: Record<number, string>): ParameterValueOption[] {
   return Object.entries(labelMap)
     .map(([value, label]) => ({
@@ -28,6 +34,89 @@ function enumOptions(labelMap: Record<number, string>): ParameterValueOption[] {
 
 export const arducopterMetadata: FirmwareMetadataBundle = {
   firmware: 'ArduCopter',
+  appViews: [
+    {
+      id: 'setup',
+      label: 'Setup',
+      description: 'Connection, calibration, and guided setup.',
+      order: 1
+    },
+    {
+      id: 'receiver',
+      label: 'Receiver',
+      description: 'RC mapping, ranges, and flight modes.',
+      order: 2
+    },
+    {
+      id: 'outputs',
+      label: 'Outputs',
+      description: 'Airframe, outputs, motor tests, and ESC review.',
+      order: 3
+    },
+    {
+      id: 'power',
+      label: 'Power',
+      description: 'Battery, failsafe, and pre-arm review.',
+      order: 4
+    },
+    {
+      id: 'parameters',
+      label: 'Parameters',
+      description: 'Low-level parameter editing and backup work.',
+      order: 5
+    }
+  ],
+  categories: {
+    airframe: {
+      id: 'airframe',
+      label: 'Airframe',
+      description: 'Frame geometry, type, and mounting configuration.',
+      order: 1,
+      viewId: 'outputs'
+    },
+    sensors: {
+      id: 'sensors',
+      label: 'Sensors',
+      description: 'Board orientation and sensor-related setup.',
+      order: 2,
+      viewId: 'setup'
+    },
+    radio: {
+      id: 'radio',
+      label: 'Receiver',
+      description: 'RC mapping, ranges, and calibration values.',
+      order: 3,
+      viewId: 'receiver'
+    },
+    modes: {
+      id: 'modes',
+      label: 'Modes',
+      description: 'Flight-mode assignments and switch setup.',
+      order: 4,
+      viewId: 'receiver'
+    },
+    outputs: {
+      id: 'outputs',
+      label: 'Outputs',
+      description: 'Motor, servo, and propulsion-related outputs.',
+      order: 5,
+      viewId: 'outputs'
+    },
+    power: {
+      id: 'power',
+      label: 'Power',
+      description: 'Battery sensing and power monitoring.',
+      order: 6,
+      viewId: 'power'
+    },
+    failsafe: {
+      id: 'failsafe',
+      label: 'Failsafe',
+      description: 'Throttle, battery, and failsafe behavior.',
+      order: 7,
+      viewId: 'power'
+    }
+  },
   parameters: {
     FRAME_CLASS: {
       id: 'FRAME_CLASS',
@@ -124,6 +213,50 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       maximum: 7,
       options: enumOptions(ARDUCOPTER_THROTTLE_FAILSAFE_LABELS)
     },
+    RCMAP_ROLL: {
+      id: 'RCMAP_ROLL',
+      label: 'Roll Channel Map',
+      description: 'Receiver channel mapped to roll input.',
+      category: 'radio',
+      minimum: 1,
+      maximum: 16,
+      step: 1,
+      rebootRequired: true,
+      notes: rcMapNotes
+    },
+    RCMAP_PITCH: {
+      id: 'RCMAP_PITCH',
+      label: 'Pitch Channel Map',
+      description: 'Receiver channel mapped to pitch input.',
+      category: 'radio',
+      minimum: 1,
+      maximum: 16,
+      step: 1,
+      rebootRequired: true,
+      notes: rcMapNotes
+    },
+    RCMAP_THROTTLE: {
+      id: 'RCMAP_THROTTLE',
+      label: 'Throttle Channel Map',
+      description: 'Receiver channel mapped to throttle input.',
+      category: 'radio',
+      minimum: 1,
+      maximum: 16,
+      step: 1,
+      rebootRequired: true,
+      notes: rcMapNotes
+    },
+    RCMAP_YAW: {
+      id: 'RCMAP_YAW',
+      label: 'Yaw Channel Map',
+      description: 'Receiver channel mapped to yaw input.',
+      category: 'radio',
+      minimum: 1,
+      maximum: 16,
+      step: 1,
+      rebootRequired: true,
+      notes: rcMapNotes
+    },
     RC1_MIN: {
       id: 'RC1_MIN',
       label: 'RC1 Minimum',
@@ -148,6 +281,36 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       id: 'RC1_TRIM',
       label: 'RC1 Trim',
       description: 'Center trim value for roll input.',
+      category: 'radio',
+      minimum: 800,
+      maximum: 2200,
+      step: 1,
+      notes: rcEndpointNotes
+    },
+    RC2_MIN: {
+      id: 'RC2_MIN',
+      label: 'RC2 Minimum',
+      description: 'Minimum calibrated value for pitch input.',
+      category: 'radio',
+      minimum: 800,
+      maximum: 2200,
+      step: 1,
+      notes: rcEndpointNotes
+    },
+    RC2_MAX: {
+      id: 'RC2_MAX',
+      label: 'RC2 Maximum',
+      description: 'Maximum calibrated value for pitch input.',
+      category: 'radio',
+      minimum: 800,
+      maximum: 2200,
+      step: 1,
+      notes: rcEndpointNotes
+    },
+    RC2_TRIM: {
+      id: 'RC2_TRIM',
+      label: 'RC2 Trim',
+      description: 'Center trim value for pitch input.',
       category: 'radio',
       minimum: 800,
       maximum: 2200,
@@ -183,6 +346,100 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       maximum: 2200,
       step: 1,
       notes: rcEndpointNotes
+    },
+    RC4_MIN: {
+      id: 'RC4_MIN',
+      label: 'RC4 Minimum',
+      description: 'Minimum calibrated value for yaw input.',
+      category: 'radio',
+      minimum: 800,
+      maximum: 2200,
+      step: 1,
+      notes: rcEndpointNotes
+    },
+    RC4_MAX: {
+      id: 'RC4_MAX',
+      label: 'RC4 Maximum',
+      description: 'Maximum calibrated value for yaw input.',
+      category: 'radio',
+      minimum: 800,
+      maximum: 2200,
+      step: 1,
+      notes: rcEndpointNotes
+    },
+    RC4_TRIM: {
+      id: 'RC4_TRIM',
+      label: 'RC4 Trim',
+      description: 'Center trim value for yaw input.',
+      category: 'radio',
+      minimum: 800,
+      maximum: 2200,
+      step: 1,
+      notes: rcEndpointNotes
+    },
+    MOT_PWM_TYPE: {
+      id: 'MOT_PWM_TYPE',
+      label: 'Motor PWM Type',
+      description: 'Motor output protocol for ESC communication.',
+      category: 'outputs',
+      minimum: 0,
+      maximum: 8,
+      rebootRequired: true,
+      notes: [
+        'DShot-based protocols do not use the normal all-at-once PWM ESC calibration flow.',
+        'After changing the motor output protocol, reboot and repeat output verification before flight.'
+      ],
+      options: enumOptions(ARDUCOPTER_MOT_PWM_TYPE_LABELS)
+    },
+    MOT_PWM_MIN: {
+      id: 'MOT_PWM_MIN',
+      label: 'Motor PWM Minimum',
+      description: 'Minimum PWM value sent to the ESCs when using PWM-based protocols.',
+      category: 'outputs',
+      minimum: 0,
+      maximum: 2200,
+      step: 1,
+      notes: ['Review with the ESC calibration workflow whenever analog PWM endpoints change.']
+    },
+    MOT_PWM_MAX: {
+      id: 'MOT_PWM_MAX',
+      label: 'Motor PWM Maximum',
+      description: 'Maximum PWM value sent to the ESCs when using PWM-based protocols.',
+      category: 'outputs',
+      minimum: 0,
+      maximum: 2200,
+      step: 1,
+      notes: ['Review with the ESC calibration workflow whenever analog PWM endpoints change.']
+    },
+    MOT_SPIN_ARM: {
+      id: 'MOT_SPIN_ARM',
+      label: 'Motor Spin Armed',
+      description: 'Motor output fraction used immediately after arming.',
+      category: 'outputs',
+      minimum: 0,
+      maximum: 1,
+      step: 0.01,
+      notes: ['Review spin thresholds after ESC calibration or protocol changes.']
+    },
+    MOT_SPIN_MIN: {
+      id: 'MOT_SPIN_MIN',
+      label: 'Motor Spin Minimum',
+      description: 'Lowest stabilized motor output fraction during flight.',
+      category: 'outputs',
+      minimum: 0,
+      maximum: 1,
+      step: 0.01,
+      notes: ['This should stay above MOT_SPIN_ARM for a clean idle-to-flight transition.']
+    },
+    MOT_SPIN_MAX: {
+      id: 'MOT_SPIN_MAX',
+      label: 'Motor Spin Maximum',
+      description: 'Highest allowed motor output fraction.',
+      category: 'outputs',
+      minimum: 0,
+      maximum: 1,
+      step: 0.01,
+      notes: ['Leave headroom below 1.0 if the propulsion setup saturates early.']
     },
     SERVO1_FUNCTION: {
       id: 'SERVO1_FUNCTION',
@@ -331,7 +588,24 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       id: 'radio',
       title: 'Radio',
       description: 'Inspect primary RC channel calibration.',
-      requiredParameters: ['RC1_MIN', 'RC1_MAX', 'RC1_TRIM', 'RC3_MIN', 'RC3_MAX', 'RC3_TRIM'],
+      requiredParameters: [
+        'RCMAP_ROLL',
+        'RCMAP_PITCH',
+        'RCMAP_THROTTLE',
+        'RCMAP_YAW',
+        'RC1_MIN',
+        'RC1_MAX',
+        'RC1_TRIM',
+        'RC2_MIN',
+        'RC2_MAX',
+        'RC2_TRIM',
+        'RC3_MIN',
+        'RC3_MAX',
+        'RC3_TRIM',
+        'RC4_MIN',
+        'RC4_MAX',
+        'RC4_TRIM'
+      ],
       requiredLiveSignals: ['rc-input'],
       sessionOverrides: {
         'usb-bench': {

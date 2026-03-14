@@ -87,6 +87,18 @@ export const ARDUCOPTER_THROTTLE_FAILSAFE_LABELS: Record<number, string> = {
   7: 'Brake or Land'
 }
 
+export const ARDUCOPTER_MOT_PWM_TYPE_LABELS: Record<number, string> = {
+  0: 'Normal',
+  1: 'OneShot',
+  2: 'OneShot125',
+  3: 'Brushed',
+  4: 'DShot150',
+  5: 'DShot300',
+  6: 'DShot600',
+  7: 'DShot1200',
+  8: 'PWMRange'
+}
+
 export const ARDUCOPTER_SERVO_FUNCTION_LABELS: Record<number, string> = {
   [-1]: 'GPIO',
   0: 'Disabled',
@@ -241,6 +253,18 @@ export function arducopterServoFunctionLabel(value: number | undefined): string 
   }
 
   return ARDUCOPTER_SERVO_FUNCTION_LABELS[value]
+}
+
+export function arducopterMotorPwmTypeLabel(value: number | undefined): string | undefined {
+  if (value === undefined) {
+    return undefined
+  }
+
+  return ARDUCOPTER_MOT_PWM_TYPE_LABELS[value]
+}
+
+export function formatArducopterMotorPwmType(value: number | undefined): string {
+  return arducopterMotorPwmTypeLabel(value) ?? (value === undefined ? 'Unknown' : `PWM type ${value}`)
 }
 
 export function arducopterMotorNumberForServoFunction(value: number | undefined): number | undefined {

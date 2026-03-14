@@ -4,9 +4,13 @@ import {
   advanceRcRangeExerciseState,
   createModeSwitchExerciseState,
   createRcRangeExerciseState,
+  deriveEscSetupSummary,
   deriveOutputMappingSummary,
   deriveModeSwitchEstimate,
+  deriveRcAxisChannelMap,
   deriveRcAxisObservations,
+  deriveRcMapDraftValues,
+  detectDominantRcChannelChange,
   evaluateMotorTestEligibility,
   failModeSwitchExerciseState,
   failRcRangeExerciseState,
@@ -23,7 +27,7 @@ import { MavlinkSession, MavlinkV2Codec } from '@arduconfig/protocol-mavlink'
 import { NativeSerialTransport, type NativeSerialPortInfo } from './native-serial-transport.js'
 
 type SnapshotFormat = 'off' | 'pretty' | 'json'
-type ReadOnlyExerciseKind = 'mode-switch' | 'rc-ranges'
+type ReadOnlyExerciseKind = 'mode-switch' | 'rc-ranges' | 'rc-mapping'
 
 interface RuntimeSerialOptions {
   path?: string
@@ -276,7 +280,7 @@ function isGuidedActionId(value: string): value is GuidedActionId {
 }
 
 function isReadOnlyExerciseKind(value: string): value is ReadOnlyExerciseKind {
-  return value === 'mode-switch' || value === 'rc-ranges'
+  return value === 'mode-switch' || value === 'rc-ranges' || value === 'rc-mapping'
 }
 
 function printPorts(ports: NativeSerialPortInfo[]): void {
@@ -458,13 +462,26 @@ function renderSnapshot(snapshot: ConfiguratorSnapshot, format: SnapshotFormat):
     )
   }
   const rcAxes = deriveRcAxisObservations(snapshot)
+  const rcChannelMap = deriveRcAxisChannelMap(snapshot)
   console.log('  rc axes:')
   rcAxes.forEach((axis) => {
     console.log(
       `    - ${axis.label}: CH${axis.channelNumber} ${axis.pwm !== undefined ? `${axis.pwm} us` : 'no data'} low=${axis.lowDetected ? 'y' : 'n'} high=${axis.highDetected ? 'y' : 'n'}${axis.axisId === 'throttle' ? '' : ` center=${axis.centeredDetected ? 'y' : 'n'}`}`
     )
   })
+  console.log(
+    `  rc map: roll=CH${rcChannelMap.roll} pitch=CH${rcChannelMap.pitch} throttle=CH${rcChannelMap.throttle} yaw=CH${rcChannelMap.yaw}`
+  )
+  if (snapshot.preArmStatus.healthy) {
+    console.log('  pre-arm: clear')
+  } else {
+    console.log(`  pre-arm: ${snapshot.preArmStatus.issues.length} active issue(s)`)
+    snapshot.preArmStatus.issues.slice(0, 4).forEach((issue) => {
+      console.log(`    - ${issue.text}`)
+    })
+  }
   const outputMapping = deriveOutputMappingSummary(snapshot)
+  const escSetup = deriveEscSetupSummary(snapshot)
   console.log(
     `  airframe: ${outputMapping.airframe.frameClassLabel} / ${outputMapping.airframe.frameTypeLabel}`
   )
@@ -478,6 +495,10 @@ function renderSnapshot(snapshot: ConfiguratorSnapshot, format: SnapshotFormat):
     console.log(`    - OUT${output.channelNumber}: ${output.functionLabel}`)
   })
   outputMapping.notes.slice(0, 2).forEach((note) => {
+    console.log(`    note: ${note}`)
+  })
+  console.log(`  esc: ${escSetup.pwmTypeLabel} / ${escSetup.calibrationPath}`)
+  escSetup.notes.slice(0, 2).forEach((note) => {
     console.log(`    note: ${note}`)
   })
   if (snapshot.motorTest.status !== 'idle') {
@@ -593,6 +614,11 @@ async function runReadOnlyExercise(
 
   if (options.readOnlyExercise === 'rc-ranges') {
     await runRcRangeExercise(runtime, snapshot, options.exerciseTimeoutMs)
+    return runtime.getSnapshot()
+  }
+
+  if (options.readOnlyExercise === 'rc-mapping') {
+    await runRcMappingExercise(runtime, snapshot, options.exerciseTimeoutMs)
     return runtime.getSnapshot()
   }
 
@@ -812,6 +838,82 @@ async function runRcRangeExercise(
   }
 
   console.log(`[runtime] exercise result: rc-ranges failed :: ${state.failureReason ?? 'Unknown reason.'}`)
+}
+
+async function runRcMappingExercise(
+  runtime: ArduPilotConfiguratorRuntime,
+  initialSnapshot: ConfiguratorSnapshot,
+  timeoutMs: number
+): Promise<void> {
+  if (!initialSnapshot.liveVerification.rcInput.verified) {
+    console.log('[runtime] rc-mapping exercise unavailable: live RC telemetry is not available.')
+    return
+  }
+
+  const baselineChannels = [...initialSnapshot.liveVerification.rcInput.channels]
+  const capturedMap: Partial<Record<RcAxisId, number>> = {}
+  const axes: RcAxisId[] = ['roll', 'pitch', 'throttle', 'yaw']
+  const currentMap = deriveRcAxisChannelMap(initialSnapshot)
+
+  console.log('[runtime] read-only exercise: rc-mapping')
+  console.log(
+    `[runtime] current rcmap: roll=CH${currentMap.roll} pitch=CH${currentMap.pitch} throttle=CH${currentMap.throttle} yaw=CH${currentMap.yaw}`
+  )
+
+  for (const axisId of axes) {
+    console.log(`[runtime] exercise step: move ${formatRcAxisLabel(axisId)} by itself`)
+
+    const deadline = Date.now() + timeoutMs
+    let stableCandidateChannel: number | undefined
+    let stableCandidateHits = 0
+    let capturedChannel: number | undefined
+    let capturedDeltaUs = 0
+
+    while (Date.now() < deadline) {
+      await sleep(150)
+      const candidate = detectDominantRcChannelChange(runtime.getSnapshot().liveVerification.rcInput.channels, baselineChannels, {
+        excludedChannelNumbers: Object.values(capturedMap).filter((channelNumber): channelNumber is number => channelNumber !== undefined)
+      })
+
+      if (!candidate) {
+        stableCandidateChannel = undefined
+        stableCandidateHits = 0
+        continue
+      }
+
+      if (candidate.channelNumber === stableCandidateChannel) {
+        stableCandidateHits += 1
+      } else {
+        stableCandidateChannel = candidate.channelNumber
+        stableCandidateHits = 1
+      }
+
+      if (stableCandidateHits >= 2) {
+        capturedChannel = candidate.channelNumber
+        capturedDeltaUs = candidate.deltaUs
+        break
+      }
+    }
+
+    if (capturedChannel === undefined) {
+      console.log(`[runtime] exercise result: rc-mapping failed :: timed out waiting for ${formatRcAxisLabel(axisId)} movement`)
+      return
+    }
+
+    capturedMap[axisId] = capturedChannel
+    console.log(`[runtime] exercise progress: ${formatRcAxisLabel(axisId)} observed on CH${capturedChannel} (${Math.round(capturedDeltaUs)}us delta)`)
+  }
+
+  const drafts = deriveRcMapDraftValues(capturedMap, currentMap)
+  if (Object.keys(drafts).length === 0) {
+    console.log('[runtime] exercise result: rc-mapping passed :: current RCMAP_* values match the observed channels')
+    return
+  }
+
+  console.log('[runtime] exercise result: rc-mapping mismatch detected')
+  Object.entries(drafts).forEach(([paramId, value]) => {
+    console.log(`[runtime] exercise draft: ${paramId}=${value}`)
+  })
 }
 
 function rcRangeInstruction(axisId: RcAxisId): string {
