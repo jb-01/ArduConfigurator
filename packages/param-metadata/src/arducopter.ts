@@ -1,16 +1,31 @@
 import type { FirmwareMetadataBundle, ParameterValueOption } from './types.js'
 import {
   ARDUCOPTER_BATTERY_FAILSAFE_ACTION_LABELS,
+  ARDUCOPTER_BATTERY_MONITOR_LABELS,
+  ARDUCOPTER_BATTERY_VOLTAGE_SOURCE_LABELS,
+  ARDUCOPTER_FLTMODE_CHANNEL_LABELS,
   ARDUCOPTER_FLIGHT_MODE_LABELS,
   ARDUCOPTER_FRAME_CLASS_LABELS,
   ARDUCOPTER_FRAME_TYPE_LABELS,
+  ARDUCOPTER_GPS_AUTO_CONFIG_LABELS,
+  ARDUCOPTER_GPS_AUTO_SWITCH_LABELS,
+  ARDUCOPTER_GPS_PRIMARY_LABELS,
+  ARDUCOPTER_GPS_RATE_MS_LABELS,
   ARDUCOPTER_GPS_TYPE_LABELS,
+  ARDUCOPTER_MSP_OSD_CELL_COUNT_LABELS,
   ARDUCOPTER_MOT_PWM_TYPE_LABELS,
+  ARDUCOPTER_NOTIFICATION_LED_BRIGHTNESS_LABELS,
+  ARDUCOPTER_NOTIFICATION_LED_OVERRIDE_LABELS,
+  ARDUCOPTER_OSD_CHANNEL_LABELS,
+  ARDUCOPTER_OSD_SWITCH_METHOD_LABELS,
+  ARDUCOPTER_OSD_TYPE_LABELS,
+  ARDUCOPTER_RSSI_TYPE_LABELS,
   ARDUCOPTER_SERIAL_BAUD_LABELS,
   ARDUCOPTER_SERIAL_PROTOCOL_LABELS,
   ARDUCOPTER_SERIAL_RTSCTS_LABELS,
   ARDUCOPTER_SERVO_FUNCTION_LABELS,
   ARDUCOPTER_THROTTLE_FAILSAFE_LABELS,
+  ARDUCOPTER_VTX_ENABLE_LABELS,
 } from './arducopter-enums.js'
 
 const enabledDisabledOptions: ParameterValueOption[] = [
@@ -40,6 +55,115 @@ const serialFlowControlNotes = [
   'Only enable RTS/CTS flow control if the connected peripheral and wiring support it.'
 ]
 
+const gpsTypeNotes = [
+  'After changing GPS driver types, reconnect the sensor and verify lock/telemetry before flight.'
+]
+
+const gpsAutoConfigNotes = [
+  'Automatic GPS configuration is usually helpful, but it can overwrite manual receiver settings on the attached module.',
+  'Reboot and verify live GPS telemetry after changing this behavior.'
+]
+
+const gpsSwitchingNotes = [
+  'Primary/secondary GPS behavior matters most on dual-GPS setups; keep it simple unless you are actually using redundancy.',
+  'If blending or automatic switching is enabled, verify which GPS is primary before flight.'
+]
+
+const gpsRateNotes = [
+  'Higher GPS update rates can help responsiveness but also increase bus load and CPU work on some targets.',
+  'Only raise the GPS rate if the attached module and link can sustain it cleanly.'
+]
+
+const vtxEnableNotes = [
+  'Use this only when a compatible VTX control path is actually connected and assigned on a serial port.',
+  'After enabling VTX control, verify the actual channel, power, and pit behavior on the bench before flight.'
+]
+
+const vtxFrequencyNotes = [
+  'Use a legal frequency for your region and confirm the actual transmitted channel with the VTX or goggles on the bench.',
+  'Changing VTX frequency or power is a bench setup task; avoid guessing in the field.'
+]
+
+const vtxPowerNotes = [
+  'Keep VTX power conservative during bench setup and only raise it once cooling airflow and legal constraints are understood.',
+  'If the VTX has discrete power tables, confirm the requested level matches the hardware-reported level.'
+]
+
+const vtxOptionNotes = [
+  'This is an advanced VTX behavior bitmask. Leave it alone unless the target VTX protocol expects a specific option combination.',
+  'Bench-check pit mode and unlock behavior after changing advanced VTX options.'
+]
+
+const osdTypeNotes = [
+  'Choose the backend that matches the actual FPV display path, then verify the live overlay in goggles or on the bench display before flight.',
+  'Changing the OSD backend usually requires a reboot before the new display path is active.'
+]
+
+const osdSwitchNotes = [
+  'Only assign an OSD screen-switch channel if the pilot actually needs multiple pages in flight.',
+  'After changing OSD switching behavior, verify the page-switch action on the bench before flight.'
+]
+
+const mspOsdNotes = [
+  'MSP and DisplayPort overlays depend on a matching serial-port role and baud rate on the linked UART.',
+  'If the FPV overlay is missing or garbled, verify both the serial protocol assignment and the selected OSD backend.'
+]
+
+const batteryMonitorNotes = [
+  'Changing the battery monitor source typically requires a reboot before live telemetry matches the new configuration.',
+  'Use a live powered session to confirm that the selected battery monitor is actually producing telemetry.'
+]
+
+const batteryCapacityNotes = [
+  'Match this to the pack capacity that the vehicle will actually fly with.',
+  'After changing battery capacity, verify the live remaining-percent estimate on a fully charged pack.'
+]
+
+const batteryThresholdNotes = [
+  'Set this to zero only if you intentionally want to disable that threshold-based trigger.',
+  'Verify the live battery telemetry and your actual cell count before tightening battery failsafe thresholds.'
+]
+
+const batteryArmNotes = [
+  'Use this to prevent arming when the pack is already too depleted for a safe flight.',
+  'Set to zero to disable the corresponding pre-arm battery check.'
+]
+
+const batteryVoltageSourceNotes = [
+  'Sag-compensated voltage is usually more useful in flight because it accounts for transient load sag.',
+  'Raw voltage can still be useful when comparing power-module calibration against a meter on the bench.'
+]
+
+const rcFailsafeThresholdNotes = [
+  'Set this slightly above the receiver PWM value seen during radio-loss failsafe, then verify it on the bench.',
+  'After changing the threshold, recheck throttle failsafe behavior before flight.'
+]
+
+const modeChannelNotes = [
+  'Set this to the receiver channel that carries the flight-mode switch. Disable it only if mode selection is handled another way.',
+  'After changing the mode channel, rerun the mode-switch exercise before flight.'
+]
+
+const rssiNotes = [
+  'Only enable RSSI if the receiver or link is actually providing signal-strength data.',
+  'Verify the live RSSI reading on the bench before using it as a confidence signal.'
+]
+
+const rssiChannelNotes = [
+  'Use this only when RSSI is being carried on a dedicated RC channel.',
+  'Keep the low/high values matched to the actual receiver output range.'
+]
+
+const notificationLedNotes = [
+  'Notification LED drivers only work when the chosen LED type matches the actual hardware and any required output assignment.',
+  'After changing LED types or string length, bench-check the indicator behavior before flight.'
+]
+
+const notificationBuzzNotes = [
+  'Only enable buzzer drivers that are actually present on the target hardware.',
+  'Bench-check the buzzer output after changing notification behavior so the aircraft still has an audible locate/failsafe alert.'
+]
+
 const flightFeelNotes = [
   'Make small changes, fly-test, and keep a known-good backup before pushing responsiveness further.',
   'These controls are intended to stay beginner-safe; use Expert mode for deeper controller tuning.'
@@ -49,6 +173,23 @@ const acroRateNotes = [
   'Rates and expo are best adjusted a little at a time, with a short hover or line-of-sight test between changes.',
   'This first tuning surface intentionally stops at rates and expo so the setup workflow stays approachable.'
 ]
+
+const presetPrerequisites = [
+  'Finish receiver, output, failsafe, and power setup before applying a tuning preset.',
+  'Apply one preset family at a time and do a short test flight before stacking more changes.'
+]
+
+const flightFeelPresetCautions = [
+  'These presets adjust angle-mode stick feel and yaw handling only; they do not retune the underlying rate controller.',
+  'A pre-apply snapshot is captured automatically so you can roll back to the previous known-good setup if needed.'
+]
+
+const acroRatePresetCautions = [
+  'These presets change acro stick sensitivity only; they do not change PID/controller gains.',
+  'Start with the balanced preset unless you already know you want either a softer or more aggressive rate profile.'
+]
+
+const multirotorPresetFrameClasses = [1, 2, 3, 4, 5, 7, 9, 10, 12, 14] as const
 
 function serialPortDisplayName(portNumber: number): string {
   switch (portNumber) {
@@ -155,16 +296,28 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       order: 5
     },
     {
+      id: 'snapshots',
+      label: 'Snapshots',
+      description: 'Capture, compare, and restore known-good parameter sets.',
+      order: 6
+    },
+    {
       id: 'tuning',
       label: 'Tuning',
       description: 'Beginner-safe flight-feel and acro-rate tuning.',
-      order: 6
+      order: 7
+    },
+    {
+      id: 'presets',
+      label: 'Presets',
+      description: 'Curated, explainable tuning bundles with automatic backup.',
+      order: 8
     },
     {
       id: 'parameters',
       label: 'Parameters',
       description: 'Low-level parameter editing and backup work.',
-      order: 7
+      order: 9
     }
   ],
   categories: {
@@ -246,6 +399,142 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       viewId: 'tuning'
     }
   },
+  presetGroups: {
+    'flight-feel': {
+      id: 'flight-feel',
+      label: 'Flight Feel',
+      description: 'Preset bundles for angle-mode feel, smoothing, and general yaw response.',
+      order: 1
+    },
+    'acro-rates': {
+      id: 'acro-rates',
+      label: 'Acro Rates',
+      description: 'Preset bundles for acro roll, pitch, and yaw stick sensitivity.',
+      order: 2
+    }
+  },
+  presets: {
+    'flight-feel-soft': {
+      id: 'flight-feel-soft',
+      label: 'Smooth Explorer',
+      description: 'Softer angle-mode response, lower lean angle, and gentler yaw authority for relaxed cruising.',
+      groupId: 'flight-feel',
+      order: 1,
+      values: [
+        { paramId: 'ATC_INPUT_TC', value: 0.3 },
+        { paramId: 'ANGLE_MAX', value: 3500 },
+        { paramId: 'PILOT_Y_RATE', value: 160 },
+        { paramId: 'PILOT_Y_EXPO', value: 0.18 }
+      ],
+      note: 'Good first preset for a larger or heavier multirotor when you want a calm self-leveling feel.',
+      tags: ['baseline', 'smooth', 'cinematic'],
+      prerequisites: presetPrerequisites,
+      cautions: flightFeelPresetCautions,
+      compatibility: {
+        frameClasses: [...multirotorPresetFrameClasses]
+      }
+    },
+    'flight-feel-balanced': {
+      id: 'flight-feel-balanced',
+      label: 'Balanced Baseline',
+      description: 'Moderate smoothing and lean angle for an all-around starting point.',
+      groupId: 'flight-feel',
+      order: 2,
+      values: [
+        { paramId: 'ATC_INPUT_TC', value: 0.22 },
+        { paramId: 'ANGLE_MAX', value: 4200 },
+        { paramId: 'PILOT_Y_RATE', value: 200 },
+        { paramId: 'PILOT_Y_EXPO', value: 0.1 }
+      ],
+      note: 'Use this first if you are not yet sure whether the vehicle should feel softer or more immediate.',
+      tags: ['baseline', 'balanced'],
+      prerequisites: presetPrerequisites,
+      cautions: flightFeelPresetCautions,
+      compatibility: {
+        frameClasses: [...multirotorPresetFrameClasses]
+      }
+    },
+    'flight-feel-crisp': {
+      id: 'flight-feel-crisp',
+      label: 'Crisp Response',
+      description: 'Lower smoothing, steeper lean angle, and firmer yaw response for a more immediate feel.',
+      groupId: 'flight-feel',
+      order: 3,
+      values: [
+        { paramId: 'ATC_INPUT_TC', value: 0.14 },
+        { paramId: 'ANGLE_MAX', value: 5000 },
+        { paramId: 'PILOT_Y_RATE', value: 260 },
+        { paramId: 'PILOT_Y_EXPO', value: 0.04 }
+      ],
+      note: 'Use only after confirming the vehicle is already well-behaved on a calmer baseline.',
+      tags: ['responsive', 'sport'],
+      prerequisites: presetPrerequisites,
+      cautions: flightFeelPresetCautions,
+      compatibility: {
+        frameClasses: [...multirotorPresetFrameClasses]
+      }
+    },
+    'acro-rates-gentle': {
+      id: 'acro-rates-gentle',
+      label: 'Gentle Acro',
+      description: 'Lower acro rates with more expo for easier center-stick precision.',
+      groupId: 'acro-rates',
+      order: 1,
+      values: [
+        { paramId: 'ACRO_RP_RATE', value: 220 },
+        { paramId: 'ACRO_Y_RATE', value: 180 },
+        { paramId: 'ACRO_RP_EXPO', value: 0.18 },
+        { paramId: 'ACRO_Y_EXPO', value: 0.14 }
+      ],
+      note: 'A conservative acro preset for pilots moving over from stabilized flight or flying tighter spaces.',
+      tags: ['acro', 'gentle', 'training'],
+      prerequisites: presetPrerequisites,
+      cautions: acroRatePresetCautions,
+      compatibility: {
+        frameClasses: [...multirotorPresetFrameClasses]
+      }
+    },
+    'acro-rates-balanced': {
+      id: 'acro-rates-balanced',
+      label: 'Balanced Acro',
+      description: 'Moderate acro rates with a small amount of expo for a versatile FPV baseline.',
+      groupId: 'acro-rates',
+      order: 2,
+      values: [
+        { paramId: 'ACRO_RP_RATE', value: 320 },
+        { paramId: 'ACRO_Y_RATE', value: 240 },
+        { paramId: 'ACRO_RP_EXPO', value: 0.1 },
+        { paramId: 'ACRO_Y_EXPO', value: 0.08 }
+      ],
+      note: 'A good general-purpose rate baseline for most small and mid-size multirotors.',
+      tags: ['acro', 'baseline', 'balanced'],
+      prerequisites: presetPrerequisites,
+      cautions: acroRatePresetCautions,
+      compatibility: {
+        frameClasses: [...multirotorPresetFrameClasses]
+      }
+    },
+    'acro-rates-sport': {
+      id: 'acro-rates-sport',
+      label: 'Sport Acro',
+      description: 'Higher acro rates with low expo for sharper flips, rolls, and snap response.',
+      groupId: 'acro-rates',
+      order: 3,
+      values: [
+        { paramId: 'ACRO_RP_RATE', value: 420 },
+        { paramId: 'ACRO_Y_RATE', value: 300 },
+        { paramId: 'ACRO_RP_EXPO', value: 0.04 },
+        { paramId: 'ACRO_Y_EXPO', value: 0.03 }
+      ],
+      note: 'This is the most aggressive preset in the initial library; start lower unless you already know the airframe can handle it.',
+      tags: ['acro', 'sport', 'responsive'],
+      prerequisites: presetPrerequisites,
+      cautions: acroRatePresetCautions,
+      compatibility: {
+        frameClasses: [...multirotorPresetFrameClasses]
+      }
+    }
+  },
   parameters: {
     FRAME_CLASS: {
       id: 'FRAME_CLASS',
@@ -285,7 +574,7 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       maximum: 1,
       options: enabledDisabledOptions
     },
-    ...buildSerialPortParameterDefinitions(6),
+    ...buildSerialPortParameterDefinitions(8),
     GPS_TYPE: {
       id: 'GPS_TYPE',
       label: 'Primary GPS Type',
@@ -294,7 +583,7 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       minimum: 0,
       maximum: 25,
       rebootRequired: true,
-      notes: ['After changing GPS driver types, reconnect the sensor and verify lock/telemetry before flight.'],
+      notes: gpsTypeNotes,
       options: enumOptions(ARDUCOPTER_GPS_TYPE_LABELS)
     },
     GPS_TYPE2: {
@@ -305,8 +594,153 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       minimum: 0,
       maximum: 25,
       rebootRequired: true,
-      notes: ['Disable this if no secondary GPS is attached. Reboot after changes before verifying redundancy.'],
+      notes: ['Disable this if no secondary GPS is attached. Reboot after changes before verifying redundancy.', ...gpsTypeNotes],
       options: enumOptions(ARDUCOPTER_GPS_TYPE_LABELS)
+    },
+    GPS_AUTO_CONFIG: {
+      id: 'GPS_AUTO_CONFIG',
+      label: 'GPS Auto Configure',
+      description: 'Automatic configuration behavior for attached GPS modules.',
+      category: 'peripherals',
+      minimum: 0,
+      maximum: 3,
+      rebootRequired: true,
+      notes: gpsAutoConfigNotes,
+      options: enumOptions(ARDUCOPTER_GPS_AUTO_CONFIG_LABELS)
+    },
+    GPS_AUTO_SWITCH: {
+      id: 'GPS_AUTO_SWITCH',
+      label: 'GPS Auto Switch',
+      description: 'How the controller chooses between the primary and secondary GPS on dual-GPS setups.',
+      category: 'peripherals',
+      minimum: 0,
+      maximum: 4,
+      notes: gpsSwitchingNotes,
+      options: enumOptions(ARDUCOPTER_GPS_AUTO_SWITCH_LABELS)
+    },
+    GPS_PRIMARY: {
+      id: 'GPS_PRIMARY',
+      label: 'Primary GPS Select',
+      description: 'Preferred GPS when multiple GPS units are configured.',
+      category: 'peripherals',
+      minimum: 0,
+      maximum: 1,
+      notes: gpsSwitchingNotes,
+      options: enumOptions(ARDUCOPTER_GPS_PRIMARY_LABELS)
+    },
+    GPS_RATE_MS: {
+      id: 'GPS_RATE_MS',
+      label: 'GPS Update Rate',
+      description: 'Requested GPS update period for supported serial GPS modules.',
+      category: 'peripherals',
+      unit: 'ms',
+      minimum: 50,
+      maximum: 200,
+      step: 1,
+      rebootRequired: true,
+      notes: gpsRateNotes,
+      options: enumOptions(ARDUCOPTER_GPS_RATE_MS_LABELS)
+    },
+    OSD_TYPE: {
+      id: 'OSD_TYPE',
+      label: 'OSD Backend',
+      description: 'Display backend used for the FPV on-screen display.',
+      category: 'peripherals',
+      minimum: 0,
+      maximum: 5,
+      rebootRequired: true,
+      notes: osdTypeNotes,
+      options: enumOptions(ARDUCOPTER_OSD_TYPE_LABELS)
+    },
+    OSD_CHAN: {
+      id: 'OSD_CHAN',
+      label: 'OSD Screen Channel',
+      description: 'Receiver channel used to switch between OSD pages.',
+      category: 'peripherals',
+      minimum: 0,
+      maximum: 16,
+      notes: osdSwitchNotes,
+      options: enumOptions(ARDUCOPTER_OSD_CHANNEL_LABELS)
+    },
+    OSD_SW_METHOD: {
+      id: 'OSD_SW_METHOD',
+      label: 'OSD Switch Method',
+      description: 'How the selected OSD channel chooses or advances through pages.',
+      category: 'peripherals',
+      minimum: 0,
+      maximum: 2,
+      notes: osdSwitchNotes,
+      options: enumOptions(ARDUCOPTER_OSD_SWITCH_METHOD_LABELS)
+    },
+    MSP_OPTIONS: {
+      id: 'MSP_OPTIONS',
+      label: 'MSP Options',
+      description: 'Advanced MSP and DisplayPort behavior bitmask.',
+      category: 'peripherals',
+      minimum: 0,
+      maximum: 7,
+      notes: mspOsdNotes
+    },
+    MSP_OSD_NCELLS: {
+      id: 'MSP_OSD_NCELLS',
+      label: 'MSP Cell Count',
+      description: 'Battery cell-count value sent to MSP-capable FPV displays.',
+      category: 'peripherals',
+      minimum: 0,
+      maximum: 14,
+      notes: mspOsdNotes,
+      options: enumOptions(ARDUCOPTER_MSP_OSD_CELL_COUNT_LABELS)
+    },
+    VTX_ENABLE: {
+      id: 'VTX_ENABLE',
+      label: 'VTX Control',
+      description: 'Enables ArduPilot control of a supported video transmitter.',
+      category: 'peripherals',
+      notes: vtxEnableNotes,
+      options: enumOptions(ARDUCOPTER_VTX_ENABLE_LABELS)
+    },
+    VTX_FREQ: {
+      id: 'VTX_FREQ',
+      label: 'VTX Frequency',
+      description: 'Requested VTX output frequency.',
+      category: 'peripherals',
+      unit: 'MHz',
+      minimum: 0,
+      maximum: 6000,
+      step: 1,
+      notes: vtxFrequencyNotes
+    },
+    VTX_POWER: {
+      id: 'VTX_POWER',
+      label: 'VTX Power',
+      description: 'Requested VTX output power.',
+      category: 'peripherals',
+      unit: 'mW',
+      minimum: 0,
+      maximum: 5000,
+      step: 1,
+      notes: vtxPowerNotes
+    },
+    VTX_MAX_POWER: {
+      id: 'VTX_MAX_POWER',
+      label: 'VTX Max Power',
+      description: 'Upper power limit allowed for VTX control requests.',
+      category: 'peripherals',
+      unit: 'mW',
+      minimum: 0,
+      maximum: 5000,
+      step: 1,
+      notes: vtxPowerNotes
+    },
+    VTX_OPTIONS: {
+      id: 'VTX_OPTIONS',
+      label: 'VTX Advanced Options',
+      description: 'Advanced VTX behavior bitmask.',
+      category: 'peripherals',
+      minimum: 0,
+      maximum: 255,
+      step: 1,
+      notes: vtxOptionNotes
     },
     BATT_MONITOR: {
       id: 'BATT_MONITOR',
@@ -314,7 +748,10 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       description: 'Battery sensing source configuration.',
       category: 'power',
       minimum: 0,
-      notes: ['Use a live powered session to confirm that the selected battery monitor is actually producing telemetry.']
+      maximum: 24,
+      rebootRequired: true,
+      notes: batteryMonitorNotes,
+      options: enumOptions(ARDUCOPTER_BATTERY_MONITOR_LABELS)
     },
     BATT_CAPACITY: {
       id: 'BATT_CAPACITY',
@@ -324,12 +761,91 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       unit: 'mAh',
       minimum: 0,
       step: 1,
-      notes: ['Match this to the pack capacity that the vehicle will actually fly with.']
+      notes: batteryCapacityNotes
+    },
+    BATT_ARM_VOLT: {
+      id: 'BATT_ARM_VOLT',
+      label: 'Arm Voltage Threshold',
+      description: 'Battery voltage that must be present before the vehicle is allowed to arm.',
+      category: 'power',
+      unit: 'V',
+      minimum: 0,
+      step: 0.1,
+      notes: batteryArmNotes
+    },
+    BATT_ARM_MAH: {
+      id: 'BATT_ARM_MAH',
+      label: 'Arm Capacity Threshold',
+      description: 'Remaining battery capacity required before the vehicle is allowed to arm.',
+      category: 'power',
+      unit: 'mAh',
+      minimum: 0,
+      step: 1,
+      notes: batteryArmNotes
+    },
+    BATT_FS_VOLTSRC: {
+      id: 'BATT_FS_VOLTSRC',
+      label: 'Failsafe Voltage Source',
+      description: 'Voltage source used when evaluating battery failsafe thresholds.',
+      category: 'failsafe',
+      minimum: 0,
+      maximum: 1,
+      notes: batteryVoltageSourceNotes,
+      options: enumOptions(ARDUCOPTER_BATTERY_VOLTAGE_SOURCE_LABELS)
+    },
+    BATT_LOW_VOLT: {
+      id: 'BATT_LOW_VOLT',
+      label: 'Low Battery Voltage',
+      description: 'Voltage threshold that triggers the low battery failsafe action.',
+      category: 'failsafe',
+      unit: 'V',
+      minimum: 0,
+      step: 0.1,
+      notes: batteryThresholdNotes
+    },
+    BATT_LOW_MAH: {
+      id: 'BATT_LOW_MAH',
+      label: 'Low Battery Capacity',
+      description: 'Remaining capacity threshold that triggers the low battery failsafe action.',
+      category: 'failsafe',
+      unit: 'mAh',
+      minimum: 0,
+      step: 1,
+      notes: batteryThresholdNotes
     },
     BATT_FS_LOW_ACT: {
       id: 'BATT_FS_LOW_ACT',
       label: 'Low Battery Failsafe Action',
       description: 'Action taken when the low battery failsafe threshold is reached.',
+      category: 'failsafe',
+      minimum: 0,
+      maximum: 7,
+      options: enumOptions(ARDUCOPTER_BATTERY_FAILSAFE_ACTION_LABELS)
+    },
+    BATT_CRT_VOLT: {
+      id: 'BATT_CRT_VOLT',
+      label: 'Critical Battery Voltage',
+      description: 'Voltage threshold that triggers the critical battery failsafe action.',
+      category: 'failsafe',
+      unit: 'V',
+      minimum: 0,
+      step: 0.1,
+      notes: batteryThresholdNotes
+    },
+    BATT_CRT_MAH: {
+      id: 'BATT_CRT_MAH',
+      label: 'Critical Battery Capacity',
+      description: 'Remaining capacity threshold that triggers the critical battery failsafe action.',
+      category: 'failsafe',
+      unit: 'mAh',
+      minimum: 0,
+      step: 1,
+      notes: batteryThresholdNotes
+    },
+    BATT_FS_CRT_ACT: {
+      id: 'BATT_FS_CRT_ACT',
+      label: 'Critical Battery Action',
+      description: 'Action taken when the critical battery threshold is reached.',
       category: 'failsafe',
       minimum: 0,
       maximum: 7,
@@ -420,6 +936,26 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       category: 'modes',
       options: enumOptions(ARDUCOPTER_FLIGHT_MODE_LABELS)
     },
+    FLTMODE_CH: {
+      id: 'FLTMODE_CH',
+      label: 'Flight Mode Channel',
+      description: 'Receiver channel used to select flight modes.',
+      category: 'modes',
+      minimum: 0,
+      maximum: 16,
+      notes: modeChannelNotes,
+      options: enumOptions(ARDUCOPTER_FLTMODE_CHANNEL_LABELS)
+    },
+    MODE_CH: {
+      id: 'MODE_CH',
+      label: 'Legacy Mode Channel',
+      description: 'Legacy mode-channel parameter used on some older setups and firmware variants.',
+      category: 'modes',
+      minimum: 0,
+      maximum: 16,
+      notes: ['Prefer FLTMODE_CH when both parameters are present on the target.', ...modeChannelNotes],
+      options: enumOptions(ARDUCOPTER_FLTMODE_CHANNEL_LABELS)
+    },
     FS_THR_ENABLE: {
       id: 'FS_THR_ENABLE',
       label: 'Throttle Failsafe',
@@ -428,6 +964,17 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       minimum: 0,
       maximum: 7,
       options: enumOptions(ARDUCOPTER_THROTTLE_FAILSAFE_LABELS)
+    },
+    FS_THR_VALUE: {
+      id: 'FS_THR_VALUE',
+      label: 'Throttle Failsafe PWM',
+      description: 'PWM threshold used to detect receiver-loss throttle failsafe.',
+      category: 'failsafe',
+      unit: 'us',
+      minimum: 910,
+      maximum: 1100,
+      step: 1,
+      notes: rcFailsafeThresholdNotes
     },
     RCMAP_ROLL: {
       id: 'RCMAP_ROLL',
@@ -472,6 +1019,48 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       step: 1,
       rebootRequired: true,
       notes: rcMapNotes
+    },
+    RSSI_TYPE: {
+      id: 'RSSI_TYPE',
+      label: 'RSSI Source',
+      description: 'Signal-strength source used for RSSI reporting.',
+      category: 'radio',
+      minimum: 0,
+      maximum: 4,
+      notes: rssiNotes,
+      options: enumOptions(ARDUCOPTER_RSSI_TYPE_LABELS)
+    },
+    RSSI_CHANNEL: {
+      id: 'RSSI_CHANNEL',
+      label: 'RSSI Channel',
+      description: 'Receiver channel used when RSSI is carried on a dedicated RC PWM channel.',
+      category: 'radio',
+      minimum: 0,
+      maximum: 16,
+      step: 1,
+      notes: rssiChannelNotes
+    },
+    RSSI_CHAN_LOW: {
+      id: 'RSSI_CHAN_LOW',
+      label: 'RSSI Low PWM',
+      description: 'PWM value treated as minimum RSSI when using a dedicated RSSI channel.',
+      category: 'radio',
+      unit: 'us',
+      minimum: 800,
+      maximum: 2200,
+      step: 1,
+      notes: rssiChannelNotes
+    },
+    RSSI_CHAN_HIGH: {
+      id: 'RSSI_CHAN_HIGH',
+      label: 'RSSI High PWM',
+      description: 'PWM value treated as maximum RSSI when using a dedicated RSSI channel.',
+      category: 'radio',
+      unit: 'us',
+      minimum: 800,
+      maximum: 2200,
+      step: 1,
+      notes: rssiChannelNotes
     },
     RC1_MIN: {
       id: 'RC1_MIN',
@@ -699,6 +1288,66 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       step: 0.01,
       notes: ['Leave headroom below 1.0 if the propulsion setup saturates early.']
     },
+    NTF_LED_TYPES: {
+      id: 'NTF_LED_TYPES',
+      label: 'Notification LED Drivers',
+      description: 'Enabled notification LED driver bitmask.',
+      category: 'outputs',
+      minimum: 0,
+      maximum: 8191,
+      notes: notificationLedNotes
+    },
+    NTF_LED_LEN: {
+      id: 'NTF_LED_LEN',
+      label: 'Notification LED Length',
+      description: 'Configured pixel count for addressable notification LEDs.',
+      category: 'outputs',
+      minimum: 1,
+      maximum: 256,
+      step: 1,
+      rebootRequired: true,
+      notes: notificationLedNotes
+    },
+    NTF_LED_BRIGHT: {
+      id: 'NTF_LED_BRIGHT',
+      label: 'Notification LED Brightness',
+      description: 'Global brightness level for supported notification LEDs.',
+      category: 'outputs',
+      minimum: 0,
+      maximum: 3,
+      notes: notificationLedNotes,
+      options: enumOptions(ARDUCOPTER_NOTIFICATION_LED_BRIGHTNESS_LABELS)
+    },
+    NTF_LED_OVERRIDE: {
+      id: 'NTF_LED_OVERRIDE',
+      label: 'Notification LED Source',
+      description: 'Alternate source for notification LED state and color control.',
+      category: 'outputs',
+      minimum: 0,
+      maximum: 3,
+      notes: notificationLedNotes,
+      options: enumOptions(ARDUCOPTER_NOTIFICATION_LED_OVERRIDE_LABELS)
+    },
+    NTF_BUZZ_TYPES: {
+      id: 'NTF_BUZZ_TYPES',
+      label: 'Notification Buzzer Drivers',
+      description: 'Enabled buzzer driver bitmask.',
+      category: 'outputs',
+      minimum: 0,
+      maximum: 7,
+      notes: notificationBuzzNotes
+    },
+    NTF_BUZZ_VOLUME: {
+      id: 'NTF_BUZZ_VOLUME',
+      label: 'Notification Buzzer Volume',
+      description: 'Volume percentage used by supported buzzer drivers.',
+      category: 'outputs',
+      unit: '%',
+      minimum: 0,
+      maximum: 100,
+      step: 1,
+      notes: notificationBuzzNotes
+    },
     SERVO1_FUNCTION: {
       id: 'SERVO1_FUNCTION',
       label: 'Output 1 Function',
@@ -794,6 +1443,38 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       category: 'outputs',
       notes: ['After remapping outputs, confirm the new assignment with a guarded motor or output review before flight.'],
       options: enumOptions(ARDUCOPTER_SERVO_FUNCTION_LABELS)
+    },
+    SERVO13_FUNCTION: {
+      id: 'SERVO13_FUNCTION',
+      label: 'Output 13 Function',
+      description: 'Assigned function for output channel 13.',
+      category: 'outputs',
+      notes: ['After remapping outputs, confirm the new assignment with a guarded motor or output review before flight.'],
+      options: enumOptions(ARDUCOPTER_SERVO_FUNCTION_LABELS)
+    },
+    SERVO14_FUNCTION: {
+      id: 'SERVO14_FUNCTION',
+      label: 'Output 14 Function',
+      description: 'Assigned function for output channel 14.',
+      category: 'outputs',
+      notes: ['After remapping outputs, confirm the new assignment with a guarded motor or output review before flight.'],
+      options: enumOptions(ARDUCOPTER_SERVO_FUNCTION_LABELS)
+    },
+    SERVO15_FUNCTION: {
+      id: 'SERVO15_FUNCTION',
+      label: 'Output 15 Function',
+      description: 'Assigned function for output channel 15.',
+      category: 'outputs',
+      notes: ['After remapping outputs, confirm the new assignment with a guarded motor or output review before flight.'],
+      options: enumOptions(ARDUCOPTER_SERVO_FUNCTION_LABELS)
+    },
+    SERVO16_FUNCTION: {
+      id: 'SERVO16_FUNCTION',
+      label: 'Output 16 Function',
+      description: 'Assigned function for output channel 16.',
+      category: 'outputs',
+      notes: ['After remapping outputs, confirm the new assignment with a guarded motor or output review before flight.'],
+      options: enumOptions(ARDUCOPTER_SERVO_FUNCTION_LABELS)
     }
   },
   setupSections: [
@@ -875,7 +1556,17 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       id: 'failsafe',
       title: 'Failsafe',
       description: 'Review throttle and battery failsafe behavior.',
-      requiredParameters: ['FS_THR_ENABLE', 'BATT_FS_LOW_ACT'],
+      requiredParameters: [
+        'FS_THR_ENABLE',
+        'FS_THR_VALUE',
+        'BATT_FS_VOLTSRC',
+        'BATT_LOW_VOLT',
+        'BATT_LOW_MAH',
+        'BATT_FS_LOW_ACT',
+        'BATT_CRT_VOLT',
+        'BATT_CRT_MAH',
+        'BATT_FS_CRT_ACT'
+      ],
       requiredLiveSignals: ['rc-input', 'battery-telemetry'],
       sessionOverrides: {
         'usb-bench': {
@@ -899,7 +1590,7 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       id: 'power',
       title: 'Battery',
       description: 'Validate battery monitoring before flight.',
-      requiredParameters: ['BATT_MONITOR', 'BATT_CAPACITY'],
+      requiredParameters: ['BATT_MONITOR', 'BATT_CAPACITY', 'BATT_ARM_VOLT', 'BATT_ARM_MAH'],
       requiredLiveSignals: ['battery-telemetry'],
       sessionOverrides: {
         'usb-bench': {

@@ -24,7 +24,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -975,7 +976,8 @@ select {
 }
 
 .scoped-editor-field input,
-.scoped-editor-field select {
+.scoped-editor-field select,
+.scoped-editor-field textarea {
   width: 100%;
   border-radius: 12px;
   border: 1px solid #243049;
@@ -984,9 +986,42 @@ select {
   padding: 10px 12px;
 }
 
+.scoped-editor-field textarea {
+  resize: vertical;
+  min-height: 88px;
+}
+
 .scoped-editor-field small {
   color: #96a4bd;
   line-height: 1.45;
+}
+
+.scoped-checkbox-list {
+  display: grid;
+  gap: 8px;
+}
+
+.scoped-checkbox-option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid #243049;
+  background: #09101a;
+  color: #d3dced;
+}
+
+.scoped-checkbox-option input {
+  margin-top: 2px;
+}
+
+.scoped-checkbox-option span {
+  color: #d3dced;
+  font-size: 13px;
+  letter-spacing: normal;
+  text-transform: none;
 }
 
 .scoped-editor-field--compact {
@@ -1036,6 +1071,255 @@ select {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
+}
+
+.snapshot-capture-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.snapshot-capture-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-content: start;
+}
+
+.snapshot-protected-toggle {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid #243049;
+  background: #0f172a;
+  color: #d3dced;
+}
+
+.snapshot-protected-toggle input {
+  margin-top: 2px;
+}
+
+.snapshot-library-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.snapshot-card {
+  display: grid;
+  gap: 12px;
+  width: 100%;
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid #243049;
+  background: #101a2a;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    background 160ms ease;
+}
+
+.snapshot-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(97, 218, 251, 0.42);
+}
+
+.snapshot-card.is-active {
+  border-color: rgba(97, 218, 251, 0.72);
+  background:
+    radial-gradient(circle at top right, rgba(97, 218, 251, 0.1), transparent 40%),
+    linear-gradient(180deg, rgba(18, 35, 58, 0.94), rgba(11, 22, 36, 0.98));
+  box-shadow: inset 0 0 0 1px rgba(97, 218, 251, 0.12);
+}
+
+.snapshot-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.snapshot-card__header strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.snapshot-card__header small,
+.snapshot-card p {
+  color: #c8d4e8;
+}
+
+.snapshot-card p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.snapshot-card__note,
+.snapshot-selected__note {
+  margin: 0;
+  color: #96a4bd;
+  line-height: 1.5;
+}
+
+.snapshot-selected {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border-radius: 18px;
+  border: 1px solid #243049;
+  background:
+    radial-gradient(circle at top right, rgba(97, 218, 251, 0.08), transparent 42%),
+    #101a2a;
+}
+
+.preset-group-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.preset-group {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border-radius: 18px;
+  border: 1px solid #243049;
+  background: #0f172a;
+}
+
+.preset-group__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.preset-group__header strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.preset-group__header p {
+  margin: 0;
+  color: #c8d4e8;
+  line-height: 1.5;
+}
+
+.preset-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.preset-card {
+  display: grid;
+  gap: 12px;
+  width: 100%;
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid #243049;
+  background: #101a2a;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    background 160ms ease;
+}
+
+.preset-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(97, 218, 251, 0.42);
+}
+
+.preset-card.is-active {
+  border-color: rgba(97, 218, 251, 0.72);
+  background:
+    radial-gradient(circle at top right, rgba(97, 218, 251, 0.1), transparent 40%),
+    linear-gradient(180deg, rgba(18, 35, 58, 0.94), rgba(11, 22, 36, 0.98));
+  box-shadow: inset 0 0 0 1px rgba(97, 218, 251, 0.12);
+}
+
+.preset-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.preset-card__header strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.preset-card__header small,
+.preset-card p,
+.preset-notes {
+  color: #c8d4e8;
+}
+
+.preset-card p,
+.preset-notes p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.preset-selected {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border-radius: 18px;
+  border: 1px solid #243049;
+  background:
+    radial-gradient(circle at top right, rgba(255, 184, 76, 0.08), transparent 42%),
+    #101a2a;
+}
+
+.preset-selected__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.preset-notes {
+  display: grid;
+  gap: 8px;
+}
+
+.preset-notes strong {
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #e6edf7;
+}
+
+.snapshot-restore-ack {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  color: #d3dced;
+}
+
+.snapshot-restore-ack input {
+  margin-top: 2px;
 }
 
 .motor-test-card {
@@ -1590,6 +1874,8 @@ select {
   .telemetry-metric-grid,
   .mode-toggle,
   .rc-range-axis-grid,
+  .snapshot-library-grid,
+  .preset-card-grid,
   .tuning-card-grid,
   .tuning-field-grid,
   .port-card-grid,
@@ -1609,13 +1895,20 @@ select {
   .parameter-follow-up,
   .parameter-details__header,
   .parameter-details__grid,
-  .parameter-diff-item {
+  .parameter-diff-item,
+  .snapshot-capture-row,
+  .preset-group__header,
+  .snapshot-restore-ack {
     grid-template-columns: 1fr;
     display: grid;
   }
 
   .parameter-follow-up .button-row {
     margin-left: 0;
+  }
+
+  .snapshot-capture-actions {
+    justify-content: flex-start;
   }
 
   .setup-flow__current {

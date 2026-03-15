@@ -3,6 +3,7 @@ import type {
   FirmwareMetadataBundle,
   NormalizedFirmwareMetadataBundle,
   NormalizedParameterDefinition,
+  NormalizedPresetDefinition,
   ParameterCategoryDefinition
 } from './types.js'
 
@@ -38,16 +39,28 @@ const DEFAULT_APP_VIEWS: AppViewDefinition[] = [
     order: 5
   },
   {
+    id: 'snapshots',
+    label: 'Snapshots',
+    description: 'Capture, compare, and restore known-good parameter sets.',
+    order: 6
+  },
+  {
     id: 'tuning',
     label: 'Tuning',
     description: 'Beginner-safe flight-feel and acro-rate tuning.',
-    order: 6
+    order: 7
+  },
+  {
+    id: 'presets',
+    label: 'Presets',
+    description: 'Curated, explainable tuning bundles with automatic backup.',
+    order: 8
   },
   {
     id: 'parameters',
     label: 'Parameters',
     description: 'Low-level parameter editing, diffing, and backup work.',
-    order: 7
+    order: 9
   }
 ]
 
@@ -61,9 +74,19 @@ function fallbackCategoryDefinition(categoryId: string): ParameterCategoryDefini
   }
 }
 
+function fallbackPresetGroupDefinition(groupId: string) {
+  return {
+    id: groupId,
+    label: startCase(groupId),
+    description: `${startCase(groupId)} presets.`,
+    order: 999
+  }
+}
+
 export function normalizeFirmwareMetadata(bundle: FirmwareMetadataBundle): NormalizedFirmwareMetadataBundle {
   const appViews = [...(bundle.appViews ?? DEFAULT_APP_VIEWS)].sort((left, right) => left.order - right.order)
   const categoryById = { ...(bundle.categories ?? {}) }
+  const presetGroupById = { ...(bundle.presetGroups ?? {}) }
 
   const parameters = Object.fromEntries(
     Object.entries(bundle.parameters).map(([parameterId, definition]) => {
@@ -79,11 +102,38 @@ export function normalizeFirmwareMetadata(bundle: FirmwareMetadataBundle): Norma
     })
   ) as Record<string, NormalizedParameterDefinition>
 
+  const presets = Object.values(bundle.presets ?? {})
+    .map<NormalizedPresetDefinition>((preset) => {
+      const groupDefinition = presetGroupById[preset.groupId] ?? fallbackPresetGroupDefinition(preset.groupId)
+      presetGroupById[preset.groupId] = groupDefinition
+
+      return {
+        ...preset,
+        groupDefinition,
+        tags: [...new Set((preset.tags ?? []).map((tag) => tag.trim()).filter((tag) => tag.length > 0))]
+      }
+    })
+    .sort(
+      (left, right) =>
+        left.groupDefinition.order - right.groupDefinition.order ||
+        left.order - right.order ||
+        left.label.localeCompare(right.label)
+    )
+
   const categories = Object.values(categoryById).sort((left, right) => left.order - right.order || left.label.localeCompare(right.label))
+  const presetGroups = Object.values(presetGroupById).sort(
+    (left, right) => left.order - right.order || left.label.localeCompare(right.label)
+  )
   const parametersByCategory = categories.reduce<Record<string, NormalizedParameterDefinition[]>>((grouped, category) => {
     grouped[category.id] = Object.values(parameters)
       .filter((definition) => definition.category === category.id)
       .sort((left, right) => left.id.localeCompare(right.id))
+    return grouped
+  }, {})
+  const presetsByGroup = presetGroups.reduce<Record<string, NormalizedPresetDefinition[]>>((grouped, group) => {
+    grouped[group.id] = presets
+      .filter((preset) => preset.groupId === group.id)
+      .sort((left, right) => left.order - right.order || left.label.localeCompare(right.label))
     return grouped
   }, {})
 
@@ -92,6 +142,10 @@ export function normalizeFirmwareMetadata(bundle: FirmwareMetadataBundle): Norma
     appViews,
     categories,
     categoryById,
+    presetGroups,
+    presetGroupById,
+    presets,
+    presetsByGroup,
     parameters,
     parametersByCategory
   }

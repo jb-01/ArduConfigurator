@@ -76,6 +76,37 @@ export const ARDUCOPTER_BATTERY_FAILSAFE_ACTION_LABELS: Record<number, string> =
   7: 'Brake or Land'
 }
 
+export const ARDUCOPTER_BATTERY_MONITOR_LABELS: Record<number, string> = {
+  0: 'Disabled',
+  3: 'Analog Voltage Only',
+  4: 'Analog Voltage and Current',
+  5: 'Solo',
+  6: 'Bebop',
+  7: 'SMBus-Generic',
+  8: 'DroneCAN BatteryInfo',
+  9: 'ESC Telemetry',
+  10: 'Sum Of Selected Monitors',
+  11: 'Fuel Flow',
+  12: 'Fuel Level PWM',
+  13: 'SMBus SUI3',
+  14: 'SMBus SUI6',
+  15: 'NeoDesign',
+  16: 'SMBus Maxell',
+  17: 'Generator Electrical',
+  18: 'Generator Fuel',
+  19: 'Rotoye',
+  20: 'MPPT',
+  21: 'INA2XX',
+  22: 'LTC2946',
+  23: 'Torqeedo',
+  24: 'Fuel Level Analog'
+}
+
+export const ARDUCOPTER_BATTERY_VOLTAGE_SOURCE_LABELS: Record<number, string> = {
+  0: 'Raw Voltage',
+  1: 'Sag Compensated Voltage'
+}
+
 export const ARDUCOPTER_THROTTLE_FAILSAFE_LABELS: Record<number, string> = {
   0: 'Disabled',
   1: 'Always RTL',
@@ -201,6 +232,150 @@ export const ARDUCOPTER_GPS_TYPE_LABELS: Record<number, string> = {
   23: 'Septentrio',
   24: 'Unicore Moving Baseline Base',
   25: 'Unicore Moving Baseline Rover'
+}
+
+export const ARDUCOPTER_GPS_AUTO_CONFIG_LABELS: Record<number, string> = {
+  0: 'Disabled',
+  1: 'Serial GPS Only',
+  2: 'Serial + DroneCAN',
+  3: 'Clear Non-ArduPilot Config'
+}
+
+export const ARDUCOPTER_GPS_AUTO_SWITCH_LABELS: Record<number, string> = {
+  0: 'Use Primary',
+  1: 'Use Best',
+  2: 'Blend',
+  4: 'Primary if 3D Fix+'
+}
+
+export const ARDUCOPTER_GPS_PRIMARY_LABELS: Record<number, string> = {
+  0: 'First GPS',
+  1: 'Second GPS'
+}
+
+export const ARDUCOPTER_GPS_RATE_MS_LABELS: Record<number, string> = {
+  50: '20 Hz',
+  100: '10 Hz',
+  125: '8 Hz',
+  200: '5 Hz'
+}
+
+export const ARDUCOPTER_OSD_TYPE_LABELS: Record<number, string> = {
+  0: 'Disabled',
+  1: 'MAX7456',
+  2: 'SITL',
+  3: 'MSP',
+  4: 'TXONLY',
+  5: 'MSP DisplayPort'
+}
+
+export const ARDUCOPTER_OSD_CHANNEL_LABELS: Record<number, string> = {
+  0: 'Disabled',
+  5: 'Channel 5',
+  6: 'Channel 6',
+  7: 'Channel 7',
+  8: 'Channel 8',
+  9: 'Channel 9',
+  10: 'Channel 10',
+  11: 'Channel 11',
+  12: 'Channel 12',
+  13: 'Channel 13',
+  14: 'Channel 14',
+  15: 'Channel 15',
+  16: 'Channel 16'
+}
+
+export const ARDUCOPTER_OSD_SWITCH_METHOD_LABELS: Record<number, string> = {
+  0: 'Advance On Change',
+  1: 'Select By PWM Range',
+  2: 'Advance On High Pulse'
+}
+
+export const ARDUCOPTER_MSP_OSD_CELL_COUNT_LABELS: Record<number, string> = {
+  0: 'Auto',
+  1: '1 cell',
+  2: '2 cells',
+  3: '3 cells',
+  4: '4 cells',
+  5: '5 cells',
+  6: '6 cells',
+  7: '7 cells',
+  8: '8 cells',
+  9: '9 cells',
+  10: '10 cells',
+  11: '11 cells',
+  12: '12 cells',
+  13: '13 cells',
+  14: '14 cells'
+}
+
+export const ARDUCOPTER_VTX_ENABLE_LABELS: Record<number, string> = {
+  0: 'Disabled',
+  1: 'Enabled'
+}
+
+export const ARDUCOPTER_MSP_OPTION_BIT_LABELS: Record<number, string> = {
+  0: 'Telemetry Mode',
+  1: 'Disable DJI Workarounds',
+  2: 'Betaflight Fonts'
+}
+
+export const ARDUCOPTER_RSSI_TYPE_LABELS: Record<number, string> = {
+  0: 'Disabled',
+  1: 'Analog Pin',
+  2: 'RC Channel PWM',
+  3: 'Receiver Protocol',
+  4: 'PWM Input Pin'
+}
+
+export const ARDUCOPTER_NOTIFICATION_LED_TYPE_BIT_LABELS: Record<number, string> = {
+  0: 'Built-in LED',
+  5: 'DroneCAN',
+  8: 'NeoPixel',
+  9: 'ProfiLED',
+  10: 'Scripting',
+  11: 'DShot',
+  12: 'ProfiLED SPI'
+}
+
+export const ARDUCOPTER_NOTIFICATION_BUZZER_TYPE_BIT_LABELS: Record<number, string> = {
+  0: 'Built-in Buzzer',
+  1: 'DShot',
+  2: 'DroneCAN'
+}
+
+export const ARDUCOPTER_NOTIFICATION_LED_BRIGHTNESS_LABELS: Record<number, string> = {
+  0: 'Off',
+  1: 'Low',
+  2: 'Medium',
+  3: 'High'
+}
+
+export const ARDUCOPTER_NOTIFICATION_LED_OVERRIDE_LABELS: Record<number, string> = {
+  0: 'Standard',
+  1: 'MAVLink / Scripting / AP_Periph',
+  2: 'Outback Challenge',
+  3: 'Traffic Light'
+}
+
+export const ARDUCOPTER_FLTMODE_CHANNEL_LABELS: Record<number, string> = {
+  0: 'Disabled',
+  1: 'Channel 1',
+  2: 'Channel 2',
+  3: 'Channel 3',
+  4: 'Channel 4',
+  5: 'Channel 5',
+  6: 'Channel 6',
+  7: 'Channel 7',
+  8: 'Channel 8',
+  9: 'Channel 9',
+  10: 'Channel 10',
+  11: 'Channel 11',
+  12: 'Channel 12',
+  13: 'Channel 13',
+  14: 'Channel 14',
+  15: 'Channel 15',
+  16: 'Channel 16'
 }
 
 export const ARDUCOPTER_SERVO_FUNCTION_LABELS: Record<number, string> = {
@@ -420,6 +595,59 @@ export function formatArducopterGpsType(value: number | undefined): string {
   return arducopterGpsTypeLabel(value) ?? (value === undefined ? 'Unknown' : `GPS ${value}`)
 }
 
+export function formatArducopterGpsAutoConfig(value: number | undefined): string {
+  return ARDUCOPTER_GPS_AUTO_CONFIG_LABELS[value ?? Number.NaN] ?? (value === undefined ? 'Unknown' : `Auto config ${value}`)
+}
+
+export function formatArducopterGpsAutoSwitch(value: number | undefined): string {
+  return ARDUCOPTER_GPS_AUTO_SWITCH_LABELS[value ?? Number.NaN] ?? (value === undefined ? 'Unknown' : `Switch ${value}`)
+}
+
+export function formatArducopterGpsPrimary(value: number | undefined): string {
+  return ARDUCOPTER_GPS_PRIMARY_LABELS[value ?? Number.NaN] ?? (value === undefined ? 'Unknown' : `Primary ${value}`)
+}
+
+export function formatArducopterGpsRateMs(value: number | undefined): string {
+  const label = ARDUCOPTER_GPS_RATE_MS_LABELS[value ?? Number.NaN]
+  return label ?? (value === undefined ? 'Unknown' : `${value} ms`)
+}
+
+export function formatArducopterOsdType(value: number | undefined): string {
+  return ARDUCOPTER_OSD_TYPE_LABELS[value ?? Number.NaN] ?? (value === undefined ? 'Unknown' : `OSD ${value}`)
+}
+
+export function formatArducopterOsdChannel(value: number | undefined): string {
+  return ARDUCOPTER_OSD_CHANNEL_LABELS[value ?? Number.NaN] ?? (value === undefined ? 'Unknown' : `Channel ${value}`)
+}
+
+export function formatArducopterOsdSwitchMethod(value: number | undefined): string {
+  return ARDUCOPTER_OSD_SWITCH_METHOD_LABELS[value ?? Number.NaN] ?? (value === undefined ? 'Unknown' : `Method ${value}`)
+}
+
+export function formatArducopterMspOsdCellCount(value: number | undefined): string {
+  return ARDUCOPTER_MSP_OSD_CELL_COUNT_LABELS[value ?? Number.NaN] ?? (value === undefined ? 'Unknown' : `${value} cells`)
+}
+
+export function formatArducopterVtxEnable(value: number | undefined): string {
+  return ARDUCOPTER_VTX_ENABLE_LABELS[value ?? Number.NaN] ?? (value === undefined ? 'Unknown' : `State ${value}`)
+}
+
+export function formatArducopterRssiType(value: number | undefined): string {
+  return ARDUCOPTER_RSSI_TYPE_LABELS[value ?? Number.NaN] ?? (value === undefined ? 'Unknown' : `RSSI ${value}`)
+}
+
+export function formatArducopterNotificationLedBrightness(value: number | undefined): string {
+  return ARDUCOPTER_NOTIFICATION_LED_BRIGHTNESS_LABELS[value ?? Number.NaN] ?? (value === undefined ? 'Unknown' : `Brightness ${value}`)
+}
+
+export function formatArducopterNotificationLedOverride(value: number | undefined): string {
+  return ARDUCOPTER_NOTIFICATION_LED_OVERRIDE_LABELS[value ?? Number.NaN] ?? (value === undefined ? 'Unknown' : `Source ${value}`)
+}
+
+export function formatArducopterFlightModeChannel(value: number | undefined): string {
+  return ARDUCOPTER_FLTMODE_CHANNEL_LABELS[value ?? Number.NaN] ?? (value === undefined ? 'Unknown' : `Channel ${value}`)
+}
+
 export function arducopterMotorNumberForServoFunction(value: number | undefined): number | undefined {
   switch (value) {
     case 33:
@@ -461,6 +689,14 @@ export function formatArducopterFlightMode(modeNumber: number | undefined): stri
 
 export function formatArducopterBatteryFailsafeAction(value: number | undefined): string {
   return ARDUCOPTER_BATTERY_FAILSAFE_ACTION_LABELS[value ?? Number.NaN] ?? (value === undefined ? 'Unknown' : `Action ${value}`)
+}
+
+export function formatArducopterBatteryMonitor(value: number | undefined): string {
+  return ARDUCOPTER_BATTERY_MONITOR_LABELS[value ?? Number.NaN] ?? (value === undefined ? 'Unknown' : `Monitor ${value}`)
+}
+
+export function formatArducopterBatteryVoltageSource(value: number | undefined): string {
+  return ARDUCOPTER_BATTERY_VOLTAGE_SOURCE_LABELS[value ?? Number.NaN] ?? (value === undefined ? 'Unknown' : `Source ${value}`)
 }
 
 export function formatArducopterThrottleFailsafe(value: number | undefined): string {

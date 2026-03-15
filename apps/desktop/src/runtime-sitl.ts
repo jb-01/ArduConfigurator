@@ -13,12 +13,18 @@ import {
   launchArduPilotSITL,
   type ArduPilotSITLProcess
 } from '@arduconfig/sitl-harness'
+import {
+  listSnapshotLibraryFile,
+  maybeRunSnapshotOperations,
+  type SnapshotCommandOptions,
+  type SnapshotRestoreDecision,
+} from './snapshot-ops.js'
 
 type SnapshotFormat = 'off' | 'pretty' | 'json'
 type RuntimeSITLTransport = 'tcp' | 'udp'
 type RuntimeSITLLaunchMode = 'direct-binary' | 'sim-vehicle'
 
-interface RuntimeSITLOptions {
+interface RuntimeSITLOptions extends SnapshotCommandOptions {
   repoPath?: string
   pythonExecutable: string
   launchMode: RuntimeSITLLaunchMode
@@ -62,13 +68,25 @@ const defaults: RuntimeSITLOptions = {
   snapshot: 'pretty',
   holdOpenMs: 0,
   executeParameterValidation: false,
-  restoreAfterValidation: true
+  restoreAfterValidation: true,
+  captureSnapshot: false,
+  listSnapshotLibrary: false,
+  compareSnapshot: false,
+  restoreSnapshot: false,
+  executeSnapshotRestore: false,
+  snapshotTags: [],
+  snapshotProtected: false
 }
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2))
   let sitl: ArduPilotSITLProcess | undefined
   let runtime: ArduPilotConfiguratorRuntime | undefined
+
+  if (options.listSnapshotLibrary) {
+    await listSnapshotLibraryFile(options.snapshotLibraryFile, '[sitl]')
+    return
+  }
 
   try {
     if (options.repoPath) {
@@ -132,7 +150,11 @@ async function main(): Promise<void> {
     }
 
     await maybeValidateParameterWrite(runtime, options)
-    renderSnapshot(runtime.getSnapshot(), options.snapshot)
+    const snapshotAfterWrites = await maybeRunSnapshotOperations(runtime, runtime.getSnapshot(), options, {
+      logPrefix: '[sitl]',
+      evaluateRestore: evaluateSnapshotRestoreDecision
+    })
+    renderSnapshot(snapshotAfterWrites, options.snapshot)
 
     if (options.holdOpenMs > 0) {
       console.log(`[sitl] holding link open for ${options.holdOpenMs}ms`)
@@ -173,6 +195,36 @@ function parseArgs(argv: string[]): RuntimeSITLOptions {
 
     if (argument === '--execute-parameter-validation') {
       options.executeParameterValidation = true
+      continue
+    }
+
+    if (argument === '--capture-snapshot') {
+      options.captureSnapshot = true
+      continue
+    }
+
+    if (argument === '--list-snapshot-library') {
+      options.listSnapshotLibrary = true
+      continue
+    }
+
+    if (argument === '--compare-snapshot') {
+      options.compareSnapshot = true
+      continue
+    }
+
+    if (argument === '--restore-snapshot') {
+      options.restoreSnapshot = true
+      continue
+    }
+
+    if (argument === '--execute-snapshot-restore') {
+      options.executeSnapshotRestore = true
+      continue
+    }
+
+    if (argument === '--snapshot-protected') {
+      options.snapshotProtected = true
       continue
     }
 
@@ -250,6 +302,33 @@ function parseArgs(argv: string[]): RuntimeSITLOptions {
       case 'validate-parameter-value':
         options.validateParameterValue = Number(rawValue)
         break
+      case 'snapshot-input-file':
+        options.snapshotInputFile = rawValue
+        break
+      case 'snapshot-output-file':
+        options.snapshotOutputFile = rawValue
+        break
+      case 'snapshot-library-file':
+        options.snapshotLibraryFile = rawValue
+        break
+      case 'snapshot-label':
+        options.snapshotLabel = rawValue
+        break
+      case 'snapshot-note':
+        options.snapshotNote = rawValue
+        break
+      case 'snapshot-tags':
+        options.snapshotTags = rawValue
+          .split(',')
+          .map((tag) => tag.trim())
+          .filter((tag) => tag.length > 0)
+        break
+      case 'snapshot-id':
+        options.snapshotSelectId = rawValue
+        break
+      case 'snapshot-select-label':
+        options.snapshotSelectLabel = rawValue
+        break
       default:
         break
     }
@@ -318,6 +397,31 @@ async function maybeValidateParameterWrite(
       verifyTimeoutMs: options.parameterWriteVerifyTimeoutMs
     })
     console.log(`[sitl] parameter validation restored: ${rollbackResult.paramId}=${rollbackResult.confirmedValue}`)
+  }
+}
+
+function evaluateSnapshotRestoreDecision(snapshot: ConfiguratorSnapshot): SnapshotRestoreDecision {
+  const reasons: string[] = []
+
+  if (snapshot.connection.kind !== 'connected') {
+    reasons.push('The transport is not connected.')
+  }
+
+  if (!snapshot.vehicle) {
+    reasons.push('No vehicle heartbeat has been identified yet.')
+  }
+
+  if (snapshot.vehicle?.armed) {
+    reasons.push('The vehicle reports armed=true.')
+  }
+
+  if (snapshot.parameterStats.status !== 'complete') {
+    reasons.push('Parameter sync is not complete yet.')
+  }
+
+  return {
+    allowed: reasons.length === 0,
+    reasons
   }
 }
 

@@ -1,5 +1,7 @@
 import type { ConfiguratorSnapshot, ParameterState } from './types.js'
 
+const SNAPSHOT_EXCLUDED_PREFIXES = ['STAT_'] as const
+
 export interface ParameterBackupEntry {
   id: string
   value: number
@@ -33,12 +35,23 @@ export interface ParameterBackupImportResult {
 }
 
 export function createParameterBackup(snapshot: ConfiguratorSnapshot): ParameterBackupFile {
+  const exportableParameters = snapshot.parameters
+    .filter((parameter) => !isSnapshotExcludedParameterState(parameter))
+    .map((parameter) => ({
+      id: parameter.id,
+      value: parameter.value,
+      category: parameter.definition?.category,
+      label: parameter.definition?.label,
+      unit: parameter.definition?.unit
+    }))
+    .sort((left, right) => left.id.localeCompare(right.id))
+
   return {
     schemaVersion: 1,
     application: 'ArduConfigurator',
     firmware: snapshot.vehicle?.vehicle ?? 'Unknown',
     exportedAt: new Date().toISOString(),
-    parameterCount: snapshot.parameters.length,
+    parameterCount: exportableParameters.length,
     vehicle: snapshot.vehicle
       ? {
           firmware: snapshot.vehicle.firmware,
@@ -48,15 +61,7 @@ export function createParameterBackup(snapshot: ConfiguratorSnapshot): Parameter
           flightMode: snapshot.vehicle.flightMode
         }
       : undefined,
-    parameters: snapshot.parameters
-      .map((parameter) => ({
-        id: parameter.id,
-        value: parameter.value,
-        category: parameter.definition?.category,
-        label: parameter.definition?.label,
-        unit: parameter.definition?.unit
-      }))
-      .sort((left, right) => left.id.localeCompare(right.id))
+    parameters: exportableParameters
   }
 }
 
@@ -94,6 +99,10 @@ export function deriveDraftValuesFromParameterBackup(
   let unchangedCount = 0
 
   backup.parameters.forEach((entry) => {
+    if (isSnapshotExcludedBackupEntry(entry)) {
+      return
+    }
+
     const current = parameterById.get(entry.id)
     if (!current) {
       unknownParameterIds.push(entry.id)
@@ -136,4 +145,12 @@ function isParameterBackupFile(value: unknown): value is ParameterBackupFile {
       typeof (entry as Partial<ParameterBackupEntry>).id === 'string' &&
       typeof (entry as Partial<ParameterBackupEntry>).value === 'number'
   )
+}
+
+function isSnapshotExcludedParameterState(parameter: ParameterState): boolean {
+  return parameter.definition?.snapshotExcluded === true || SNAPSHOT_EXCLUDED_PREFIXES.some((prefix) => parameter.id.startsWith(prefix))
+}
+
+function isSnapshotExcludedBackupEntry(entry: ParameterBackupEntry): boolean {
+  return SNAPSHOT_EXCLUDED_PREFIXES.some((prefix) => entry.id.startsWith(prefix))
 }

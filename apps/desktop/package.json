@@ -3,9 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "main": "dist/electron-main.js",
   "scripts": {
     "build": "tsc -b tsconfig.json",
     "typecheck": "tsc -b tsconfig.json --pretty false",
+    "app": "electron dist/electron-main.js",
     "probe:serial": "npm run build && node dist/probe-serial.js",
     "runtime:serial": "npm run build && node dist/runtime-serial.js",
     "runtime:sitl": "npm run build && node dist/runtime-sitl.js"
@@ -14,5 +16,8 @@
     "@arduconfig/sitl-harness": "0.1.0",
     "@arduconfig/transport": "0.1.0",
     "serialport": "^13.0.0"
+  },
+  "devDependencies": {
+    "electron": "^39.2.0"
   }
 }

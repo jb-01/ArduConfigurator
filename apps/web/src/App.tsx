@@ -8,12 +8,14 @@ import {
   advanceModeSwitchExerciseState,
   advanceRcRangeExerciseState,
   createParameterBackup,
+  createParameterSnapshotLibrary,
   createIdleModeSwitchExerciseState,
   createIdleRcRangeExerciseState,
   createModeSwitchExerciseState,
   createRcRangeExerciseState,
   deriveEscSetupSummary,
   deriveDraftValuesFromParameterBackup,
+  deriveDraftValuesFromParameterPreset,
   deriveArducopterAirframe,
   deriveModeExerciseAssignments,
   deriveParameterDraftEntries,
@@ -24,6 +26,7 @@ import {
   deriveRcAxisObservations,
   deriveRcMapDraftValues,
   detectDominantRcChannelChange,
+  evaluateParameterPresetApplicability,
   evaluateMotorTestEligibility,
   failModeSwitchExerciseState,
   failRcRangeExerciseState,
@@ -32,7 +35,10 @@ import {
   formatRcAxisLabel,
   groupParameterDraftEntries,
   parseParameterBackup,
+  parseParameterSnapshotInput,
   serializeParameterBackup,
+  serializeParameterSnapshotLibrary,
+  sortParameterSnapshots,
   summarizeParameterDraftEntries,
   type ConfiguratorSnapshot,
   type MotorTestRequest,
@@ -45,23 +51,44 @@ import {
   type ServoOutputKind,
 } from '@arduconfig/ardupilot-core'
 import {
+  ARDUCOPTER_MSP_OPTION_BIT_LABELS,
+  ARDUCOPTER_NOTIFICATION_BUZZER_TYPE_BIT_LABELS,
+  ARDUCOPTER_NOTIFICATION_LED_TYPE_BIT_LABELS,
   arducopterMetadata,
+  formatArducopterBatteryMonitor,
   formatArducopterBatteryFailsafeAction,
+  formatArducopterBatteryVoltageSource,
+  formatArducopterFlightModeChannel,
   formatArducopterFlightMode,
+  formatArducopterGpsAutoConfig,
+  formatArducopterGpsAutoSwitch,
+  formatArducopterGpsPrimary,
+  formatArducopterGpsRateMs,
   formatArducopterGpsType,
+  formatArducopterMspOsdCellCount,
+  formatArducopterNotificationLedBrightness,
+  formatArducopterNotificationLedOverride,
+  formatArducopterOsdChannel,
+  formatArducopterOsdSwitchMethod,
+  formatArducopterOsdType,
+  formatArducopterRssiType,
   formatArducopterSerialBaud,
   formatArducopterSerialProtocol,
   formatArducopterSerialRtscts,
   formatArducopterThrottleFailsafe,
+  formatArducopterVtxEnable,
   normalizeFirmwareMetadata,
   type AppViewId,
+  type NormalizedPresetDefinition,
   type ParameterDefinition,
   type ParameterValueOption,
   type SessionProfile,
 } from '@arduconfig/param-metadata'
 import { MavlinkSession, MavlinkV2Codec, createArduCopterMockScenario } from '@arduconfig/protocol-mavlink'
-import { MockTransport, WebSerialTransport } from '@arduconfig/transport'
+import { MockTransport, WebSerialTransport, WebSocketTransport } from '@arduconfig/transport'
 import { KeyValueRow, Panel, StatusBadge, buttonStyle } from '@arduconfig/ui-kit'
+
+import { createSavedSnapshot, loadStoredSnapshots, persistSnapshots, type SavedParameterSnapshot } from './snapshot-library'
 
 const actionLabels = {
   'request-parameters': 'Pull Parameters',
@@ -71,11 +98,55 @@ const actionLabels = {
 } as const
 
 const OUTPUT_REVIEW_PARAM_IDS = ['MOT_PWM_TYPE', 'MOT_PWM_MIN', 'MOT_PWM_MAX', 'MOT_SPIN_ARM', 'MOT_SPIN_MIN', 'MOT_SPIN_MAX'] as const
+const OUTPUT_NOTIFICATION_PARAM_IDS = [
+  'NTF_LED_TYPES',
+  'NTF_LED_LEN',
+  'NTF_LED_BRIGHT',
+  'NTF_LED_OVERRIDE',
+  'NTF_BUZZ_TYPES',
+  'NTF_BUZZ_VOLUME'
+] as const
+const PORTS_PERIPHERAL_PARAM_IDS = [
+  'GPS_TYPE',
+  'GPS_TYPE2',
+  'GPS_AUTO_CONFIG',
+  'GPS_AUTO_SWITCH',
+  'GPS_PRIMARY',
+  'GPS_RATE_MS',
+  'OSD_TYPE',
+  'OSD_CHAN',
+  'OSD_SW_METHOD',
+  'MSP_OPTIONS',
+  'MSP_OSD_NCELLS',
+  'VTX_ENABLE',
+  'VTX_FREQ',
+  'VTX_POWER',
+  'VTX_MAX_POWER',
+  'VTX_OPTIONS'
+] as const
+const POWER_REVIEW_PARAM_IDS = [
+  'BATT_MONITOR',
+  'BATT_CAPACITY',
+  'BATT_ARM_VOLT',
+  'BATT_ARM_MAH',
+  'BATT_FS_VOLTSRC',
+  'BATT_LOW_VOLT',
+  'BATT_LOW_MAH',
+  'BATT_FS_LOW_ACT',
+  'BATT_CRT_VOLT',
+  'BATT_CRT_MAH',
+  'BATT_FS_CRT_ACT',
+  'FS_THR_ENABLE',
+  'FS_THR_VALUE'
+] as const
+const RECEIVER_SUPPORT_PARAM_IDS = ['FLTMODE_CH', 'MODE_CH', 'RSSI_TYPE', 'RSSI_CHANNEL', 'RSSI_CHAN_LOW', 'RSSI_CHAN_HIGH'] as const
 const TUNING_FLIGHT_FEEL_PARAM_IDS = ['ATC_INPUT_TC', 'ANGLE_MAX', 'PILOT_Y_RATE', 'PILOT_Y_EXPO'] as const
 const TUNING_ACRO_PARAM_IDS = ['ACRO_RP_RATE', 'ACRO_Y_RATE', 'ACRO_RP_EXPO', 'ACRO_Y_EXPO'] as const
 const TUNING_PARAM_IDS = [...TUNING_FLIGHT_FEEL_PARAM_IDS, ...TUNING_ACRO_PARAM_IDS] as const
+const PRESET_AUTO_BACKUP_TAGS = ['auto-backup', 'preset'] as const
+const DEFAULT_WEBSOCKET_URL = 'ws://127.0.0.1:14550'
 
-type TransportMode = 'demo' | 'web-serial'
+type TransportMode = 'demo' | 'web-serial' | 'websocket'
 type ProductMode = 'basic' | 'expert'
 type StatusTone = 'neutral' | 'success' | 'warning' | 'danger'
 type ModeSwitchExerciseStatus = 'idle' | 'running' | 'passed' | 'failed'
@@ -573,11 +644,17 @@ function appViewForPanel(panelId: string): AppViewId {
   }
 }
 
-function createRuntime(mode: TransportMode): ArduPilotConfiguratorRuntime {
+function createRuntime(mode: TransportMode, websocketUrl: string): ArduPilotConfiguratorRuntime {
   const transport = (() => {
     if (mode === 'web-serial') {
       return new WebSerialTransport('browser-serial', {
         baudRate: 115200
+      })
+    }
+
+    if (mode === 'websocket') {
+      return new WebSocketTransport('browser-websocket', {
+        url: websocketUrl
       })
     }
 
@@ -884,12 +961,40 @@ function toneForScopedDraftReview(stagedCount: number, invalidCount: number): St
   return 'success'
 }
 
+function toneForPresetApplicability(status: 'ready' | 'caution' | 'blocked'): StatusTone {
+  switch (status) {
+    case 'blocked':
+      return 'danger'
+    case 'caution':
+      return 'warning'
+    default:
+      return 'success'
+  }
+}
+
 function isReceiverReviewParamId(paramId: string): boolean {
-  return paramId.startsWith('RCMAP_') || /^RC\d+_(MIN|MAX|TRIM)$/.test(paramId) || /^FLTMODE\d+$/.test(paramId)
+  return (
+    paramId.startsWith('RCMAP_') ||
+    /^RC\d+_(MIN|MAX|TRIM)$/.test(paramId) ||
+    /^FLTMODE\d+$/.test(paramId) ||
+    RECEIVER_SUPPORT_PARAM_IDS.includes(paramId as (typeof RECEIVER_SUPPORT_PARAM_IDS)[number])
+  )
 }
 
 function isPortsReviewParamId(paramId: string): boolean {
-  return /^SERIAL\d+_(PROTOCOL|BAUD)$/.test(paramId) || /^BRD_SER\d+_RTSCTS$/.test(paramId) || /^GPS_TYPE2?$/.test(paramId)
+  return (
+    /^SERIAL\d+_(PROTOCOL|BAUD)$/.test(paramId) ||
+    /^BRD_SER\d+_RTSCTS$/.test(paramId) ||
+    PORTS_PERIPHERAL_PARAM_IDS.includes(paramId as (typeof PORTS_PERIPHERAL_PARAM_IDS)[number])
+  )
+}
+
+function isPowerReviewParamId(paramId: string): boolean {
+  return POWER_REVIEW_PARAM_IDS.includes(paramId as (typeof POWER_REVIEW_PARAM_IDS)[number])
+}
+
+function isOutputAssignmentParamId(paramId: string): boolean {
+  return /^SERVO([1-9]|1[0-6])_FUNCTION$/.test(paramId)
 }
 
 function isTuningReviewParamId(paramId: string): boolean {
@@ -932,6 +1037,7 @@ function describeSerialPortUsage(protocolValue: number | undefined): string {
     case 33:
       return 'Serial receiver / RC input path.'
     case 30:
+    case 34:
     case 38:
     case 40:
     case 43:
@@ -943,6 +1049,27 @@ function describeSerialPortUsage(protocolValue: number | undefined): string {
     default:
       return 'Peripheral or accessory link.'
   }
+}
+
+function isReceiverSerialProtocol(protocolValue: number | undefined): boolean {
+  return protocolValue === 23 || protocolValue === 24 || protocolValue === 33
+}
+
+function isVtxControlSerialProtocol(protocolValue: number | undefined): boolean {
+  return protocolValue === 30 || protocolValue === 34 || protocolValue === 38 || protocolValue === 40 || protocolValue === 43
+}
+
+function isOsdSerialProtocol(protocolValue: number | undefined): boolean {
+  return protocolValue === 20 || protocolValue === 22 || protocolValue === 34
+}
+
+function isNotificationLedServoFunction(functionValue: number | undefined): boolean {
+  return functionValue !== undefined && functionValue >= 120 && functionValue <= 123
+}
+
+function parseServoOutputChannelNumber(paramId: string): number | undefined {
+  const match = paramId.match(/^SERVO(\d+)_FUNCTION$/)
+  return match ? Number(match[1]) : undefined
 }
 
 function buildSerialPortViewModels(snapshot: ConfiguratorSnapshot): SerialPortViewModel[] {
@@ -1076,13 +1203,7 @@ function batteryHealthLabel(snapshot: ConfiguratorSnapshot): string {
 }
 
 function describeBatteryMonitor(value: number | undefined): string {
-  if (value === undefined) {
-    return 'Unknown'
-  }
-  if (value <= 0) {
-    return 'Disabled'
-  }
-  return `Enabled (source ${value})`
+  return formatArducopterBatteryMonitor(value)
 }
 
 function formatVoltage(value: number | undefined): string {
@@ -1165,6 +1286,36 @@ function formatParameterStep(definition: ParameterDefinition | undefined): strin
   return definition.unit ? `${definition.step} ${definition.unit}` : String(definition.step)
 }
 
+function normalizeBitmaskValue(rawValue: string | undefined, fallbackValue: number | undefined): number {
+  const parsed = rawValue === undefined || rawValue === '' ? Number.NaN : Number(rawValue)
+  return Number.isFinite(parsed) ? Math.max(0, Math.round(parsed)) : fallbackValue ?? 0
+}
+
+function hasBitmaskFlag(value: number | undefined, bit: number): boolean {
+  if (value === undefined || !Number.isFinite(value)) {
+    return false
+  }
+
+  return (Math.round(value) & (1 << bit)) !== 0
+}
+
+function describeBitmaskSelections(
+  value: number | undefined,
+  labelMap: Record<number, string>,
+  emptyLabel = 'None'
+): string {
+  if (value === undefined || !Number.isFinite(value)) {
+    return 'Unknown'
+  }
+
+  const labels = Object.entries(labelMap)
+    .map(([bit, label]) => ({ bit: Number(bit), label }))
+    .filter(({ bit }) => hasBitmaskFlag(value, bit))
+    .map(({ label }) => label)
+
+  return labels.length > 0 ? labels.join(', ') : emptyLabel
+}
+
 function formatAngleMaxDegrees(rawValue: number | undefined): string {
   if (rawValue === undefined || !Number.isFinite(rawValue)) {
     return 'Unknown'
@@ -1212,6 +1363,52 @@ function buildParameterBackupFilename(snapshot: ConfiguratorSnapshot): string {
   return `arduconfig-${vehicleLabel}-params-${dateLabel}.json`
 }
 
+function buildSnapshotFilename(savedSnapshot: SavedParameterSnapshot): string {
+  const label = savedSnapshot.label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  const dateLabel = savedSnapshot.capturedAt.replace(/[:]/g, '-').replace(/\..+$/, '')
+  return `arduconfig-${label || 'snapshot'}-${dateLabel}.json`
+}
+
+function formatSnapshotTimestamp(timestamp: string): string {
+  const date = new Date(timestamp)
+  return Number.isNaN(date.getTime()) ? timestamp : date.toLocaleString()
+}
+
+function buildSnapshotLibraryFilename(): string {
+  const dateLabel = new Date().toISOString().replace(/[:]/g, '-').replace(/\..+$/, '')
+  return `arduconfig-snapshot-library-${dateLabel}.json`
+}
+
+function buildPresetAutoBackupLabel(snapshot: ConfiguratorSnapshot, preset: NormalizedPresetDefinition): string {
+  const vehicleLabel = snapshot.vehicle?.vehicle ?? 'Vehicle'
+  return `${vehicleLabel} pre-preset ${preset.label}`
+}
+
+function buildPresetAutoBackupNote(preset: NormalizedPresetDefinition): string {
+  return `Automatically captured before applying preset "${preset.label}".`
+}
+
+function parseSnapshotTags(rawValue: string): string[] {
+  return rawValue
+    .split(',')
+    .map((tag) => tag.trim())
+    .filter((tag) => tag.length > 0)
+}
+
+function mergeSavedSnapshots(
+  existingSnapshots: readonly SavedParameterSnapshot[],
+  incomingSnapshots: readonly SavedParameterSnapshot[]
+): SavedParameterSnapshot[] {
+  const mergedById = new Map(existingSnapshots.map((savedSnapshot) => [savedSnapshot.id, savedSnapshot]))
+  incomingSnapshots.forEach((savedSnapshot) => {
+    mergedById.set(savedSnapshot.id, savedSnapshot)
+  })
+  return sortParameterSnapshots([...mergedById.values()])
+}
+
 function downloadTextFile(filename: string, contents: string): void {
   const blob = new Blob([contents], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
@@ -1225,15 +1422,25 @@ function downloadTextFile(filename: string, contents: string): void {
 export function App() {
   const metadataCatalog = useMemo(() => normalizeFirmwareMetadata(arducopterMetadata), [])
   const [transportMode, setTransportMode] = useState<TransportMode>('demo')
+  const [websocketUrl, setWebsocketUrl] = useState(DEFAULT_WEBSOCKET_URL)
   const [sessionProfile, setSessionProfile] = useState<SessionProfile>('full-power')
   const [productMode, setProductMode] = useState<ProductMode>(readStoredProductMode)
   const [activeViewId, setActiveViewId] = useState<AppViewId>('setup')
-  const runtime = useMemo(() => createRuntime(transportMode), [transportMode])
+  const runtime = useMemo(() => createRuntime(transportMode, websocketUrl), [transportMode, websocketUrl])
   const [snapshot, setSnapshot] = useState<ConfiguratorSnapshot>(runtime.getSnapshot())
+  const [savedSnapshots, setSavedSnapshots] = useState<SavedParameterSnapshot[]>(loadStoredSnapshots)
+  const [selectedSnapshotId, setSelectedSnapshotId] = useState<string>()
+  const [selectedPresetId, setSelectedPresetId] = useState<string>()
+  const [snapshotLabelInput, setSnapshotLabelInput] = useState('')
+  const [snapshotNoteInput, setSnapshotNoteInput] = useState('')
+  const [snapshotTagsInput, setSnapshotTagsInput] = useState('')
+  const [snapshotProtectedInput, setSnapshotProtectedInput] = useState(false)
   const [parameterSearch, setParameterSearch] = useState('')
   const [editedValues, setEditedValues] = useState<Record<string, string>>({})
   const [selectedParameterId, setSelectedParameterId] = useState<string>()
   const [parameterNotice, setParameterNotice] = useState<ParameterNotice>()
+  const [snapshotNotice, setSnapshotNotice] = useState<ParameterNotice>()
+  const [presetNotice, setPresetNotice] = useState<ParameterNotice>()
   const [parameterFollowUp, setParameterFollowUp] = useState<ParameterFollowUp>()
   const [busyAction, setBusyAction] = useState<string>()
   const [orientationExercise, setOrientationExercise] = useState<OrientationExerciseState>(createIdleOrientationExerciseState)
@@ -1248,9 +1455,12 @@ export function App() {
   const [motorVerification, setMotorVerification] = useState<MotorVerificationState>(createIdleMotorVerificationState)
   const [propsRemovedAcknowledged, setPropsRemovedAcknowledged] = useState(false)
   const [testAreaAcknowledged, setTestAreaAcknowledged] = useState(false)
+  const [snapshotRestoreAcknowledged, setSnapshotRestoreAcknowledged] = useState(false)
+  const [presetApplyAcknowledged, setPresetApplyAcknowledged] = useState(false)
   const [selectedSetupSectionId, setSelectedSetupSectionId] = useState<string>()
   const [setupConfirmations, setSetupConfirmations] = useState<Record<string, SetupConfirmationRecord>>({})
   const parameterBackupInputRef = useRef<HTMLInputElement>(null)
+  const snapshotImportInputRef = useRef<HTMLInputElement>(null)
   const previousModeSwitchRef = useRef<{ slot?: number; pwm?: number }>({})
   const webSerialSupported = WebSerialTransport.isSupported()
   const parameterSyncWidth = snapshot.parameterStats.progress === null ? 0 : snapshot.parameterStats.progress * 100
@@ -1263,11 +1473,45 @@ export function App() {
   const escSetup = deriveEscSetupSummary(snapshot)
   const currentRcAxisChannelMap = deriveRcAxisChannelMap(snapshot)
   const rcAxisObservations = deriveRcAxisObservations(snapshot)
+  const gpsAutoConfig = readRoundedParameter(snapshot, 'GPS_AUTO_CONFIG')
+  const gpsAutoSwitch = readRoundedParameter(snapshot, 'GPS_AUTO_SWITCH')
+  const gpsPrimary = readRoundedParameter(snapshot, 'GPS_PRIMARY')
+  const gpsRateMs = readRoundedParameter(snapshot, 'GPS_RATE_MS')
+  const osdType = readRoundedParameter(snapshot, 'OSD_TYPE')
+  const osdChannel = readRoundedParameter(snapshot, 'OSD_CHAN')
+  const osdSwitchMethod = readRoundedParameter(snapshot, 'OSD_SW_METHOD')
+  const mspOptions = readRoundedParameter(snapshot, 'MSP_OPTIONS')
+  const mspOsdCellCount = readRoundedParameter(snapshot, 'MSP_OSD_NCELLS')
+  const vtxEnabled = readRoundedParameter(snapshot, 'VTX_ENABLE')
+  const vtxFrequency = readRoundedParameter(snapshot, 'VTX_FREQ')
+  const vtxPower = readRoundedParameter(snapshot, 'VTX_POWER')
+  const vtxMaxPower = readRoundedParameter(snapshot, 'VTX_MAX_POWER')
+  const vtxOptions = readRoundedParameter(snapshot, 'VTX_OPTIONS')
   const batteryMonitor = readRoundedParameter(snapshot, 'BATT_MONITOR')
   const batteryCapacity = readRoundedParameter(snapshot, 'BATT_CAPACITY')
+  const batteryArmVoltage = readParameterValue(snapshot, 'BATT_ARM_VOLT')
+  const batteryArmMah = readRoundedParameter(snapshot, 'BATT_ARM_MAH')
+  const batteryVoltageSource = readRoundedParameter(snapshot, 'BATT_FS_VOLTSRC')
+  const batteryLowVoltage = readParameterValue(snapshot, 'BATT_LOW_VOLT')
+  const batteryLowMah = readRoundedParameter(snapshot, 'BATT_LOW_MAH')
   const batteryFailsafe = readRoundedParameter(snapshot, 'BATT_FS_LOW_ACT')
+  const batteryCriticalVoltage = readParameterValue(snapshot, 'BATT_CRT_VOLT')
+  const batteryCriticalMah = readRoundedParameter(snapshot, 'BATT_CRT_MAH')
+  const batteryCriticalFailsafe = readRoundedParameter(snapshot, 'BATT_FS_CRT_ACT')
   const boardOrientation = readRoundedParameter(snapshot, 'AHRS_ORIENTATION')
+  const configuredModeChannel = readRoundedParameter(snapshot, 'FLTMODE_CH') ?? readRoundedParameter(snapshot, 'MODE_CH')
+  const rssiType = readRoundedParameter(snapshot, 'RSSI_TYPE')
+  const rssiChannel = readRoundedParameter(snapshot, 'RSSI_CHANNEL')
+  const rssiChannelLow = readRoundedParameter(snapshot, 'RSSI_CHAN_LOW')
+  const rssiChannelHigh = readRoundedParameter(snapshot, 'RSSI_CHAN_HIGH')
   const throttleFailsafe = readRoundedParameter(snapshot, 'FS_THR_ENABLE')
+  const throttleFailsafeValue = readRoundedParameter(snapshot, 'FS_THR_VALUE')
+  const notificationLedTypes = readRoundedParameter(snapshot, 'NTF_LED_TYPES')
+  const notificationLedLength = readRoundedParameter(snapshot, 'NTF_LED_LEN')
+  const notificationLedBrightness = readRoundedParameter(snapshot, 'NTF_LED_BRIGHT')
+  const notificationLedOverride = readRoundedParameter(snapshot, 'NTF_LED_OVERRIDE')
+  const notificationBuzzTypes = readRoundedParameter(snapshot, 'NTF_BUZZ_TYPES')
+  const notificationBuzzVolume = readRoundedParameter(snapshot, 'NTF_BUZZ_VOLUME')
   const activePreArmIssues = snapshot.preArmStatus.issues
   const configuredOutputs = [...outputMapping.motorOutputs, ...outputMapping.configuredAuxOutputs].sort(
     (left, right) => left.channelNumber - right.channelNumber
@@ -1319,6 +1563,7 @@ export function App() {
 
   useEffect(() => {
     setParameterNotice(undefined)
+    setPresetNotice(undefined)
     setParameterFollowUp(undefined)
     setSetupConfirmations({})
   }, [runtime])
@@ -1499,6 +1744,74 @@ export function App() {
     () => parameterDraftEntries.filter((entry) => entry.status === 'invalid'),
     [parameterDraftEntries]
   )
+  const selectedSnapshot = useMemo(
+    () => savedSnapshots.find((savedSnapshot) => savedSnapshot.id === selectedSnapshotId) ?? savedSnapshots[0],
+    [savedSnapshots, selectedSnapshotId]
+  )
+  const selectedSnapshotRestore = useMemo(
+    () => (selectedSnapshot ? deriveDraftValuesFromParameterBackup(snapshot.parameters, selectedSnapshot.backup) : undefined),
+    [selectedSnapshot, snapshot.parameters]
+  )
+  const selectedSnapshotDiffEntries = useMemo(
+    () => deriveParameterDraftEntries(snapshot.parameters, selectedSnapshotRestore?.draftValues ?? {}),
+    [selectedSnapshotRestore, snapshot.parameters]
+  )
+  const selectedSnapshotDiffGroups = useMemo(
+    () => groupParameterDraftEntries(selectedSnapshotDiffEntries, ['staged']),
+    [selectedSnapshotDiffEntries]
+  )
+  const selectedSnapshotChangedEntries = useMemo(
+    () => selectedSnapshotDiffEntries.filter((entry) => entry.status === 'staged'),
+    [selectedSnapshotDiffEntries]
+  )
+  const selectedSnapshotInvalidEntries = useMemo(
+    () => selectedSnapshotDiffEntries.filter((entry) => entry.status === 'invalid'),
+    [selectedSnapshotDiffEntries]
+  )
+  const presetDefinitions = useMemo(() => metadataCatalog.presets, [metadataCatalog.presets])
+  const presetGroups = useMemo(
+    () => metadataCatalog.presetGroups.filter((group) => (metadataCatalog.presetsByGroup[group.id] ?? []).length > 0),
+    [metadataCatalog.presetGroups, metadataCatalog.presetsByGroup]
+  )
+  const presetPreviewById = useMemo(
+    () =>
+      new Map(
+        presetDefinitions.map((preset) => [
+          preset.id,
+          {
+            diff: deriveDraftValuesFromParameterPreset(snapshot.parameters, preset),
+            applicability: evaluateParameterPresetApplicability(snapshot, preset)
+          }
+        ])
+      ),
+    [presetDefinitions, snapshot.parameters, snapshot.vehicle?.vehicle]
+  )
+  const selectedPreset = useMemo(
+    () => presetDefinitions.find((preset) => preset.id === selectedPresetId) ?? presetDefinitions[0],
+    [presetDefinitions, selectedPresetId]
+  )
+  const selectedPresetPreview = selectedPreset ? presetPreviewById.get(selectedPreset.id) : undefined
+  const selectedPresetDiff = selectedPresetPreview?.diff
+  const selectedPresetApplicability = selectedPresetPreview?.applicability ?? {
+    status: 'caution' as const,
+    reasons: ['Select a preset to review its compatibility and diff.']
+  }
+  const selectedPresetDiffEntries = useMemo(
+    () => deriveParameterDraftEntries(snapshot.parameters, selectedPresetDiff?.draftValues ?? {}),
+    [selectedPresetDiff, snapshot.parameters]
+  )
+  const selectedPresetDiffGroups = useMemo(
+    () => groupParameterDraftEntries(selectedPresetDiffEntries, ['staged']),
+    [selectedPresetDiffEntries]
+  )
+  const selectedPresetChangedEntries = useMemo(
+    () => selectedPresetDiffEntries.filter((entry) => entry.status === 'staged'),
+    [selectedPresetDiffEntries]
+  )
+  const selectedPresetInvalidEntries = useMemo(
+    () => selectedPresetDiffEntries.filter((entry) => entry.status === 'invalid'),
+    [selectedPresetDiffEntries]
+  )
   const receiverDraftEntries = useMemo(
     () => parameterDraftEntries.filter((entry) => isReceiverReviewParamId(entry.id)),
     [parameterDraftEntries]
@@ -1523,6 +1836,18 @@ export function App() {
     () => portsDraftEntries.filter((entry) => entry.status === 'invalid'),
     [portsDraftEntries]
   )
+  const powerDraftEntries = useMemo(
+    () => parameterDraftEntries.filter((entry) => isPowerReviewParamId(entry.id)),
+    [parameterDraftEntries]
+  )
+  const powerStagedDrafts = useMemo(
+    () => powerDraftEntries.filter((entry) => entry.status === 'staged'),
+    [powerDraftEntries]
+  )
+  const powerInvalidDrafts = useMemo(
+    () => powerDraftEntries.filter((entry) => entry.status === 'invalid'),
+    [powerDraftEntries]
+  )
   const tuningDraftEntries = useMemo(
     () => parameterDraftEntries.filter((entry) => isTuningReviewParamId(entry.id)),
     [parameterDraftEntries]
@@ -1546,6 +1871,33 @@ export function App() {
   const outputReviewInvalidDrafts = useMemo(
     () => outputReviewDraftEntries.filter((entry) => entry.status === 'invalid'),
     [outputReviewDraftEntries]
+  )
+  const outputNotificationDraftEntries = useMemo(
+    () =>
+      parameterDraftEntries.filter((entry) =>
+        OUTPUT_NOTIFICATION_PARAM_IDS.includes(entry.id as (typeof OUTPUT_NOTIFICATION_PARAM_IDS)[number])
+      ),
+    [parameterDraftEntries]
+  )
+  const outputNotificationStagedDrafts = useMemo(
+    () => outputNotificationDraftEntries.filter((entry) => entry.status === 'staged'),
+    [outputNotificationDraftEntries]
+  )
+  const outputNotificationInvalidDrafts = useMemo(
+    () => outputNotificationDraftEntries.filter((entry) => entry.status === 'invalid'),
+    [outputNotificationDraftEntries]
+  )
+  const outputAssignmentDraftEntries = useMemo(
+    () => parameterDraftEntries.filter((entry) => isOutputAssignmentParamId(entry.id)),
+    [parameterDraftEntries]
+  )
+  const outputAssignmentStagedDrafts = useMemo(
+    () => outputAssignmentDraftEntries.filter((entry) => entry.status === 'staged'),
+    [outputAssignmentDraftEntries]
+  )
+  const outputAssignmentInvalidDrafts = useMemo(
+    () => outputAssignmentDraftEntries.filter((entry) => entry.status === 'invalid'),
+    [outputAssignmentDraftEntries]
   )
   const stagedParameterGroups = useMemo(
     () => groupParameterDraftEntries(parameterDraftEntries, ['staged']),
@@ -1589,6 +1941,83 @@ export function App() {
   )
   const serialPortViewModels = useMemo(() => buildSerialPortViewModels(snapshot), [snapshot])
   const gpsPeripheralViewModels = useMemo(() => buildGpsPeripheralViewModels(snapshot), [snapshot])
+  const portsPeripheralParameters = useMemo(
+    () =>
+      PORTS_PERIPHERAL_PARAM_IDS.map((paramId) => snapshot.parameters.find((parameter) => parameter.id === paramId)).filter(
+        (parameter): parameter is ParameterState => parameter !== undefined
+      ),
+    [snapshot.parameters]
+  )
+  const portsPeripheralParameterById = useMemo(
+    () => new Map(portsPeripheralParameters.map((parameter) => [parameter.id, parameter])),
+    [portsPeripheralParameters]
+  )
+  const gpsAutoConfigParameter = portsPeripheralParameterById.get('GPS_AUTO_CONFIG')
+  const gpsAutoSwitchParameter = portsPeripheralParameterById.get('GPS_AUTO_SWITCH')
+  const gpsPrimaryParameter = portsPeripheralParameterById.get('GPS_PRIMARY')
+  const gpsRateParameter = portsPeripheralParameterById.get('GPS_RATE_MS')
+  const osdTypeParameter = portsPeripheralParameterById.get('OSD_TYPE')
+  const osdChannelParameter = portsPeripheralParameterById.get('OSD_CHAN')
+  const osdSwitchMethodParameter = portsPeripheralParameterById.get('OSD_SW_METHOD')
+  const mspOptionsParameter = portsPeripheralParameterById.get('MSP_OPTIONS')
+  const mspOsdCellCountParameter = portsPeripheralParameterById.get('MSP_OSD_NCELLS')
+  const vtxEnableParameter = portsPeripheralParameterById.get('VTX_ENABLE')
+  const vtxFrequencyParameter = portsPeripheralParameterById.get('VTX_FREQ')
+  const vtxPowerParameter = portsPeripheralParameterById.get('VTX_POWER')
+  const vtxMaxPowerParameter = portsPeripheralParameterById.get('VTX_MAX_POWER')
+  const vtxOptionsParameter = portsPeripheralParameterById.get('VTX_OPTIONS')
+  const receiverSupportParameters = useMemo(
+    () =>
+      RECEIVER_SUPPORT_PARAM_IDS.map((paramId) => snapshot.parameters.find((parameter) => parameter.id === paramId)).filter(
+        (parameter): parameter is ParameterState => parameter !== undefined
+      ),
+    [snapshot.parameters]
+  )
+  const receiverSupportParameterById = useMemo(
+    () => new Map(receiverSupportParameters.map((parameter) => [parameter.id, parameter])),
+    [receiverSupportParameters]
+  )
+  const modeChannelParameter = receiverSupportParameterById.get('FLTMODE_CH') ?? receiverSupportParameterById.get('MODE_CH')
+  const rssiTypeParameter = receiverSupportParameterById.get('RSSI_TYPE')
+  const rssiChannelParameter = receiverSupportParameterById.get('RSSI_CHANNEL')
+  const rssiChannelLowParameter = receiverSupportParameterById.get('RSSI_CHAN_LOW')
+  const rssiChannelHighParameter = receiverSupportParameterById.get('RSSI_CHAN_HIGH')
+  const receiverLinkPorts = useMemo(
+    () => serialPortViewModels.filter((port) => isReceiverSerialProtocol(port.protocolValue)),
+    [serialPortViewModels]
+  )
+  const vtxLinkPorts = useMemo(
+    () => serialPortViewModels.filter((port) => isVtxControlSerialProtocol(port.protocolValue)),
+    [serialPortViewModels]
+  )
+  const osdLinkPorts = useMemo(
+    () => serialPortViewModels.filter((port) => isOsdSerialProtocol(port.protocolValue)),
+    [serialPortViewModels]
+  )
+  const powerReviewParameters = useMemo(
+    () =>
+      POWER_REVIEW_PARAM_IDS.map((paramId) => snapshot.parameters.find((parameter) => parameter.id === paramId)).filter(
+        (parameter): parameter is ParameterState => parameter !== undefined
+      ),
+    [snapshot.parameters]
+  )
+  const powerReviewParameterById = useMemo(
+    () => new Map(powerReviewParameters.map((parameter) => [parameter.id, parameter])),
+    [powerReviewParameters]
+  )
+  const batteryMonitorParameter = powerReviewParameterById.get('BATT_MONITOR')
+  const batteryCapacityParameter = powerReviewParameterById.get('BATT_CAPACITY')
+  const batteryArmVoltageParameter = powerReviewParameterById.get('BATT_ARM_VOLT')
+  const batteryArmMahParameter = powerReviewParameterById.get('BATT_ARM_MAH')
+  const batteryVoltageSourceParameter = powerReviewParameterById.get('BATT_FS_VOLTSRC')
+  const batteryLowVoltageParameter = powerReviewParameterById.get('BATT_LOW_VOLT')
+  const batteryLowMahParameter = powerReviewParameterById.get('BATT_LOW_MAH')
+  const batteryFailsafeParameter = powerReviewParameterById.get('BATT_FS_LOW_ACT')
+  const batteryCriticalVoltageParameter = powerReviewParameterById.get('BATT_CRT_VOLT')
+  const batteryCriticalMahParameter = powerReviewParameterById.get('BATT_CRT_MAH')
+  const batteryCriticalFailsafeParameter = powerReviewParameterById.get('BATT_FS_CRT_ACT')
+  const throttleFailsafeParameter = powerReviewParameterById.get('FS_THR_ENABLE')
+  const throttleFailsafeValueParameter = powerReviewParameterById.get('FS_THR_VALUE')
   const tuningParameters = useMemo(
     () =>
       TUNING_PARAM_IDS.map((paramId) => snapshot.parameters.find((parameter) => parameter.id === paramId)).filter(
@@ -1616,6 +2045,41 @@ export function App() {
         (parameter): parameter is ParameterState => parameter !== undefined
       ),
     [snapshot.parameters]
+  )
+  const outputNotificationParameters = useMemo(
+    () =>
+      OUTPUT_NOTIFICATION_PARAM_IDS.map((paramId) => snapshot.parameters.find((parameter) => parameter.id === paramId)).filter(
+        (parameter): parameter is ParameterState => parameter !== undefined
+      ),
+    [snapshot.parameters]
+  )
+  const outputNotificationParameterById = useMemo(
+    () => new Map(outputNotificationParameters.map((parameter) => [parameter.id, parameter])),
+    [outputNotificationParameters]
+  )
+  const notificationLedTypesParameter = outputNotificationParameterById.get('NTF_LED_TYPES')
+  const notificationLedLengthParameter = outputNotificationParameterById.get('NTF_LED_LEN')
+  const notificationLedBrightnessParameter = outputNotificationParameterById.get('NTF_LED_BRIGHT')
+  const notificationLedOverrideParameter = outputNotificationParameterById.get('NTF_LED_OVERRIDE')
+  const notificationBuzzTypesParameter = outputNotificationParameterById.get('NTF_BUZZ_TYPES')
+  const notificationBuzzVolumeParameter = outputNotificationParameterById.get('NTF_BUZZ_VOLUME')
+  const outputAssignmentParameters = useMemo(
+    () =>
+      snapshot.parameters
+        .filter((parameter) => isOutputAssignmentParamId(parameter.id))
+        .sort((left, right) => (parseServoOutputChannelNumber(left.id) ?? 99) - (parseServoOutputChannelNumber(right.id) ?? 99)),
+    [snapshot.parameters]
+  )
+  const totalOutputInvalidDrafts =
+    outputReviewInvalidDrafts.length + outputNotificationInvalidDrafts.length + outputAssignmentInvalidDrafts.length
+  const totalOutputStagedDrafts =
+    outputReviewStagedDrafts.length + outputNotificationStagedDrafts.length + outputAssignmentStagedDrafts.length
+  const editedMspOptions = normalizeBitmaskValue(editedValues.MSP_OPTIONS, mspOptions)
+  const editedNotificationLedTypes = normalizeBitmaskValue(editedValues.NTF_LED_TYPES, notificationLedTypes)
+  const editedNotificationBuzzTypes = normalizeBitmaskValue(editedValues.NTF_BUZZ_TYPES, notificationBuzzTypes)
+  const notificationLedOutputs = useMemo(
+    () => configuredOutputs.filter((output) => isNotificationLedServoFunction(output.functionValue)),
+    [configuredOutputs]
   )
   const recentModeSwitchChange = modeSwitchActivity && Date.now() - modeSwitchActivity.changedAtMs < 3000
   const modeSwitchExerciseProgress =
@@ -1946,6 +2410,279 @@ export function App() {
       })
     } finally {
       event.target.value = ''
+    }
+  }
+
+  function handleCaptureLiveSnapshot(): void {
+    if (snapshot.parameters.length === 0) {
+      setSnapshotNotice({
+        tone: 'warning',
+        text: 'Pull parameters before capturing a snapshot.'
+      })
+      return
+    }
+
+    const backup = createParameterBackup(snapshot)
+    const savedSnapshot = createSavedSnapshot(backup, snapshotLabelInput, 'captured', {
+      note: snapshotNoteInput,
+      tags: parseSnapshotTags(snapshotTagsInput),
+      protected: snapshotProtectedInput
+    })
+    setSavedSnapshots((current) => [savedSnapshot, ...current.filter((entry) => entry.id !== savedSnapshot.id)])
+    setSelectedSnapshotId(savedSnapshot.id)
+    setSnapshotLabelInput('')
+    setSnapshotNoteInput('')
+    setSnapshotTagsInput('')
+    setSnapshotProtectedInput(false)
+    setSnapshotNotice({
+      tone: 'success',
+      text: `Saved snapshot "${savedSnapshot.label}" with ${backup.parameterCount} parameters.`
+    })
+  }
+
+  function handleOpenSnapshotImport(): void {
+    snapshotImportInputRef.current?.click()
+  }
+
+  async function handleImportSnapshotFile(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+    const file = event.target.files?.[0]
+    if (!file) {
+      return
+    }
+
+    try {
+      const parsedInput = parseParameterSnapshotInput(await file.text())
+
+      if (parsedInput.kind === 'library') {
+        const importedSnapshots = parsedInput.library.snapshots
+        setSavedSnapshots((current) => mergeSavedSnapshots(current, importedSnapshots))
+        setSelectedSnapshotId(importedSnapshots[0]?.id)
+        setSnapshotNotice({
+          tone: 'success',
+          text: `Imported ${importedSnapshots.length} snapshot(s) from library "${parsedInput.library.name}".`
+        })
+      } else {
+        const backup = parsedInput.backup
+        const savedSnapshot = createSavedSnapshot(backup, snapshotLabelInput || file.name.replace(/\.[^.]+$/, ''), 'imported', {
+          note: snapshotNoteInput,
+          tags: parseSnapshotTags(snapshotTagsInput),
+          protected: snapshotProtectedInput
+        })
+        setSavedSnapshots((current) => [savedSnapshot, ...current.filter((entry) => entry.id !== savedSnapshot.id)])
+        setSelectedSnapshotId(savedSnapshot.id)
+        setSnapshotLabelInput('')
+        setSnapshotNoteInput('')
+        setSnapshotTagsInput('')
+        setSnapshotProtectedInput(false)
+        setSnapshotNotice({
+          tone: 'success',
+          text: `Imported snapshot "${savedSnapshot.label}" with ${backup.parameterCount} parameters.`
+        })
+      }
+    } catch (error) {
+      setSnapshotNotice({
+        tone: 'danger',
+        text: error instanceof Error ? error.message : 'Failed to import snapshot or library file.'
+      })
+    } finally {
+      event.target.value = ''
+    }
+  }
+
+  function handleExportSnapshotLibrary(): void {
+    const library = createParameterSnapshotLibrary('Browser Local Snapshot Library', savedSnapshots)
+    downloadTextFile(buildSnapshotLibraryFilename(), serializeParameterSnapshotLibrary(library))
+    setSnapshotNotice({
+      tone: 'success',
+      text: `Exported snapshot library with ${library.snapshots.length} saved snapshot(s).`
+    })
+  }
+
+  function handleExportSelectedSnapshot(): void {
+    if (!selectedSnapshot) {
+      return
+    }
+
+    downloadTextFile(buildSnapshotFilename(selectedSnapshot), serializeParameterBackup(selectedSnapshot.backup))
+    setSnapshotNotice({
+      tone: 'success',
+      text: `Exported snapshot "${selectedSnapshot.label}".`
+    })
+  }
+
+  function handleDeleteSelectedSnapshot(): void {
+    if (!selectedSnapshot) {
+      return
+    }
+
+    setSavedSnapshots((current) => current.filter((entry) => entry.id !== selectedSnapshot.id))
+    setSnapshotNotice({
+      tone: 'neutral',
+      text: `Deleted snapshot "${selectedSnapshot.label}" from the local browser library.`
+    })
+  }
+
+  function handleStageSelectedSnapshotDiff(): void {
+    if (!selectedSnapshot || !selectedSnapshotRestore) {
+      return
+    }
+
+    if (selectedSnapshotChangedEntries.length === 0) {
+      setSnapshotNotice({
+        tone: 'neutral',
+        text: `Snapshot "${selectedSnapshot.label}" already matches the live controller values.`
+      })
+      return
+    }
+
+    setEditedValues(selectedSnapshotRestore.draftValues)
+    setSelectedParameterId(selectedSnapshotChangedEntries[0]?.id ?? selectedParameterId)
+    setActiveViewId('parameters')
+    setSnapshotNotice({
+      tone: 'warning',
+      text: `Loaded ${selectedSnapshotRestore.changedCount} snapshot change(s) into the Expert parameter editor draft set.`
+    })
+  }
+
+  async function handleApplySelectedSnapshotRestore(): Promise<void> {
+    if (!selectedSnapshot) {
+      return
+    }
+
+    if (!snapshotRestoreAcknowledged) {
+      setSnapshotNotice({
+        tone: 'warning',
+        text: 'Acknowledge the overwrite warning before applying a snapshot restore.'
+      })
+      return
+    }
+
+    await handleApplyScopedParameterDrafts(selectedSnapshotDiffEntries, 'snapshots:apply', `Snapshot restore: ${selectedSnapshot.label}`)
+    setSnapshotRestoreAcknowledged(false)
+  }
+
+  function handleStageSelectedPresetDiff(): void {
+    if (!selectedPreset || !selectedPresetDiff) {
+      return
+    }
+
+    if (selectedPresetApplicability.status === 'blocked') {
+      setPresetNotice({
+        tone: 'danger',
+        text: selectedPresetApplicability.reasons[0] ?? 'This preset is not compatible with the current live configuration.'
+      })
+      return
+    }
+
+    if (selectedPresetChangedEntries.length === 0) {
+      setPresetNotice({
+        tone: 'neutral',
+        text: `Preset "${selectedPreset.label}" already matches the current live tuning values.`
+      })
+      return
+    }
+
+    setEditedValues((existing) => ({
+      ...existing,
+      ...selectedPresetDiff.draftValues
+    }))
+    setActiveViewId('tuning')
+    setParameterNotice({
+      tone: 'warning',
+      text: `Loaded ${selectedPresetChangedEntries.length} preset change(s) into the Tuning view for manual review.`
+    })
+    setPresetNotice({
+      tone: 'warning',
+      text: `Preset "${selectedPreset.label}" was loaded into manual tuning drafts instead of being applied directly.`
+    })
+  }
+
+  async function handleApplySelectedPreset(): Promise<void> {
+    if (!selectedPreset || !selectedPresetDiff) {
+      return
+    }
+
+    if (!canApplyDraftParameters) {
+      setPresetNotice({
+        tone: 'warning',
+        text: 'Connect, finish parameter sync, and keep the vehicle disarmed before applying a preset.'
+      })
+      return
+    }
+
+    if (selectedPresetApplicability.status === 'blocked') {
+      setPresetNotice({
+        tone: 'danger',
+        text: selectedPresetApplicability.reasons[0] ?? 'This preset is not compatible with the current live configuration.'
+      })
+      return
+    }
+
+    if (!presetApplyAcknowledged) {
+      setPresetNotice({
+        tone: 'warning',
+        text: 'Review the diff and acknowledge the overwrite warning before applying a preset.'
+      })
+      return
+    }
+
+    if (selectedPresetInvalidEntries.length > 0) {
+      setPresetNotice({
+        tone: 'danger',
+        text: `Preset "${selectedPreset.label}" has ${selectedPresetInvalidEntries.length} invalid value(s) in the current metadata set.`
+      })
+      return
+    }
+
+    if (selectedPresetChangedEntries.length === 0) {
+      setPresetNotice({
+        tone: 'neutral',
+        text: `Preset "${selectedPreset.label}" already matches the current live tuning values.`
+      })
+      return
+    }
+
+    const autoBackup = createSavedSnapshot(createParameterBackup(snapshot), buildPresetAutoBackupLabel(snapshot, selectedPreset), 'captured', {
+      note: buildPresetAutoBackupNote(selectedPreset),
+      tags: [...PRESET_AUTO_BACKUP_TAGS, ...selectedPreset.tags, selectedPreset.id]
+    })
+    setSavedSnapshots((current) => [autoBackup, ...current.filter((entry) => entry.id !== autoBackup.id)])
+
+    setBusyAction('presets:apply')
+    try {
+      const rebootRequiredCount = selectedPresetChangedEntries.filter((entry) => entry.definition?.rebootRequired).length
+      const result = await runtime.setParameters(
+        selectedPresetChangedEntries
+          .filter((entry) => entry.nextValue !== undefined)
+          .map((entry) => ({
+            paramId: entry.id,
+            paramValue: entry.nextValue as number
+          }))
+      )
+      setPresetNotice({
+        tone: 'success',
+        text:
+          result.applied.length === 0
+            ? `Preset "${selectedPreset.label}" already matched the live controller. Auto-saved snapshot "${autoBackup.label}".`
+            : `Applied preset "${selectedPreset.label}" with ${result.applied.length} verified write(s). Auto-saved snapshot "${autoBackup.label}".`
+      })
+      setParameterFollowUp({
+        requiresReboot: rebootRequiredCount > 0,
+        refreshRequired: true,
+        changedCount: result.applied.length,
+        text:
+          rebootRequiredCount > 0
+            ? `Preset "${selectedPreset.label}" changed reboot-sensitive settings. Request a reboot, then pull parameters again before flying.`
+            : `Preset "${selectedPreset.label}" changed live tuning values. Pull parameters again if you want a clean post-write snapshot.`
+      })
+    } catch (error) {
+      setPresetNotice({
+        tone: 'danger',
+        text: `${error instanceof Error ? error.message : `Preset "${selectedPreset.label}" failed to apply.`} Pre-apply snapshot "${autoBackup.label}" was saved before any writes were attempted.`
+      })
+    } finally {
+      setPresetApplyAcknowledged(false)
+      setBusyAction(undefined)
     }
   }
 
@@ -3189,8 +3926,22 @@ export function App() {
               id: view.id,
               label: view.label,
               description: view.description,
-              badge: snapshot.liveVerification.rcInput.verified ? 'live' : 'pending',
-              tone: snapshot.liveVerification.rcInput.verified ? 'success' : 'warning'
+              badge:
+                receiverInvalidDrafts.length > 0
+                  ? `${receiverInvalidDrafts.length} invalid`
+                  : receiverStagedDrafts.length > 0
+                    ? `${receiverStagedDrafts.length} staged`
+                    : snapshot.liveVerification.rcInput.verified
+                      ? 'live'
+                      : 'pending',
+              tone:
+                receiverInvalidDrafts.length > 0
+                  ? 'danger'
+                  : receiverStagedDrafts.length > 0
+                    ? 'warning'
+                    : snapshot.liveVerification.rcInput.verified
+                      ? 'success'
+                      : 'warning'
             }
           case 'ports':
             return {
@@ -3205,16 +3956,50 @@ export function App() {
               id: view.id,
               label: view.label,
               description: view.description,
-              badge: `${outputMapping.motorOutputs.length} motors`,
-              tone: outputMapping.motorOutputs.length > 0 ? 'neutral' : 'warning'
+              badge:
+                totalOutputInvalidDrafts > 0
+                  ? `${totalOutputInvalidDrafts} invalid`
+                  : totalOutputStagedDrafts > 0
+                    ? `${totalOutputStagedDrafts} staged`
+                    : `${outputMapping.motorOutputs.length} motors`,
+              tone:
+                totalOutputInvalidDrafts > 0
+                  ? 'danger'
+                  : totalOutputStagedDrafts > 0
+                    ? 'warning'
+                    : outputMapping.motorOutputs.length > 0
+                      ? 'neutral'
+                      : 'warning'
             }
           case 'power':
             return {
               id: view.id,
               label: view.label,
               description: view.description,
-              badge: snapshot.preArmStatus.healthy ? 'clear' : `${snapshot.preArmStatus.issues.length} issues`,
-              tone: snapshot.preArmStatus.healthy ? 'success' : 'warning'
+              badge:
+                powerInvalidDrafts.length > 0
+                  ? `${powerInvalidDrafts.length} invalid`
+                  : powerStagedDrafts.length > 0
+                    ? `${powerStagedDrafts.length} staged`
+                    : snapshot.preArmStatus.healthy
+                      ? 'clear'
+                      : `${snapshot.preArmStatus.issues.length} issues`,
+              tone:
+                powerInvalidDrafts.length > 0
+                  ? 'danger'
+                  : powerStagedDrafts.length > 0
+                    ? 'warning'
+                    : snapshot.preArmStatus.healthy
+                      ? 'success'
+                      : 'warning'
+            }
+          case 'snapshots':
+            return {
+              id: view.id,
+              label: view.label,
+              description: view.description,
+              badge: selectedSnapshotChangedEntries.length > 0 ? `${selectedSnapshotChangedEntries.length} diff` : `${savedSnapshots.length} saved`,
+              tone: selectedSnapshotInvalidEntries.length > 0 ? 'danger' : selectedSnapshotChangedEntries.length > 0 ? 'warning' : 'neutral'
             }
           case 'tuning':
             return {
@@ -3223,6 +4008,24 @@ export function App() {
               description: view.description,
               badge: tuningStagedDrafts.length > 0 ? `${tuningStagedDrafts.length} staged` : `${tuningParameters.length} controls`,
               tone: tuningInvalidDrafts.length > 0 ? 'danger' : tuningStagedDrafts.length > 0 ? 'warning' : 'neutral'
+            }
+          case 'presets':
+            return {
+              id: view.id,
+              label: view.label,
+              description: view.description,
+              badge:
+                selectedPresetInvalidEntries.length > 0
+                  ? `${selectedPresetInvalidEntries.length} invalid`
+                  : selectedPresetChangedEntries.length > 0
+                    ? `${selectedPresetChangedEntries.length} diff`
+                    : `${presetDefinitions.length} presets`,
+              tone:
+                selectedPresetApplicability.status === 'blocked'
+                  ? 'danger'
+                  : selectedPresetApplicability.status === 'caution' || selectedPresetChangedEntries.length > 0
+                    ? 'warning'
+                    : 'neutral'
             }
           case 'parameters':
             return {
@@ -3246,14 +4049,29 @@ export function App() {
       completedSetupSectionCount,
       guidedSetupComplete,
       metadataCatalog.appViews,
+      outputAssignmentInvalidDrafts.length,
+      outputAssignmentStagedDrafts.length,
       outputMapping.motorOutputs.length,
       portsInvalidDrafts.length,
       portsStagedDrafts.length,
+      powerInvalidDrafts.length,
+      powerStagedDrafts.length,
+      receiverInvalidDrafts.length,
+      receiverStagedDrafts.length,
       serialPortViewModels.length,
       setupFlowSections.length,
+      savedSnapshots.length,
       snapshot.liveVerification.rcInput.verified,
       snapshot.parameters.length,
       snapshot.preArmStatus,
+      presetDefinitions.length,
+      selectedPresetApplicability.status,
+      selectedPresetChangedEntries.length,
+      selectedPresetInvalidEntries.length,
+      selectedSnapshotChangedEntries.length,
+      selectedSnapshotInvalidEntries.length,
+      totalOutputInvalidDrafts,
+      totalOutputStagedDrafts,
       tuningInvalidDrafts.length,
       tuningParameters.length,
       tuningStagedDrafts.length,
@@ -3293,6 +4111,45 @@ export function App() {
 
     window.sessionStorage.setItem(PRODUCT_MODE_STORAGE_KEY, productMode)
   }, [productMode])
+
+  useEffect(() => {
+    persistSnapshots(savedSnapshots)
+  }, [savedSnapshots])
+
+  useEffect(() => {
+    if (savedSnapshots.length === 0) {
+      if (selectedSnapshotId !== undefined) {
+        setSelectedSnapshotId(undefined)
+      }
+      return
+    }
+
+    if (!selectedSnapshotId || !savedSnapshots.some((savedSnapshot) => savedSnapshot.id === selectedSnapshotId)) {
+      setSelectedSnapshotId(savedSnapshots[0]?.id)
+    }
+  }, [savedSnapshots, selectedSnapshotId])
+
+  useEffect(() => {
+    if (presetDefinitions.length === 0) {
+      if (selectedPresetId !== undefined) {
+        setSelectedPresetId(undefined)
+      }
+      return
+    }
+
+    if (!selectedPresetId || !presetDefinitions.some((preset) => preset.id === selectedPresetId)) {
+      setSelectedPresetId(presetDefinitions[0]?.id)
+    }
+  }, [presetDefinitions, selectedPresetId])
+
+  useEffect(() => {
+    setSnapshotRestoreAcknowledged(false)
+  }, [selectedSnapshot?.id])
+
+  useEffect(() => {
+    setPresetApplyAcknowledged(false)
+    setPresetNotice(undefined)
+  }, [selectedPreset?.id])
 
   useEffect(() => {
     if (isExpertMode || !isExpertOnlyView(activeViewId)) {
@@ -3372,12 +4229,26 @@ export function App() {
                   <option value="web-serial" disabled={!webSerialSupported}>
                     Browser serial{webSerialSupported ? '' : ' (unsupported)'}
                   </option>
+                  <option value="websocket">WebSocket</option>
                 </select>
                 <select value={sessionProfile} onChange={(event) => setSessionProfile(event.target.value as SessionProfile)}>
                   <option value="full-power">Full power</option>
                   <option value="usb-bench">USB bench</option>
                 </select>
               </div>
+              {transportMode === 'websocket' ? (
+                <label className="scoped-editor-field scoped-editor-field--compact">
+                  <span>WebSocket URL</span>
+                  <input
+                    type="text"
+                    value={websocketUrl}
+                    onChange={(event) => setWebsocketUrl(event.target.value)}
+                    disabled={busyAction !== undefined || snapshot.connection.kind === 'connected'}
+                    spellCheck={false}
+                    placeholder={DEFAULT_WEBSOCKET_URL}
+                  />
+                </label>
+              ) : null}
 	              <div className="button-row">
 	                <button
 	                  style={buttonStyle('primary')}
@@ -3528,7 +4399,15 @@ export function App() {
 	            </p>
 	            <KeyValueRow
 	              label="Transport"
-	              value={transportMode === 'demo' ? 'Demo MAVLink stream' : webSerialSupported ? 'Browser Web Serial' : 'Unavailable'}
+	              value={
+                  transportMode === 'demo'
+                    ? 'Demo MAVLink stream'
+                    : transportMode === 'web-serial'
+                      ? webSerialSupported
+                        ? 'Browser Web Serial'
+                        : 'Unavailable'
+                      : `WebSocket (${websocketUrl})`
+                }
             />
             <KeyValueRow label="Session" value={snapshot.sessionProfile === 'usb-bench' ? 'USB Bench' : 'Full Power'} />
             <KeyValueRow label="Vehicle" value={snapshot.vehicle?.vehicle ?? 'Waiting for heartbeat'} />
@@ -3907,6 +4786,429 @@ export function App() {
 	              </div>
 	            ) : null}
 
+              {gpsAutoConfigParameter || gpsAutoSwitchParameter || gpsPrimaryParameter || gpsRateParameter ? (
+                <div className="scoped-review-card scoped-review-card--compact">
+                  <div className="switch-exercise-card__header">
+                    <div>
+                      <strong>GPS behavior</strong>
+                      <p>Keep GPS redundancy, auto-configuration, and update-rate settings local to this Ports workflow.</p>
+                    </div>
+                    <StatusBadge tone={toneForScopedDraftReview(portsStagedDrafts.length, portsInvalidDrafts.length)}>
+                      {portsInvalidDrafts.length > 0
+                        ? `${portsInvalidDrafts.length} invalid`
+                        : portsStagedDrafts.length > 0
+                          ? `${portsStagedDrafts.length} staged`
+                          : 'in sync'}
+                    </StatusBadge>
+                  </div>
+
+                  <div className="config-pills">
+                    {gpsAutoConfigParameter ? <span>Auto config: {formatArducopterGpsAutoConfig(gpsAutoConfig)}</span> : null}
+                    {gpsAutoSwitchParameter ? <span>Auto switch: {formatArducopterGpsAutoSwitch(gpsAutoSwitch)}</span> : null}
+                    {gpsPrimaryParameter ? <span>Preferred GPS: {formatArducopterGpsPrimary(gpsPrimary)}</span> : null}
+                    {gpsRateParameter ? <span>Update rate: {formatArducopterGpsRateMs(gpsRateMs)}</span> : null}
+                  </div>
+
+                  <div className="scoped-editor-grid">
+                    {gpsAutoConfigParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(gpsAutoConfigParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{gpsAutoConfigParameter.definition?.label ?? gpsAutoConfigParameter.id}</span>
+                        <select
+                          value={editedValues[gpsAutoConfigParameter.id] ?? String(gpsAutoConfig ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [gpsAutoConfigParameter.id]: event.target.value
+                            }))
+                          }
+                        >
+                          {(gpsAutoConfigParameter.definition?.options ?? []).map((valueOption) => (
+                            <option key={`${gpsAutoConfigParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                              {valueOption.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+
+                    {gpsAutoSwitchParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(gpsAutoSwitchParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{gpsAutoSwitchParameter.definition?.label ?? gpsAutoSwitchParameter.id}</span>
+                        <select
+                          value={editedValues[gpsAutoSwitchParameter.id] ?? String(gpsAutoSwitch ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [gpsAutoSwitchParameter.id]: event.target.value
+                            }))
+                          }
+                        >
+                          {(gpsAutoSwitchParameter.definition?.options ?? []).map((valueOption) => (
+                            <option key={`${gpsAutoSwitchParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                              {valueOption.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+
+                    {gpsPrimaryParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(gpsPrimaryParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{gpsPrimaryParameter.definition?.label ?? gpsPrimaryParameter.id}</span>
+                        <select
+                          value={editedValues[gpsPrimaryParameter.id] ?? String(gpsPrimary ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [gpsPrimaryParameter.id]: event.target.value
+                            }))
+                          }
+                        >
+                          {(gpsPrimaryParameter.definition?.options ?? []).map((valueOption) => (
+                            <option key={`${gpsPrimaryParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                              {valueOption.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+
+                    {gpsRateParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(gpsRateParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{gpsRateParameter.definition?.label ?? gpsRateParameter.id}</span>
+                        {gpsRateParameter.definition?.options && gpsRateParameter.definition.options.length > 0 ? (
+                          <select
+                            value={editedValues[gpsRateParameter.id] ?? String(gpsRateMs ?? '')}
+                            onChange={(event) =>
+                              setEditedValues((existing) => ({
+                                ...existing,
+                                [gpsRateParameter.id]: event.target.value
+                              }))
+                            }
+                          >
+                            {gpsRateParameter.definition.options.map((valueOption) => (
+                              <option key={`${gpsRateParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                                {valueOption.label} ({valueOption.value} ms)
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <input
+                            type="number"
+                            min={gpsRateParameter.definition?.minimum}
+                            max={gpsRateParameter.definition?.maximum}
+                            step={gpsRateParameter.definition?.step ?? 1}
+                            value={editedValues[gpsRateParameter.id] ?? String(gpsRateMs ?? '')}
+                            onChange={(event) =>
+                              setEditedValues((existing) => ({
+                                ...existing,
+                                [gpsRateParameter.id]: event.target.value
+                              }))
+                            }
+                          />
+                        )}
+                      </label>
+                    ) : null}
+                  </div>
+
+                  <ul className="output-note-list">
+                    <li>Keep GPS redundancy features simple unless the aircraft actually has two usable GPS links.</li>
+                    <li>After GPS behavior changes, reboot, reconnect, and verify live lock/telemetry before flight.</li>
+                  </ul>
+                </div>
+              ) : null}
+
+              {osdTypeParameter || osdChannelParameter || osdSwitchMethodParameter || mspOptionsParameter || mspOsdCellCountParameter ? (
+                <div className="scoped-review-card scoped-review-card--compact">
+                  <div className="switch-exercise-card__header">
+                    <div>
+                      <strong>Video OSD</strong>
+                      <p>Keep the FPV overlay backend, page switching, and MSP display options local to this Ports workflow.</p>
+                    </div>
+                    <StatusBadge tone={toneForScopedDraftReview(portsStagedDrafts.length, portsInvalidDrafts.length)}>
+                      {portsInvalidDrafts.length > 0
+                        ? `${portsInvalidDrafts.length} invalid`
+                        : portsStagedDrafts.length > 0
+                          ? `${portsStagedDrafts.length} staged`
+                          : 'in sync'}
+                    </StatusBadge>
+                  </div>
+
+                  <div className="config-pills">
+                    {osdTypeParameter ? <span>Backend: {formatArducopterOsdType(osdType)}</span> : null}
+                    {osdChannelParameter ? <span>Screen channel: {formatArducopterOsdChannel(osdChannel)}</span> : null}
+                    {osdSwitchMethodParameter ? <span>Switching: {formatArducopterOsdSwitchMethod(osdSwitchMethod)}</span> : null}
+                    {mspOsdCellCountParameter ? <span>Cell count: {formatArducopterMspOsdCellCount(mspOsdCellCount)}</span> : null}
+                    {mspOptionsParameter ? <span>MSP options: {describeBitmaskSelections(mspOptions, ARDUCOPTER_MSP_OPTION_BIT_LABELS, 'No special options')}</span> : null}
+                    {osdLinkPorts.length > 0
+                      ? osdLinkPorts.map((port) => <span key={`osd-link:${port.portNumber}`}>{port.label}: {port.protocolLabel}</span>)
+                      : <span>No MSP / DisplayPort OSD link detected in current port roles</span>}
+                  </div>
+
+                  <div className="scoped-editor-grid">
+                    {osdTypeParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(osdTypeParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{osdTypeParameter.definition?.label ?? osdTypeParameter.id}</span>
+                        <select
+                          value={editedValues[osdTypeParameter.id] ?? String(osdType ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [osdTypeParameter.id]: event.target.value
+                            }))
+                          }
+                        >
+                          {(osdTypeParameter.definition?.options ?? []).map((valueOption) => (
+                            <option key={`${osdTypeParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                              {valueOption.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+
+                    {osdChannelParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(osdChannelParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{osdChannelParameter.definition?.label ?? osdChannelParameter.id}</span>
+                        <select
+                          value={editedValues[osdChannelParameter.id] ?? String(osdChannel ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [osdChannelParameter.id]: event.target.value
+                            }))
+                          }
+                        >
+                          {(osdChannelParameter.definition?.options ?? []).map((valueOption) => (
+                            <option key={`${osdChannelParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                              {valueOption.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+
+                    {osdSwitchMethodParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(osdSwitchMethodParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{osdSwitchMethodParameter.definition?.label ?? osdSwitchMethodParameter.id}</span>
+                        <select
+                          value={editedValues[osdSwitchMethodParameter.id] ?? String(osdSwitchMethod ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [osdSwitchMethodParameter.id]: event.target.value
+                            }))
+                          }
+                        >
+                          {(osdSwitchMethodParameter.definition?.options ?? []).map((valueOption) => (
+                            <option key={`${osdSwitchMethodParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                              {valueOption.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+
+                    {mspOsdCellCountParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(mspOsdCellCountParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{mspOsdCellCountParameter.definition?.label ?? mspOsdCellCountParameter.id}</span>
+                        <select
+                          value={editedValues[mspOsdCellCountParameter.id] ?? String(mspOsdCellCount ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [mspOsdCellCountParameter.id]: event.target.value
+                            }))
+                          }
+                        >
+                          {(mspOsdCellCountParameter.definition?.options ?? []).map((valueOption) => (
+                            <option key={`${mspOsdCellCountParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                              {valueOption.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+
+                    {mspOptionsParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(mspOptionsParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{mspOptionsParameter.definition?.label ?? mspOptionsParameter.id}</span>
+                        <div className="scoped-checkbox-list">
+                          {Object.entries(ARDUCOPTER_MSP_OPTION_BIT_LABELS).map(([bit, label]) => {
+                            const numericBit = Number(bit)
+                            return (
+                              <label key={`${mspOptionsParameter.id}:${bit}`} className="scoped-checkbox-option">
+                                <input
+                                  type="checkbox"
+                                  checked={hasBitmaskFlag(editedMspOptions, numericBit)}
+                                  onChange={(event) =>
+                                    setEditedValues((existing) => {
+                                      const currentValue = normalizeBitmaskValue(existing[mspOptionsParameter.id], mspOptions)
+                                      const nextValue = event.target.checked
+                                        ? currentValue | (1 << numericBit)
+                                        : currentValue & ~(1 << numericBit)
+
+                                      return {
+                                        ...existing,
+                                        [mspOptionsParameter.id]: String(nextValue)
+                                      }
+                                    })
+                                  }
+                                />
+                                <span>{label}</span>
+                              </label>
+                            )
+                          })}
+                        </div>
+                        <small>
+                          {parameterDraftById.get(mspOptionsParameter.id)?.status === 'staged'
+                            ? `Staged ${describeBitmaskSelections(parameterDraftById.get(mspOptionsParameter.id)?.nextValue, ARDUCOPTER_MSP_OPTION_BIT_LABELS, 'No special options')}`
+                            : parameterDraftById.get(mspOptionsParameter.id)?.reason ??
+                              `Current ${describeBitmaskSelections(mspOptions, ARDUCOPTER_MSP_OPTION_BIT_LABELS, 'No special options')}`}
+                        </small>
+                      </label>
+                    ) : null}
+                  </div>
+
+                  <ul className="output-note-list">
+                    <li>Assign the matching serial port to MSP, DJI FPV, or DisplayPort before expecting an FPV overlay.</li>
+                    <li>After OSD backend changes, reboot, reconnect, and verify the live overlay in goggles or the display before flight.</li>
+                  </ul>
+                </div>
+              ) : null}
+
+              {vtxEnableParameter || vtxFrequencyParameter || vtxPowerParameter || vtxMaxPowerParameter || vtxOptionsParameter ? (
+                <div className="scoped-review-card scoped-review-card--compact">
+                  <div className="switch-exercise-card__header">
+                    <div>
+                      <strong>Video transmitter</strong>
+                      <p>Keep VTX control, frequency, and power review local to this Ports workflow.</p>
+                    </div>
+                    <StatusBadge tone={toneForScopedDraftReview(portsStagedDrafts.length, portsInvalidDrafts.length)}>
+                      {portsInvalidDrafts.length > 0
+                        ? `${portsInvalidDrafts.length} invalid`
+                        : portsStagedDrafts.length > 0
+                          ? `${portsStagedDrafts.length} staged`
+                          : 'in sync'}
+                    </StatusBadge>
+                  </div>
+
+                  <div className="config-pills">
+                    {vtxEnableParameter ? <span>Control: {formatArducopterVtxEnable(vtxEnabled)}</span> : null}
+                    {vtxFrequencyParameter ? <span>Frequency: {vtxFrequency !== undefined ? `${vtxFrequency} MHz` : 'Unknown'}</span> : null}
+                    {vtxPowerParameter ? <span>Power: {vtxPower !== undefined ? `${vtxPower} mW` : 'Unknown'}</span> : null}
+                    {vtxMaxPowerParameter ? <span>Max power: {vtxMaxPower !== undefined ? `${vtxMaxPower} mW` : 'Unknown'}</span> : null}
+                    {vtxLinkPorts.length > 0
+                      ? vtxLinkPorts.map((port) => <span key={`vtx-link:${port.portNumber}`}>{port.label}: {port.protocolLabel}</span>)
+                      : <span>No VTX control link detected in current port roles</span>}
+                  </div>
+
+                  <div className="scoped-editor-grid">
+                    {vtxEnableParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(vtxEnableParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{vtxEnableParameter.definition?.label ?? vtxEnableParameter.id}</span>
+                        <select
+                          value={editedValues[vtxEnableParameter.id] ?? String(vtxEnabled ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [vtxEnableParameter.id]: event.target.value
+                            }))
+                          }
+                        >
+                          {(vtxEnableParameter.definition?.options ?? []).map((valueOption) => (
+                            <option key={`${vtxEnableParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                              {valueOption.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+
+                    {vtxFrequencyParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(vtxFrequencyParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{vtxFrequencyParameter.definition?.label ?? vtxFrequencyParameter.id}</span>
+                        <input
+                          type="number"
+                          min={vtxFrequencyParameter.definition?.minimum}
+                          max={vtxFrequencyParameter.definition?.maximum}
+                          step={vtxFrequencyParameter.definition?.step ?? 1}
+                          value={editedValues[vtxFrequencyParameter.id] ?? String(vtxFrequency ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [vtxFrequencyParameter.id]: event.target.value
+                            }))
+                          }
+                        />
+                      </label>
+                    ) : null}
+
+                    {vtxPowerParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(vtxPowerParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{vtxPowerParameter.definition?.label ?? vtxPowerParameter.id}</span>
+                        <input
+                          type="number"
+                          min={vtxPowerParameter.definition?.minimum}
+                          max={vtxPowerParameter.definition?.maximum}
+                          step={vtxPowerParameter.definition?.step ?? 1}
+                          value={editedValues[vtxPowerParameter.id] ?? String(vtxPower ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [vtxPowerParameter.id]: event.target.value
+                            }))
+                          }
+                        />
+                      </label>
+                    ) : null}
+
+                    {vtxMaxPowerParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(vtxMaxPowerParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{vtxMaxPowerParameter.definition?.label ?? vtxMaxPowerParameter.id}</span>
+                        <input
+                          type="number"
+                          min={vtxMaxPowerParameter.definition?.minimum}
+                          max={vtxMaxPowerParameter.definition?.maximum}
+                          step={vtxMaxPowerParameter.definition?.step ?? 1}
+                          value={editedValues[vtxMaxPowerParameter.id] ?? String(vtxMaxPower ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [vtxMaxPowerParameter.id]: event.target.value
+                            }))
+                          }
+                        />
+                      </label>
+                    ) : null}
+
+                    {vtxOptionsParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(vtxOptionsParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{vtxOptionsParameter.definition?.label ?? vtxOptionsParameter.id}</span>
+                        <input
+                          type="number"
+                          min={vtxOptionsParameter.definition?.minimum}
+                          max={vtxOptionsParameter.definition?.maximum}
+                          step={vtxOptionsParameter.definition?.step ?? 1}
+                          value={editedValues[vtxOptionsParameter.id] ?? String(vtxOptions ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [vtxOptionsParameter.id]: event.target.value
+                            }))
+                          }
+                        />
+                      </label>
+                    ) : null}
+                  </div>
+
+                  <ul className="output-note-list">
+                    <li>Assign the actual VTX control protocol on the matching serial port first, then use this card to set frequency and power.</li>
+                    <li>Bench-check the actual transmitted channel and power after changes before flying or arming with props on.</li>
+                  </ul>
+                </div>
+              ) : null}
+
 	            <div className="switch-exercise-controls">
 	              <button
 	                style={buttonStyle('primary')}
@@ -4005,7 +5307,7 @@ export function App() {
               </div>
 
               <div className="config-pills">
-                {(modeSwitchExercise.status === 'idle' ? modeAssignments.map((assignment) => assignment.slot) : modeSwitchExercise.targetSlots).map((slot) => {
+                {(modeSwitchExercise.status === 'idle' ? modeExerciseAssignments.map((assignment) => assignment.slot) : modeSwitchExercise.targetSlots).map((slot) => {
                   const visited = modeSwitchExercise.visitedSlots.includes(slot)
                   const isTarget = modeSwitchExercise.status === 'running' && modeSwitchExercise.currentTargetSlot === slot
                   const classes = [visited ? 'is-complete' : undefined, isTarget ? 'is-target' : undefined]
@@ -4304,6 +5606,139 @@ export function App() {
 	              </div>
 	            </div>
 
+              {modeChannelParameter || rssiTypeParameter || rssiChannelParameter || rssiChannelLowParameter || rssiChannelHighParameter ? (
+                <div className="scoped-review-card scoped-review-card--compact">
+                  <div className="switch-exercise-card__header">
+                    <div>
+                      <strong>Receiver link & signal setup</strong>
+                      <p>Mode-channel selection, RSSI configuration, and receiver-link awareness stay local to this Receiver workflow.</p>
+                    </div>
+                    <StatusBadge tone={toneForScopedDraftReview(receiverStagedDrafts.length, receiverInvalidDrafts.length)}>
+                      {receiverInvalidDrafts.length > 0
+                        ? `${receiverInvalidDrafts.length} invalid`
+                        : receiverStagedDrafts.length > 0
+                          ? `${receiverStagedDrafts.length} staged`
+                          : 'in sync'}
+                    </StatusBadge>
+                  </div>
+
+                  <div className="config-pills">
+                    <span>Mode channel: {formatArducopterFlightModeChannel(configuredModeChannel)}</span>
+                    <span>RSSI source: {formatArducopterRssiType(rssiType)}</span>
+                    <span>Live RSSI: {snapshot.liveVerification.rcInput.rssi ?? 'Unknown'}</span>
+                    {receiverLinkPorts.length > 0
+                      ? receiverLinkPorts.map((port) => <span key={`receiver-link:${port.portNumber}`}>{port.label}: {port.protocolLabel}</span>)
+                      : <span>No receiver serial link detected in current port roles</span>}
+                  </div>
+
+                  <div className="scoped-editor-grid">
+                    {modeChannelParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(modeChannelParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{modeChannelParameter.definition?.label ?? modeChannelParameter.id}</span>
+                        <select
+                          value={editedValues[modeChannelParameter.id] ?? String(configuredModeChannel ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [modeChannelParameter.id]: event.target.value
+                            }))
+                          }
+                        >
+                          {(modeChannelParameter.definition?.options ?? []).map((valueOption) => (
+                            <option key={`${modeChannelParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                              {valueOption.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+
+                    {rssiTypeParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(rssiTypeParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{rssiTypeParameter.definition?.label ?? rssiTypeParameter.id}</span>
+                        <select
+                          value={editedValues[rssiTypeParameter.id] ?? String(rssiType ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [rssiTypeParameter.id]: event.target.value
+                            }))
+                          }
+                        >
+                          {(rssiTypeParameter.definition?.options ?? []).map((valueOption) => (
+                            <option key={`${rssiTypeParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                              {valueOption.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+
+                    {rssiChannelParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(rssiChannelParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{rssiChannelParameter.definition?.label ?? rssiChannelParameter.id}</span>
+                        <input
+                          type="number"
+                          min={rssiChannelParameter.definition?.minimum}
+                          max={rssiChannelParameter.definition?.maximum}
+                          step={rssiChannelParameter.definition?.step ?? 1}
+                          value={editedValues[rssiChannelParameter.id] ?? String(rssiChannel ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [rssiChannelParameter.id]: event.target.value
+                            }))
+                          }
+                        />
+                      </label>
+                    ) : null}
+
+                    {rssiChannelLowParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(rssiChannelLowParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{rssiChannelLowParameter.definition?.label ?? rssiChannelLowParameter.id}</span>
+                        <input
+                          type="number"
+                          min={rssiChannelLowParameter.definition?.minimum}
+                          max={rssiChannelLowParameter.definition?.maximum}
+                          step={rssiChannelLowParameter.definition?.step ?? 1}
+                          value={editedValues[rssiChannelLowParameter.id] ?? String(rssiChannelLow ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [rssiChannelLowParameter.id]: event.target.value
+                            }))
+                          }
+                        />
+                      </label>
+                    ) : null}
+
+                    {rssiChannelHighParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(rssiChannelHighParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{rssiChannelHighParameter.definition?.label ?? rssiChannelHighParameter.id}</span>
+                        <input
+                          type="number"
+                          min={rssiChannelHighParameter.definition?.minimum}
+                          max={rssiChannelHighParameter.definition?.maximum}
+                          step={rssiChannelHighParameter.definition?.step ?? 1}
+                          value={editedValues[rssiChannelHighParameter.id] ?? String(rssiChannelHigh ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [rssiChannelHighParameter.id]: event.target.value
+                            }))
+                          }
+                        />
+                      </label>
+                    ) : null}
+                  </div>
+
+                  <ul className="output-note-list">
+                    <li>Receiver serial protocol is usually assigned from Ports; this card covers the receiver-side interpretation of that link.</li>
+                    <li>After changing the mode channel or RSSI settings, rerun the mode-switch and RC verification exercises before flight.</li>
+                  </ul>
+                </div>
+              ) : null}
+
 	            <div className="scoped-review-card">
 	              <div className="switch-exercise-card__header">
 	                <div>
@@ -4461,7 +5896,7 @@ export function App() {
         <div id="setup-panel-power">
           <Panel
             title="Power & Failsafe"
-            subtitle="Live battery telemetry plus the key power- and failsafe-related settings already present on the vehicle."
+            subtitle="Live battery telemetry plus local review/apply controls for the key battery- and failsafe-related settings on the vehicle."
           >
           <div className="telemetry-stack">
             <div className="telemetry-header">
@@ -4475,6 +5910,13 @@ export function App() {
               </div>
               <StatusBadge tone={batteryHealthTone(snapshot)}>{batteryHealthLabel(snapshot)}</StatusBadge>
             </div>
+
+            {parameterNotice ? (
+              <div className="parameter-review__notice">
+                <StatusBadge tone={parameterNotice.tone}>{parameterNotice.tone}</StatusBadge>
+                <p>{parameterNotice.text}</p>
+              </div>
+            ) : null}
 
             <div className="telemetry-metric-grid">
               <article className="telemetry-metric-card">
@@ -4497,8 +5939,341 @@ export function App() {
 
             <div className="config-pills">
               <span>Battery monitor: {describeBatteryMonitor(batteryMonitor)}</span>
+              <span>Failsafe voltage source: {formatArducopterBatteryVoltageSource(batteryVoltageSource)}</span>
               <span>Low battery action: {formatArducopterBatteryFailsafeAction(batteryFailsafe)}</span>
+              <span>Critical battery action: {formatArducopterBatteryFailsafeAction(batteryCriticalFailsafe)}</span>
               <span>Throttle failsafe: {formatArducopterThrottleFailsafe(throttleFailsafe)}</span>
+              <span>Throttle failsafe PWM: {throttleFailsafeValue !== undefined ? `${throttleFailsafeValue} us` : 'Unknown'}</span>
+            </div>
+
+            <div className="scoped-review-card">
+              <div className="switch-exercise-card__header">
+                <div>
+                  <strong>Power & failsafe configuration</strong>
+                  <p>
+                    Keep routine battery-monitor and failsafe changes local to this view. Apply them here, then verify live telemetry and pre-arm state
+                    before first flight.
+                  </p>
+                </div>
+                <StatusBadge tone={toneForScopedDraftReview(powerStagedDrafts.length, powerInvalidDrafts.length)}>
+                  {powerInvalidDrafts.length > 0
+                    ? `${powerInvalidDrafts.length} invalid`
+                    : powerStagedDrafts.length > 0
+                      ? `${powerStagedDrafts.length} staged`
+                      : 'in sync'}
+                </StatusBadge>
+              </div>
+
+              <div className="scoped-editor-grid">
+                {batteryMonitorParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryMonitorParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{batteryMonitorParameter.definition?.label ?? batteryMonitorParameter.id}</span>
+                    <select
+                      value={editedValues[batteryMonitorParameter.id] ?? String(batteryMonitor ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [batteryMonitorParameter.id]: event.target.value
+                        }))
+                      }
+                    >
+                      {(batteryMonitorParameter.definition?.options ?? []).map((valueOption) => (
+                        <option key={`${batteryMonitorParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                          {valueOption.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+
+                {batteryCapacityParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryCapacityParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{batteryCapacityParameter.definition?.label ?? batteryCapacityParameter.id}</span>
+                    <input
+                      type="number"
+                      min={batteryCapacityParameter.definition?.minimum}
+                      max={batteryCapacityParameter.definition?.maximum}
+                      step={batteryCapacityParameter.definition?.step ?? 1}
+                      value={editedValues[batteryCapacityParameter.id] ?? String(batteryCapacity ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [batteryCapacityParameter.id]: event.target.value
+                        }))
+                      }
+                    />
+                  </label>
+                ) : null}
+
+                {batteryArmVoltageParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryArmVoltageParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{batteryArmVoltageParameter.definition?.label ?? batteryArmVoltageParameter.id}</span>
+                    <input
+                      type="number"
+                      min={batteryArmVoltageParameter.definition?.minimum}
+                      max={batteryArmVoltageParameter.definition?.maximum}
+                      step={batteryArmVoltageParameter.definition?.step ?? 0.1}
+                      value={editedValues[batteryArmVoltageParameter.id] ?? String(batteryArmVoltage ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [batteryArmVoltageParameter.id]: event.target.value
+                        }))
+                      }
+                    />
+                  </label>
+                ) : null}
+
+                {batteryArmMahParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryArmMahParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{batteryArmMahParameter.definition?.label ?? batteryArmMahParameter.id}</span>
+                    <input
+                      type="number"
+                      min={batteryArmMahParameter.definition?.minimum}
+                      max={batteryArmMahParameter.definition?.maximum}
+                      step={batteryArmMahParameter.definition?.step ?? 1}
+                      value={editedValues[batteryArmMahParameter.id] ?? String(batteryArmMah ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [batteryArmMahParameter.id]: event.target.value
+                        }))
+                      }
+                    />
+                  </label>
+                ) : null}
+
+                {batteryVoltageSourceParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryVoltageSourceParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{batteryVoltageSourceParameter.definition?.label ?? batteryVoltageSourceParameter.id}</span>
+                    <select
+                      value={editedValues[batteryVoltageSourceParameter.id] ?? String(batteryVoltageSource ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [batteryVoltageSourceParameter.id]: event.target.value
+                        }))
+                      }
+                    >
+                      {(batteryVoltageSourceParameter.definition?.options ?? []).map((valueOption) => (
+                        <option key={`${batteryVoltageSourceParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                          {valueOption.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+
+                {batteryLowVoltageParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryLowVoltageParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{batteryLowVoltageParameter.definition?.label ?? batteryLowVoltageParameter.id}</span>
+                    <input
+                      type="number"
+                      min={batteryLowVoltageParameter.definition?.minimum}
+                      max={batteryLowVoltageParameter.definition?.maximum}
+                      step={batteryLowVoltageParameter.definition?.step ?? 0.1}
+                      value={editedValues[batteryLowVoltageParameter.id] ?? String(batteryLowVoltage ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [batteryLowVoltageParameter.id]: event.target.value
+                        }))
+                      }
+                    />
+                  </label>
+                ) : null}
+
+                {batteryLowMahParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryLowMahParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{batteryLowMahParameter.definition?.label ?? batteryLowMahParameter.id}</span>
+                    <input
+                      type="number"
+                      min={batteryLowMahParameter.definition?.minimum}
+                      max={batteryLowMahParameter.definition?.maximum}
+                      step={batteryLowMahParameter.definition?.step ?? 1}
+                      value={editedValues[batteryLowMahParameter.id] ?? String(batteryLowMah ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [batteryLowMahParameter.id]: event.target.value
+                        }))
+                      }
+                    />
+                  </label>
+                ) : null}
+
+                {batteryFailsafeParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryFailsafeParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{batteryFailsafeParameter.definition?.label ?? batteryFailsafeParameter.id}</span>
+                    <select
+                      value={editedValues[batteryFailsafeParameter.id] ?? String(batteryFailsafe ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [batteryFailsafeParameter.id]: event.target.value
+                        }))
+                      }
+                    >
+                      {(batteryFailsafeParameter.definition?.options ?? []).map((valueOption) => (
+                        <option key={`${batteryFailsafeParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                          {valueOption.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+
+                {batteryCriticalVoltageParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryCriticalVoltageParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{batteryCriticalVoltageParameter.definition?.label ?? batteryCriticalVoltageParameter.id}</span>
+                    <input
+                      type="number"
+                      min={batteryCriticalVoltageParameter.definition?.minimum}
+                      max={batteryCriticalVoltageParameter.definition?.maximum}
+                      step={batteryCriticalVoltageParameter.definition?.step ?? 0.1}
+                      value={editedValues[batteryCriticalVoltageParameter.id] ?? String(batteryCriticalVoltage ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [batteryCriticalVoltageParameter.id]: event.target.value
+                        }))
+                      }
+                    />
+                  </label>
+                ) : null}
+
+                {batteryCriticalMahParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryCriticalMahParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{batteryCriticalMahParameter.definition?.label ?? batteryCriticalMahParameter.id}</span>
+                    <input
+                      type="number"
+                      min={batteryCriticalMahParameter.definition?.minimum}
+                      max={batteryCriticalMahParameter.definition?.maximum}
+                      step={batteryCriticalMahParameter.definition?.step ?? 1}
+                      value={editedValues[batteryCriticalMahParameter.id] ?? String(batteryCriticalMah ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [batteryCriticalMahParameter.id]: event.target.value
+                        }))
+                      }
+                    />
+                  </label>
+                ) : null}
+
+                {batteryCriticalFailsafeParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryCriticalFailsafeParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{batteryCriticalFailsafeParameter.definition?.label ?? batteryCriticalFailsafeParameter.id}</span>
+                    <select
+                      value={editedValues[batteryCriticalFailsafeParameter.id] ?? String(batteryCriticalFailsafe ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [batteryCriticalFailsafeParameter.id]: event.target.value
+                        }))
+                      }
+                    >
+                      {(batteryCriticalFailsafeParameter.definition?.options ?? []).map((valueOption) => (
+                        <option key={`${batteryCriticalFailsafeParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                          {valueOption.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+
+                {throttleFailsafeParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(throttleFailsafeParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{throttleFailsafeParameter.definition?.label ?? throttleFailsafeParameter.id}</span>
+                    <select
+                      value={editedValues[throttleFailsafeParameter.id] ?? String(throttleFailsafe ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [throttleFailsafeParameter.id]: event.target.value
+                        }))
+                      }
+                    >
+                      {(throttleFailsafeParameter.definition?.options ?? []).map((valueOption) => (
+                        <option key={`${throttleFailsafeParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                          {valueOption.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+
+                {throttleFailsafeValueParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(throttleFailsafeValueParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{throttleFailsafeValueParameter.definition?.label ?? throttleFailsafeValueParameter.id}</span>
+                    <input
+                      type="number"
+                      min={throttleFailsafeValueParameter.definition?.minimum}
+                      max={throttleFailsafeValueParameter.definition?.maximum}
+                      step={throttleFailsafeValueParameter.definition?.step ?? 1}
+                      value={editedValues[throttleFailsafeValueParameter.id] ?? String(throttleFailsafeValue ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [throttleFailsafeValueParameter.id]: event.target.value
+                        }))
+                      }
+                    />
+                  </label>
+                ) : null}
+              </div>
+
+              <ul className="output-note-list">
+                <li>Battery thresholds set to `0` deliberately disable that threshold path; do not leave them at zero accidentally.</li>
+                <li>After changing battery monitor source, voltage source, or failsafe thresholds, verify live telemetry before first flight.</li>
+                <li>After changing throttle failsafe settings, bench-check receiver-loss behavior again before flight.</li>
+              </ul>
+
+              {powerDraftEntries.length > 0 ? (
+                <div className="scoped-draft-list">
+                  {powerDraftEntries.map((draft) => (
+                    <article key={draft.id} className={`scoped-draft-item scoped-draft-item--${draft.status}`}>
+                      <div className="scoped-draft-item__header">
+                        <strong>{draft.label}</strong>
+                        <StatusBadge tone={toneForParameterDraftStatus(draft.status)}>{draft.status}</StatusBadge>
+                      </div>
+                      <p>{draft.id}</p>
+                      <small>
+                        {draft.status === 'staged'
+                          ? `${formatParameterValue(draft.currentValue, draft.definition?.unit)} to ${formatParameterValue(
+                              draft.nextValue,
+                              draft.definition?.unit
+                            )}`
+                          : draft.reason ?? 'Draft matches the live controller value.'}
+                      </small>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="success-copy">No power or failsafe changes are staged right now.</p>
+              )}
+
+              <div className="switch-exercise-controls">
+                <button
+                  style={buttonStyle('primary')}
+                  onClick={() => void handleApplyScopedParameterDrafts(powerDraftEntries, 'power:apply', 'Power & failsafe')}
+                  disabled={
+                    busyAction !== undefined ||
+                    powerStagedDrafts.length === 0 ||
+                    powerInvalidDrafts.length > 0 ||
+                    !canApplyDraftParameters
+                  }
+                >
+                  {busyAction === 'power:apply' ? 'Applying…' : `Apply Power Changes (${powerStagedDrafts.length})`}
+                </button>
+                <button
+                  style={buttonStyle()}
+                  onClick={() => handleDiscardScopedParameterDrafts(powerDraftEntries.map((entry) => entry.id), 'power')}
+                  disabled={busyAction !== undefined || powerDraftEntries.length === 0}
+                >
+                  Discard Power Changes
+                </button>
+              </div>
             </div>
 
             <div className="prearm-card">
@@ -4541,7 +6316,7 @@ export function App() {
       <div id="setup-panel-outputs">
         <Panel
           title="Airframe & Outputs"
-          subtitle="Review frame geometry and primary motor/peripheral assignments before any output testing. This surface stays read-only for now."
+          subtitle="Review frame geometry, output assignments, and key motor/peripheral settings before any output testing."
         >
         <div className="telemetry-stack">
           <div className="telemetry-metric-grid">
@@ -4675,6 +6450,313 @@ export function App() {
               <li key={note}>{note}</li>
             ))}
           </ul>
+
+          {outputAssignmentParameters.length > 0 ? (
+            <div className="scoped-review-card scoped-review-card--compact">
+              <div className="switch-exercise-card__header">
+                <div>
+                  <strong>Output assignments</strong>
+                  <p>Remap motor and peripheral functions directly from Outputs, then rerun output verification before flight.</p>
+                </div>
+                <StatusBadge tone={toneForScopedDraftReview(outputAssignmentStagedDrafts.length, outputAssignmentInvalidDrafts.length)}>
+                  {outputAssignmentInvalidDrafts.length > 0
+                    ? `${outputAssignmentInvalidDrafts.length} invalid`
+                    : outputAssignmentStagedDrafts.length > 0
+                      ? `${outputAssignmentStagedDrafts.length} staged`
+                      : 'in sync'}
+                </StatusBadge>
+              </div>
+
+              <div className="scoped-editor-grid">
+                {outputAssignmentParameters.map((parameter) => {
+                  const draft = parameterDraftById.get(parameter.id)
+                  const outputChannel = parseServoOutputChannelNumber(parameter.id)
+                  const mappedOutput = configuredOutputs.find((output) => output.channelNumber === outputChannel)
+
+                  return (
+                    <label key={parameter.id} className={`scoped-editor-field scoped-editor-field--${draft?.status ?? 'unchanged'}`}>
+                      <span>{parameter.definition?.label ?? parameter.id}</span>
+                      <select
+                        value={editedValues[parameter.id] ?? String(parameter.value)}
+                        onChange={(event) =>
+                          setEditedValues((existing) => ({
+                            ...existing,
+                            [parameter.id]: event.target.value
+                          }))
+                        }
+                      >
+                        {(parameter.definition?.options ?? []).map((valueOption) => (
+                          <option key={`${parameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                            {valueOption.label} ({valueOption.value})
+                          </option>
+                        ))}
+                      </select>
+                      <small>
+                        {draft?.status === 'staged'
+                          ? `Staged ${formatParameterDisplayValue(parameter, draft.nextValue)}`
+                          : draft?.reason ??
+                            (mappedOutput
+                              ? `Current ${mappedOutput.functionLabel} on OUT${mappedOutput.channelNumber}`
+                              : `Current ${formatParameterDisplayValue(parameter, parameter.value)}`)}
+                      </small>
+                    </label>
+                  )
+                })}
+              </div>
+
+              <ul className="output-note-list">
+                <li>Changing SERVOx function assignments can move motors, LEDs, or accessories to a different output pin immediately after apply/reboot.</li>
+                <li>After remapping outputs, keep props off and repeat the motor/peripheral verification steps from this view.</li>
+              </ul>
+
+              <div className="switch-exercise-controls">
+                <button
+                  style={buttonStyle('primary')}
+                  onClick={() =>
+                    void handleApplyScopedParameterDrafts(outputAssignmentDraftEntries, 'outputs:assignments', 'Output assignments')
+                  }
+                  disabled={
+                    busyAction !== undefined ||
+                    outputAssignmentStagedDrafts.length === 0 ||
+                    outputAssignmentInvalidDrafts.length > 0 ||
+                    !canApplyDraftParameters
+                  }
+                >
+                  {busyAction === 'outputs:assignments' ? 'Applying…' : `Apply Output Assignments (${outputAssignmentStagedDrafts.length})`}
+                </button>
+                <button
+                  style={buttonStyle()}
+                  onClick={() =>
+                    handleDiscardScopedParameterDrafts(outputAssignmentDraftEntries.map((entry) => entry.id), 'output assignments')
+                  }
+                  disabled={busyAction !== undefined || outputAssignmentDraftEntries.length === 0}
+                >
+                  Discard Output Assignments
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {notificationLedTypesParameter || notificationLedLengthParameter || notificationLedBrightnessParameter || notificationLedOverrideParameter || notificationBuzzTypesParameter || notificationBuzzVolumeParameter ? (
+            <div className="scoped-review-card scoped-review-card--compact">
+              <div className="switch-exercise-card__header">
+                <div>
+                  <strong>LED & buzzer notifications</strong>
+                  <p>Keep common FPV notification hardware setup local to Outputs instead of dropping into raw parameters.</p>
+                </div>
+                <StatusBadge tone={toneForScopedDraftReview(outputNotificationStagedDrafts.length, outputNotificationInvalidDrafts.length)}>
+                  {outputNotificationInvalidDrafts.length > 0
+                    ? `${outputNotificationInvalidDrafts.length} invalid`
+                    : outputNotificationStagedDrafts.length > 0
+                      ? `${outputNotificationStagedDrafts.length} staged`
+                      : 'in sync'}
+                </StatusBadge>
+              </div>
+
+              <div className="config-pills">
+                {notificationLedTypesParameter ? <span>LED drivers: {describeBitmaskSelections(notificationLedTypes, ARDUCOPTER_NOTIFICATION_LED_TYPE_BIT_LABELS, 'Disabled')}</span> : null}
+                {notificationLedBrightnessParameter ? <span>Brightness: {formatArducopterNotificationLedBrightness(notificationLedBrightness)}</span> : null}
+                {notificationLedLengthParameter ? <span>LED length: {notificationLedLength ?? 'Unknown'}</span> : null}
+                {notificationLedOverrideParameter ? <span>LED source: {formatArducopterNotificationLedOverride(notificationLedOverride)}</span> : null}
+                {notificationBuzzTypesParameter ? <span>Buzzer drivers: {describeBitmaskSelections(notificationBuzzTypes, ARDUCOPTER_NOTIFICATION_BUZZER_TYPE_BIT_LABELS, 'Disabled')}</span> : null}
+                {notificationBuzzVolumeParameter ? <span>Buzzer volume: {notificationBuzzVolume !== undefined ? `${notificationBuzzVolume}%` : 'Unknown'}</span> : null}
+                {notificationLedOutputs.length > 0
+                  ? notificationLedOutputs.map((output) => <span key={`notification-output:${output.channelNumber}`}>OUT{output.channelNumber}: {output.functionLabel}</span>)
+                  : <span>No NeoPixel output assignment detected yet</span>}
+              </div>
+
+              <div className="scoped-editor-grid">
+                {notificationLedTypesParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(notificationLedTypesParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{notificationLedTypesParameter.definition?.label ?? notificationLedTypesParameter.id}</span>
+                    <div className="scoped-checkbox-list">
+                      {Object.entries(ARDUCOPTER_NOTIFICATION_LED_TYPE_BIT_LABELS).map(([bit, label]) => {
+                        const numericBit = Number(bit)
+                        return (
+                          <label key={`${notificationLedTypesParameter.id}:${bit}`} className="scoped-checkbox-option">
+                            <input
+                              type="checkbox"
+                              checked={hasBitmaskFlag(editedNotificationLedTypes, numericBit)}
+                              onChange={(event) =>
+                                setEditedValues((existing) => {
+                                  const currentValue = normalizeBitmaskValue(existing[notificationLedTypesParameter.id], notificationLedTypes)
+                                  const nextValue = event.target.checked
+                                    ? currentValue | (1 << numericBit)
+                                    : currentValue & ~(1 << numericBit)
+
+                                  return {
+                                    ...existing,
+                                    [notificationLedTypesParameter.id]: String(nextValue)
+                                  }
+                                })
+                              }
+                            />
+                            <span>{label}</span>
+                          </label>
+                        )
+                      })}
+                    </div>
+                    <small>
+                      {parameterDraftById.get(notificationLedTypesParameter.id)?.status === 'staged'
+                        ? `Staged ${describeBitmaskSelections(parameterDraftById.get(notificationLedTypesParameter.id)?.nextValue, ARDUCOPTER_NOTIFICATION_LED_TYPE_BIT_LABELS, 'Disabled')}`
+                        : parameterDraftById.get(notificationLedTypesParameter.id)?.reason ??
+                          `Current ${describeBitmaskSelections(notificationLedTypes, ARDUCOPTER_NOTIFICATION_LED_TYPE_BIT_LABELS, 'Disabled')}`}
+                    </small>
+                  </label>
+                ) : null}
+
+                {notificationLedBrightnessParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(notificationLedBrightnessParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{notificationLedBrightnessParameter.definition?.label ?? notificationLedBrightnessParameter.id}</span>
+                    <select
+                      value={editedValues[notificationLedBrightnessParameter.id] ?? String(notificationLedBrightness ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [notificationLedBrightnessParameter.id]: event.target.value
+                        }))
+                      }
+                    >
+                      {(notificationLedBrightnessParameter.definition?.options ?? []).map((valueOption) => (
+                        <option key={`${notificationLedBrightnessParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                          {valueOption.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+
+                {notificationLedLengthParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(notificationLedLengthParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{notificationLedLengthParameter.definition?.label ?? notificationLedLengthParameter.id}</span>
+                    <input
+                      type="number"
+                      min={notificationLedLengthParameter.definition?.minimum}
+                      max={notificationLedLengthParameter.definition?.maximum}
+                      step={notificationLedLengthParameter.definition?.step ?? 1}
+                      value={editedValues[notificationLedLengthParameter.id] ?? String(notificationLedLength ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [notificationLedLengthParameter.id]: event.target.value
+                        }))
+                      }
+                    />
+                  </label>
+                ) : null}
+
+                {notificationLedOverrideParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(notificationLedOverrideParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{notificationLedOverrideParameter.definition?.label ?? notificationLedOverrideParameter.id}</span>
+                    <select
+                      value={editedValues[notificationLedOverrideParameter.id] ?? String(notificationLedOverride ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [notificationLedOverrideParameter.id]: event.target.value
+                        }))
+                      }
+                    >
+                      {(notificationLedOverrideParameter.definition?.options ?? []).map((valueOption) => (
+                        <option key={`${notificationLedOverrideParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                          {valueOption.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+
+                {notificationBuzzTypesParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(notificationBuzzTypesParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{notificationBuzzTypesParameter.definition?.label ?? notificationBuzzTypesParameter.id}</span>
+                    <div className="scoped-checkbox-list">
+                      {Object.entries(ARDUCOPTER_NOTIFICATION_BUZZER_TYPE_BIT_LABELS).map(([bit, label]) => {
+                        const numericBit = Number(bit)
+                        return (
+                          <label key={`${notificationBuzzTypesParameter.id}:${bit}`} className="scoped-checkbox-option">
+                            <input
+                              type="checkbox"
+                              checked={hasBitmaskFlag(editedNotificationBuzzTypes, numericBit)}
+                              onChange={(event) =>
+                                setEditedValues((existing) => {
+                                  const currentValue = normalizeBitmaskValue(existing[notificationBuzzTypesParameter.id], notificationBuzzTypes)
+                                  const nextValue = event.target.checked
+                                    ? currentValue | (1 << numericBit)
+                                    : currentValue & ~(1 << numericBit)
+
+                                  return {
+                                    ...existing,
+                                    [notificationBuzzTypesParameter.id]: String(nextValue)
+                                  }
+                                })
+                              }
+                            />
+                            <span>{label}</span>
+                          </label>
+                        )
+                      })}
+                    </div>
+                    <small>
+                      {parameterDraftById.get(notificationBuzzTypesParameter.id)?.status === 'staged'
+                        ? `Staged ${describeBitmaskSelections(parameterDraftById.get(notificationBuzzTypesParameter.id)?.nextValue, ARDUCOPTER_NOTIFICATION_BUZZER_TYPE_BIT_LABELS, 'Disabled')}`
+                        : parameterDraftById.get(notificationBuzzTypesParameter.id)?.reason ??
+                          `Current ${describeBitmaskSelections(notificationBuzzTypes, ARDUCOPTER_NOTIFICATION_BUZZER_TYPE_BIT_LABELS, 'Disabled')}`}
+                    </small>
+                  </label>
+                ) : null}
+
+                {notificationBuzzVolumeParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(notificationBuzzVolumeParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{notificationBuzzVolumeParameter.definition?.label ?? notificationBuzzVolumeParameter.id}</span>
+                    <input
+                      type="number"
+                      min={notificationBuzzVolumeParameter.definition?.minimum}
+                      max={notificationBuzzVolumeParameter.definition?.maximum}
+                      step={notificationBuzzVolumeParameter.definition?.step ?? 1}
+                      value={editedValues[notificationBuzzVolumeParameter.id] ?? String(notificationBuzzVolume ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [notificationBuzzVolumeParameter.id]: event.target.value
+                        }))
+                      }
+                    />
+                  </label>
+                ) : null}
+              </div>
+
+              <ul className="output-note-list">
+                <li>Assign a NeoPixel output in the Output assignments card before expecting external LED strips to respond.</li>
+                <li>After notification-driver changes, bench-check the LEDs and buzzer with props off before flight.</li>
+              </ul>
+
+              <div className="switch-exercise-controls">
+                <button
+                  style={buttonStyle('primary')}
+                  onClick={() =>
+                    void handleApplyScopedParameterDrafts(outputNotificationDraftEntries, 'outputs:notifications', 'Notification outputs')
+                  }
+                  disabled={
+                    busyAction !== undefined ||
+                    outputNotificationStagedDrafts.length === 0 ||
+                    outputNotificationInvalidDrafts.length > 0 ||
+                    !canApplyDraftParameters
+                  }
+                >
+                  {busyAction === 'outputs:notifications' ? 'Applying…' : `Apply Notification Changes (${outputNotificationStagedDrafts.length})`}
+                </button>
+                <button
+                  style={buttonStyle()}
+                  onClick={() =>
+                    handleDiscardScopedParameterDrafts(outputNotificationDraftEntries.map((entry) => entry.id), 'notification outputs')
+                  }
+                  disabled={busyAction !== undefined || outputNotificationDraftEntries.length === 0}
+                >
+                  Discard Notification Changes
+                </button>
+              </div>
+            </div>
+          ) : null}
 
           <div className="motor-test-card">
             <div className="switch-exercise-card__header">
@@ -5095,6 +7177,361 @@ export function App() {
       </div>
       ) : null}
 
+      {activeViewId === 'snapshots' ? (
+      <section className="grid one-up">
+        <Panel
+          title="Snapshots"
+          subtitle="Capture, compare, and restore known-good parameter sets with the same verified write path used by the rest of the configurator."
+        >
+          <div className="telemetry-stack">
+            <input
+              ref={snapshotImportInputRef}
+              className="parameter-backup-input"
+              type="file"
+              accept="application/json,.json"
+              onChange={(event) => void handleImportSnapshotFile(event)}
+            />
+
+            <div className="telemetry-header">
+              <div>
+                <h3>Local snapshot library</h3>
+                <p>
+                  Capture the current live configuration, keep named browser-local snapshots, compare them against the synced controller, and restore
+                  only the differing parameters when you need to roll back to a known-good baseline.
+                </p>
+              </div>
+              <StatusBadge tone={toneForScopedDraftReview(selectedSnapshotChangedEntries.length, selectedSnapshotInvalidEntries.length)}>
+                {selectedSnapshotInvalidEntries.length > 0
+                  ? `${selectedSnapshotInvalidEntries.length} invalid`
+                  : selectedSnapshotChangedEntries.length > 0
+                    ? `${selectedSnapshotChangedEntries.length} diff`
+                    : `${savedSnapshots.length} saved`}
+              </StatusBadge>
+            </div>
+
+            <div className="snapshot-capture-row">
+              <label className="scoped-editor-field">
+                <span>Snapshot label</span>
+                <input
+                  type="text"
+                  value={snapshotLabelInput}
+                  onChange={(event) => setSnapshotLabelInput(event.target.value)}
+                  placeholder="Optional label, e.g. MOZ7 known-good baseline"
+                />
+                <small>Leave this blank to generate a timestamped label from the connected vehicle identity.</small>
+              </label>
+
+              <label className="scoped-editor-field">
+                <span>Tags</span>
+                <input
+                  type="text"
+                  value={snapshotTagsInput}
+                  onChange={(event) => setSnapshotTagsInput(event.target.value)}
+                  placeholder="moz7, baseline, tune"
+                />
+                <small>Optional comma-separated tags to make later library review easier.</small>
+              </label>
+
+              <label className="scoped-editor-field">
+                <span>Note</span>
+                <textarea
+                  value={snapshotNoteInput}
+                  onChange={(event) => setSnapshotNoteInput(event.target.value)}
+                  placeholder="Optional context for when and why this snapshot was captured."
+                  rows={3}
+                />
+                <small>Notes travel with exported snapshot-library files.</small>
+              </label>
+
+              <div className="snapshot-capture-actions">
+                <label className="snapshot-protected-toggle">
+                  <input
+                    type="checkbox"
+                    checked={snapshotProtectedInput}
+                    onChange={(event) => setSnapshotProtectedInput(event.target.checked)}
+                  />
+                  <span>Mark as protected baseline</span>
+                </label>
+                <button
+                  style={buttonStyle('primary')}
+                  onClick={handleCaptureLiveSnapshot}
+                  disabled={busyAction !== undefined || snapshot.parameters.length === 0}
+                >
+                  Capture Live Snapshot
+                </button>
+                <button style={buttonStyle()} onClick={handleOpenSnapshotImport} disabled={busyAction !== undefined}>
+                  Import Snapshot or Library
+                </button>
+                <button style={buttonStyle()} onClick={handleExportSnapshotLibrary} disabled={busyAction !== undefined || savedSnapshots.length === 0}>
+                  Export Library
+                </button>
+              </div>
+            </div>
+
+            <p className="telemetry-note">
+              Browser snapshots stay local by default, but `Export Library` writes a portable snapshot-library file that the desktop CLI and later web
+              sessions can import directly.
+            </p>
+
+            {snapshotNotice ? (
+              <div className="parameter-review__notice">
+                <StatusBadge tone={snapshotNotice.tone}>{snapshotNotice.tone}</StatusBadge>
+                <p>{snapshotNotice.text}</p>
+              </div>
+            ) : null}
+
+            {parameterFollowUp ? (
+              <div className="parameter-follow-up">
+                <StatusBadge tone={parameterFollowUp.requiresReboot ? 'warning' : 'neutral'}>
+                  {parameterFollowUp.requiresReboot ? 'reboot' : 'refresh'}
+                </StatusBadge>
+                <p>{parameterFollowUp.text}</p>
+                <small>Use the sidebar session controls to complete the pending reboot or refresh after a restore.</small>
+              </div>
+            ) : null}
+
+            <div className="telemetry-metric-grid">
+              <article className="telemetry-metric-card">
+                <span>Saved snapshots</span>
+                <strong>{savedSnapshots.length}</strong>
+              </article>
+              <article className="telemetry-metric-card">
+                <span>Snapshot params</span>
+                <strong>{selectedSnapshot?.backup.parameterCount ?? 0}</strong>
+              </article>
+              <article className="telemetry-metric-card">
+                <span>Changed vs live</span>
+                <strong>{selectedSnapshotRestore?.changedCount ?? 0}</strong>
+              </article>
+              <article className="telemetry-metric-card">
+                <span>Reboot-sensitive</span>
+                <strong>{selectedSnapshotChangedEntries.filter((entry) => entry.definition?.rebootRequired).length}</strong>
+              </article>
+            </div>
+
+            {savedSnapshots.length > 0 ? (
+              <div className="snapshot-library-grid">
+                {savedSnapshots.map((savedSnapshot) => {
+                  const isActive = savedSnapshot.id === selectedSnapshot?.id
+                  const restorePreview =
+                    (savedSnapshot.id === selectedSnapshot?.id ? selectedSnapshotRestore : deriveDraftValuesFromParameterBackup(snapshot.parameters, savedSnapshot.backup)) ?? {
+                      draftValues: {},
+                      matchedCount: 0,
+                      changedCount: 0,
+                      unchangedCount: 0,
+                      unknownParameterIds: []
+                    }
+
+                  return (
+                    <button
+                      key={savedSnapshot.id}
+                      type="button"
+                      className={`snapshot-card${isActive ? ' is-active' : ''}`}
+                      onClick={() => setSelectedSnapshotId(savedSnapshot.id)}
+                    >
+                      <div className="snapshot-card__header">
+                        <div>
+                          <strong>{savedSnapshot.label}</strong>
+                          <small>{formatSnapshotTimestamp(savedSnapshot.capturedAt)}</small>
+                        </div>
+                        <StatusBadge tone={restorePreview.changedCount > 0 ? 'warning' : 'neutral'}>
+                          {restorePreview.changedCount > 0 ? `${restorePreview.changedCount} diff` : 'matches'}
+                        </StatusBadge>
+                      </div>
+
+                      <div className="config-pills">
+                        <span>{savedSnapshot.source === 'captured' ? 'captured here' : 'imported'}</span>
+                        <span>{savedSnapshot.backup.parameterCount} params</span>
+                        <span>{savedSnapshot.backup.vehicle?.vehicle ?? savedSnapshot.backup.firmware}</span>
+                        {savedSnapshot.protected ? <span className="is-target">protected</span> : null}
+                        {savedSnapshot.tags.slice(0, 3).map((tag) => (
+                          <span key={`${savedSnapshot.id}:${tag}`}>#{tag}</span>
+                        ))}
+                      </div>
+
+                      <p>
+                        {savedSnapshot.backup.vehicle
+                          ? `${savedSnapshot.backup.vehicle.flightMode} at export from sys ${savedSnapshot.backup.vehicle.systemId} / comp ${savedSnapshot.backup.vehicle.componentId}.`
+                          : 'Vehicle identity was not embedded in this imported backup file.'}
+                      </p>
+                      {savedSnapshot.note ? <small className="snapshot-card__note">{savedSnapshot.note}</small> : null}
+                    </button>
+                  )
+                })}
+              </div>
+            ) : (
+              <p className="telemetry-note">
+                No saved snapshots yet. Capture the live controller or import a previously exported backup to build a restore library.
+              </p>
+            )}
+
+            {selectedSnapshot ? (
+              <div className="snapshot-selected">
+                <div className="telemetry-header">
+                  <div>
+                    <h3>{selectedSnapshot.label}</h3>
+                    <p>
+                      {selectedSnapshot.source === 'captured'
+                        ? 'Captured from the current browser session.'
+                        : 'Imported into the local browser snapshot library.'}
+                    </p>
+                  </div>
+                  <StatusBadge tone={selectedSnapshotChangedEntries.length > 0 ? 'warning' : 'success'}>
+                    {selectedSnapshotChangedEntries.length > 0 ? 'restore available' : 'already matched'}
+                  </StatusBadge>
+                </div>
+
+                <div className="telemetry-metric-grid">
+                  <article className="telemetry-metric-card">
+                    <span>Captured</span>
+                    <strong>{formatSnapshotTimestamp(selectedSnapshot.capturedAt)}</strong>
+                  </article>
+                  <article className="telemetry-metric-card">
+                    <span>Matched live</span>
+                    <strong>{selectedSnapshotRestore?.unchangedCount ?? 0}</strong>
+                  </article>
+                  <article className="telemetry-metric-card">
+                    <span>Unknown on live</span>
+                    <strong>{selectedSnapshotRestore?.unknownParameterIds.length ?? 0}</strong>
+                  </article>
+                  <article className="telemetry-metric-card">
+                    <span>Restore writes</span>
+                    <strong>{selectedSnapshotChangedEntries.length}</strong>
+                  </article>
+                </div>
+
+                <div className="config-pills">
+                  <span>{selectedSnapshot.backup.vehicle?.vehicle ?? selectedSnapshot.backup.firmware}</span>
+                  <span>{selectedSnapshot.backup.vehicle?.firmware ?? 'Unknown firmware'}</span>
+                  <span>{selectedSnapshot.backup.vehicle?.flightMode ?? 'Mode unknown at export'}</span>
+                  <span>{selectedSnapshot.backup.parameterCount} parameters</span>
+                  {selectedSnapshot.protected ? <span className="is-target">protected baseline</span> : null}
+                  {selectedSnapshot.tags.map((tag) => (
+                    <span key={`${selectedSnapshot.id}:detail:${tag}`}>#{tag}</span>
+                  ))}
+                </div>
+
+                {selectedSnapshot.note ? <p className="snapshot-selected__note">{selectedSnapshot.note}</p> : null}
+
+                {selectedSnapshotRestore && selectedSnapshotRestore.unknownParameterIds.length > 0 ? (
+                  <div className="parameter-follow-up parameter-follow-up--warning">
+                    <StatusBadge tone="warning">partial</StatusBadge>
+                    <p>
+                      {selectedSnapshotRestore.unknownParameterIds.length} snapshot parameter(s) do not exist in the current live metadata set and will
+                      be ignored during restore.
+                    </p>
+                  </div>
+                ) : null}
+
+                {selectedSnapshotChangedEntries.length > 0 ? (
+                  <div className="parameter-diff-grid">
+                    {selectedSnapshotDiffGroups.map((group) => (
+                      <section key={group.category} className="parameter-diff-group">
+                        <header>
+                          <strong>{formatCategoryLabel(group.category)}</strong>
+                          <span>{group.entries.length} changed</span>
+                        </header>
+
+                        {group.entries.map((draft) => (
+                          <div key={draft.id} className="parameter-diff-item">
+                            <span>
+                              <strong>{draft.id}</strong>
+                              <small>{draft.label}</small>
+                            </span>
+                            <span className="parameter-diff-values">
+                              {formatParameterValue(draft.currentValue, draft.definition?.unit)} to{' '}
+                              {formatParameterValue(draft.nextValue, draft.definition?.unit)}
+                            </span>
+                            <span className="parameter-diff-delta">{formatParameterDelta(draft.delta, draft.definition?.unit)}</span>
+                          </div>
+                        ))}
+                      </section>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="telemetry-note">
+                    This snapshot already matches the currently synced controller values. Capture another live snapshot or choose another library entry to
+                    compare.
+                  </p>
+                )}
+
+                {selectedSnapshotInvalidEntries.length > 0 ? (
+                  <div className="parameter-diff-grid parameter-diff-grid--invalid">
+                    <section className="parameter-diff-group parameter-diff-group--invalid">
+                      <header>
+                        <strong>Invalid restore values</strong>
+                        <span>{selectedSnapshotInvalidEntries.length} blocked</span>
+                      </header>
+
+                      {selectedSnapshotInvalidEntries.map((draft) => (
+                        <div key={draft.id} className="parameter-diff-item">
+                          <span>
+                            <strong>{draft.id}</strong>
+                            <small>{draft.label}</small>
+                          </span>
+                          <span className="parameter-diff-values">{draft.rawValue || 'Empty draft'}</span>
+                          <span className="parameter-diff-delta">{draft.reason ?? 'Invalid value'}</span>
+                        </div>
+                      ))}
+                    </section>
+                  </div>
+                ) : null}
+
+                <div className="parameter-follow-up parameter-follow-up--warning">
+                  <StatusBadge tone="warning">overwrite</StatusBadge>
+                  <p>
+                    Snapshot restore writes only the diff against the current live controller, verifies readback, and rolls back earlier writes if a later
+                    write fails. It still overwrites the current live values for every changed parameter listed above.
+                  </p>
+                </div>
+
+                <label className="snapshot-restore-ack">
+                  <input
+                    type="checkbox"
+                    checked={snapshotRestoreAcknowledged}
+                    onChange={(event) => setSnapshotRestoreAcknowledged(event.target.checked)}
+                    disabled={busyAction !== undefined || selectedSnapshotChangedEntries.length === 0}
+                  />
+                  <span>I understand that applying this restore will overwrite the current live values shown in the diff above.</span>
+                </label>
+
+                <div className="switch-exercise-controls">
+                  <button
+                    style={buttonStyle('primary')}
+                    onClick={() => void handleApplySelectedSnapshotRestore()}
+                    disabled={
+                      busyAction !== undefined ||
+                      selectedSnapshotChangedEntries.length === 0 ||
+                      selectedSnapshotInvalidEntries.length > 0 ||
+                      !snapshotRestoreAcknowledged ||
+                      !canApplyDraftParameters
+                    }
+                  >
+                    {busyAction === 'snapshots:apply' ? 'Applying…' : `Apply Snapshot Restore (${selectedSnapshotChangedEntries.length})`}
+                  </button>
+                  {isExpertMode ? (
+                    <button
+                      style={buttonStyle()}
+                      onClick={handleStageSelectedSnapshotDiff}
+                      disabled={busyAction !== undefined || selectedSnapshotChangedEntries.length === 0}
+                    >
+                      Send Diff to Parameters
+                    </button>
+                  ) : null}
+                  <button style={buttonStyle()} onClick={handleExportSelectedSnapshot} disabled={busyAction !== undefined}>
+                    Export Selected
+                  </button>
+                  <button style={buttonStyle()} onClick={handleDeleteSelectedSnapshot} disabled={busyAction !== undefined}>
+                    Delete Selected
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </Panel>
+      </section>
+      ) : null}
+
       {activeViewId === 'tuning' ? (
       <section className="grid one-up">
         <Panel
@@ -5310,6 +7747,335 @@ export function App() {
             <p className="telemetry-note">
               This view is intentionally limited to high-value flight-feel and rate/expo controls. It is designed to be easy to expand later without
               turning the app into a full raw-tuning surface by default.
+            </p>
+          </div>
+        </Panel>
+      </section>
+      ) : null}
+
+      {activeViewId === 'presets' ? (
+      <section className="grid one-up">
+        <Panel
+          title="Presets"
+          subtitle="Curated tuning bundles built on the same verified write path and snapshot safety system as the rest of the configurator."
+        >
+          <div className="telemetry-stack">
+            <div className="telemetry-header">
+              <div>
+                <h3>Preset library</h3>
+                <p>
+                  Presets stay intentionally narrow: they touch only the small, high-value tuning controls already exposed in this product. Every
+                  apply requires diff review, and a pre-apply snapshot is captured automatically before any write is sent.
+                </p>
+              </div>
+              <StatusBadge tone={toneForPresetApplicability(selectedPresetApplicability.status)}>
+                {selectedPresetInvalidEntries.length > 0
+                  ? `${selectedPresetInvalidEntries.length} invalid`
+                  : selectedPresetChangedEntries.length > 0
+                    ? `${selectedPresetChangedEntries.length} diff`
+                    : `${presetDefinitions.length} presets`}
+              </StatusBadge>
+            </div>
+
+            {presetNotice ? (
+              <div className="parameter-review__notice">
+                <StatusBadge tone={presetNotice.tone}>{presetNotice.tone}</StatusBadge>
+                <p>{presetNotice.text}</p>
+              </div>
+            ) : null}
+
+            {parameterFollowUp ? (
+              <div className="parameter-follow-up">
+                <StatusBadge tone={parameterFollowUp.requiresReboot ? 'warning' : 'neutral'}>
+                  {parameterFollowUp.requiresReboot ? 'reboot' : 'refresh'}
+                </StatusBadge>
+                <p>{parameterFollowUp.text}</p>
+                <small>Use the sidebar session controls to complete the pending reboot or refresh after a preset apply.</small>
+              </div>
+            ) : null}
+
+            <div className="telemetry-metric-grid">
+              <article className="telemetry-metric-card">
+                <span>Preset families</span>
+                <strong>{presetGroups.length}</strong>
+              </article>
+              <article className="telemetry-metric-card">
+                <span>Total presets</span>
+                <strong>{presetDefinitions.length}</strong>
+              </article>
+              <article className="telemetry-metric-card">
+                <span>Changed vs live</span>
+                <strong>{selectedPresetDiff?.changedCount ?? 0}</strong>
+              </article>
+              <article className="telemetry-metric-card">
+                <span>Auto backups</span>
+                <strong>{savedSnapshots.filter((snapshotEntry) => snapshotEntry.tags.includes('auto-backup')).length}</strong>
+              </article>
+            </div>
+
+            {presetGroups.length > 0 ? (
+              <div className="preset-group-grid">
+                {presetGroups.map((group) => (
+                  <section key={group.id} className="preset-group">
+                    <header className="preset-group__header">
+                      <div>
+                        <strong>{group.label}</strong>
+                        <p>{group.description}</p>
+                      </div>
+                      <StatusBadge tone="neutral">{metadataCatalog.presetsByGroup[group.id]?.length ?? 0} presets</StatusBadge>
+                    </header>
+
+                    <div className="preset-card-grid">
+                      {(metadataCatalog.presetsByGroup[group.id] ?? []).map((preset) => {
+                        const preview = presetPreviewById.get(preset.id)
+                        const isActive = preset.id === selectedPreset?.id
+                        const changedCount = preview?.diff.changedCount ?? 0
+                        const invalidCount = deriveParameterDraftEntries(snapshot.parameters, preview?.diff.draftValues ?? {}).filter(
+                          (entry) => entry.status === 'invalid'
+                        ).length
+
+                        return (
+                          <button
+                            key={preset.id}
+                            type="button"
+                            className={`preset-card${isActive ? ' is-active' : ''}`}
+                            onClick={() => setSelectedPresetId(preset.id)}
+                          >
+                            <div className="preset-card__header">
+                              <div>
+                                <strong>{preset.label}</strong>
+                                <small>{preset.description}</small>
+                              </div>
+                              <StatusBadge
+                                tone={
+                                  invalidCount > 0
+                                    ? 'danger'
+                                    : preview
+                                      ? toneForPresetApplicability(preview.applicability.status)
+                                      : 'neutral'
+                                }
+                              >
+                                {invalidCount > 0
+                                  ? `${invalidCount} invalid`
+                                  : preview?.applicability.status === 'blocked'
+                                    ? 'blocked'
+                                    : changedCount > 0
+                                      ? `${changedCount} diff`
+                                      : 'matches'}
+                              </StatusBadge>
+                            </div>
+
+                            <div className="config-pills">
+                              <span>{preset.values.length} params</span>
+                              {preset.tags.slice(0, 3).map((tag) => (
+                                <span key={`${preset.id}:${tag}`}>#{tag}</span>
+                              ))}
+                            </div>
+
+                            {preset.note ? <p>{preset.note}</p> : null}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </section>
+                ))}
+              </div>
+            ) : (
+              <p className="telemetry-note">No presets are defined in the current firmware metadata bundle yet.</p>
+            )}
+
+            {selectedPreset ? (
+              <div className="preset-selected">
+                <div className="telemetry-header">
+                  <div>
+                    <h3>{selectedPreset.label}</h3>
+                    <p>{selectedPreset.description}</p>
+                  </div>
+                  <div className="preset-selected__badges">
+                    <StatusBadge tone="neutral">{selectedPreset.groupDefinition.label}</StatusBadge>
+                    <StatusBadge tone={toneForPresetApplicability(selectedPresetApplicability.status)}>
+                      {selectedPresetApplicability.status}
+                    </StatusBadge>
+                  </div>
+                </div>
+
+                <div className="telemetry-metric-grid">
+                  <article className="telemetry-metric-card">
+                    <span>Touched params</span>
+                    <strong>{selectedPreset.values.length}</strong>
+                  </article>
+                  <article className="telemetry-metric-card">
+                    <span>Changed on live</span>
+                    <strong>{selectedPresetChangedEntries.length}</strong>
+                  </article>
+                  <article className="telemetry-metric-card">
+                    <span>Already matched</span>
+                    <strong>{selectedPresetDiff?.unchangedCount ?? 0}</strong>
+                  </article>
+                  <article className="telemetry-metric-card">
+                    <span>Unknown on live</span>
+                    <strong>{selectedPresetDiff?.unknownParameterIds.length ?? 0}</strong>
+                  </article>
+                </div>
+
+                <div className="config-pills">
+                  <span>{selectedPreset.groupDefinition.label}</span>
+                  {selectedPreset.tags.map((tag) => (
+                    <span key={`${selectedPreset.id}:tag:${tag}`}>#{tag}</span>
+                  ))}
+                </div>
+
+                {selectedPreset.note ? <p className="snapshot-selected__note">{selectedPreset.note}</p> : null}
+
+                {selectedPreset.prerequisites && selectedPreset.prerequisites.length > 0 ? (
+                  <div className="preset-notes">
+                    <strong>Before you apply</strong>
+                    <ul className="output-note-list">
+                      {selectedPreset.prerequisites.map((item) => (
+                        <li key={`${selectedPreset.id}:prereq:${item}`}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+
+                {selectedPresetApplicability.reasons.length > 0 ? (
+                  <div
+                    className={`parameter-follow-up${
+                      selectedPresetApplicability.status === 'blocked' ? ' parameter-follow-up--warning' : ''
+                    }`}
+                  >
+                    <StatusBadge tone={toneForPresetApplicability(selectedPresetApplicability.status)}>
+                      {selectedPresetApplicability.status}
+                    </StatusBadge>
+                    <p>{selectedPresetApplicability.reasons.join(' ')}</p>
+                  </div>
+                ) : null}
+
+                {selectedPreset.cautions && selectedPreset.cautions.length > 0 ? (
+                  <div className="preset-notes">
+                    <strong>Cautions</strong>
+                    <ul className="output-note-list">
+                      {selectedPreset.cautions.map((item) => (
+                        <li key={`${selectedPreset.id}:caution:${item}`}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+
+                {selectedPresetDiff && selectedPresetDiff.unknownParameterIds.length > 0 ? (
+                  <div className="parameter-follow-up parameter-follow-up--warning">
+                    <StatusBadge tone="warning">partial</StatusBadge>
+                    <p>
+                      {selectedPresetDiff.unknownParameterIds.length} preset parameter(s) do not exist in the current live metadata set and will be
+                      ignored.
+                    </p>
+                  </div>
+                ) : null}
+
+                {selectedPresetChangedEntries.length > 0 ? (
+                  <div className="parameter-diff-grid">
+                    {selectedPresetDiffGroups.map((group) => (
+                      <section key={group.category} className="parameter-diff-group">
+                        <header>
+                          <strong>{formatCategoryLabel(group.category)}</strong>
+                          <span>{group.entries.length} changed</span>
+                        </header>
+
+                        {group.entries.map((draft) => (
+                          <div key={draft.id} className="parameter-diff-item">
+                            <span>
+                              <strong>{draft.id}</strong>
+                              <small>{draft.label}</small>
+                            </span>
+                            <span className="parameter-diff-values">
+                              {formatParameterValue(draft.currentValue, draft.definition?.unit)} to{' '}
+                              {formatParameterValue(draft.nextValue, draft.definition?.unit)}
+                            </span>
+                            <span className="parameter-diff-delta">{formatParameterDelta(draft.delta, draft.definition?.unit)}</span>
+                          </div>
+                        ))}
+                      </section>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="telemetry-note">
+                    This preset already matches the currently synced values, so there is nothing to apply right now.
+                  </p>
+                )}
+
+                {selectedPresetInvalidEntries.length > 0 ? (
+                  <div className="parameter-diff-grid parameter-diff-grid--invalid">
+                    <section className="parameter-diff-group parameter-diff-group--invalid">
+                      <header>
+                        <strong>Invalid preset values</strong>
+                        <span>{selectedPresetInvalidEntries.length} blocked</span>
+                      </header>
+
+                      {selectedPresetInvalidEntries.map((draft) => (
+                        <div key={draft.id} className="parameter-diff-item">
+                          <span>
+                            <strong>{draft.id}</strong>
+                            <small>{draft.label}</small>
+                          </span>
+                          <span className="parameter-diff-values">{draft.rawValue || 'Empty draft'}</span>
+                          <span className="parameter-diff-delta">{draft.reason ?? 'Invalid value'}</span>
+                        </div>
+                      ))}
+                    </section>
+                  </div>
+                ) : null}
+
+                <div className="parameter-follow-up parameter-follow-up--warning">
+                  <StatusBadge tone="warning">backup</StatusBadge>
+                  <p>
+                    Applying a preset writes only the diff shown above, verifies every write, and automatically captures a pre-apply snapshot in the
+                    Snapshots library before sending anything to the controller.
+                  </p>
+                </div>
+
+                <label className="snapshot-restore-ack">
+                  <input
+                    type="checkbox"
+                    checked={presetApplyAcknowledged}
+                    onChange={(event) => setPresetApplyAcknowledged(event.target.checked)}
+                    disabled={busyAction !== undefined || selectedPresetChangedEntries.length === 0}
+                  />
+                  <span>I reviewed this preset diff and want ArduConfigurator to capture a backup and apply these changes to the live controller.</span>
+                </label>
+
+                <div className="switch-exercise-controls">
+                  <button
+                    style={buttonStyle('primary')}
+                    onClick={() => void handleApplySelectedPreset()}
+                    disabled={
+                      busyAction !== undefined ||
+                      selectedPresetChangedEntries.length === 0 ||
+                      selectedPresetInvalidEntries.length > 0 ||
+                      selectedPresetApplicability.status === 'blocked' ||
+                      !presetApplyAcknowledged ||
+                      !canApplyDraftParameters
+                    }
+                  >
+                    {busyAction === 'presets:apply' ? 'Applying…' : `Apply Preset (${selectedPresetChangedEntries.length})`}
+                  </button>
+                  <button
+                    style={buttonStyle()}
+                    onClick={handleStageSelectedPresetDiff}
+                    disabled={
+                      busyAction !== undefined ||
+                      selectedPresetChangedEntries.length === 0 ||
+                      selectedPresetApplicability.status === 'blocked'
+                    }
+                  >
+                    Load as Manual Tuning Draft
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            <p className="telemetry-note">
+              Presets are designed to stay explainable and reversible. They are not broad tune dumps, and they intentionally stop at the first small
+              set of flight-feel and rate/expo controls.
             </p>
           </div>
         </Panel>

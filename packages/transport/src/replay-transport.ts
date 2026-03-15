@@ -1,0 +1,226 @@
+import type { FrameListener, StatusListener, Transport, TransportStatus, Unsubscribe } from './types.js'
+
+export interface RecordedSessionEvent {
+  atMs: number
+  direction: 'in' | 'out'
+  frameBase64: string
+}
+
+export interface RecordedSession {
+  version: 1
+  label?: string
+  description?: string
+  events: RecordedSessionEvent[]
+}
+
+export interface ReplayTransportOptions {
+  session: RecordedSession
+  speedMultiplier?: number
+  strictOutbound?: boolean
+}
+
+export class ReplayTransport implements Transport {
+  readonly kind = 'replay' as const
+  readonly id: string
+
+  private readonly frameListeners = new Set<FrameListener>()
+  private readonly statusListeners = new Set<StatusListener>()
+  private readonly options: ReplayTransportOptions
+
+  private status: TransportStatus = { kind: 'idle' }
+  private readonly scheduledTimers = new Set<ReturnType<typeof setTimeout>>()
+  private expectedOutboundIndex = 0
+  private connected = false
+
+  constructor(id = 'replay-session', options: ReplayTransportOptions) {
+    this.id = id
+    this.options = options
+  }
+
+  getStatus(): TransportStatus {
+    return this.status
+  }
+
+  async connect(): Promise<void> {
+    if (this.connected) {
+      return
+    }
+
+    this.connected = true
+    this.expectedOutboundIndex = 0
+    this.updateStatus({ kind: 'connecting' })
+    this.updateStatus({ kind: 'connected' })
+
+    const speedMultiplier = this.options.speedMultiplier ?? 1
+    const inboundEvents = [...this.options.session.events]
+      .filter((event) => event.direction === 'in')
+      .sort((left, right) => left.atMs - right.atMs)
+
+    inboundEvents.forEach((event) => {
+      const delayMs = speedMultiplier <= 0 ? 0 : event.atMs / speedMultiplier
+      const timer = setTimeout(() => {
+        this.scheduledTimers.delete(timer)
+        if (!this.connected) {
+          return
+        }
+
+        const frame = decodeRecordedSessionFrame(event)
+        this.frameListeners.forEach((listener) => listener(frame))
+      }, delayMs)
+      this.scheduledTimers.add(timer)
+    })
+  }
+
+  async disconnect(): Promise<void> {
+    this.connected = false
+    this.clearTimers()
+    this.updateStatus({ kind: 'disconnected', reason: 'Replay session disconnected.' })
+  }
+
+  async send(frame: Uint8Array): Promise<void> {
+    if (!this.connected) {
+      throw new Error('ReplayTransport is not connected.')
+    }
+
+    if (!this.options.strictOutbound) {
+      return
+    }
+
+    const expectedOutboundEvents = this.options.session.events.filter((event) => event.direction === 'out')
+    const expected = expectedOutboundEvents[this.expectedOutboundIndex]
+    if (!expected) {
+      const message = `Unexpected outbound frame ${this.expectedOutboundIndex + 1} for replay session ${this.id}.`
+      this.updateStatus({ kind: 'error', message })
+      throw new Error(message)
+    }
+
+    const expectedFrame = decodeRecordedSessionFrame(expected)
+    if (!bytesEqual(expectedFrame, frame)) {
+      const message = `Outbound frame ${this.expectedOutboundIndex + 1} did not match the recorded session.`
+      this.updateStatus({ kind: 'error', message })
+      throw new Error(message)
+    }
+
+    this.expectedOutboundIndex += 1
+  }
+
+  onFrame(listener: FrameListener): Unsubscribe {
+    this.frameListeners.add(listener)
+    return () => {
+      this.frameListeners.delete(listener)
+    }
+  }
+
+  onStatus(listener: StatusListener): Unsubscribe {
+    this.statusListeners.add(listener)
+    listener(this.status)
+    return () => {
+      this.statusListeners.delete(listener)
+    }
+  }
+
+  private clearTimers(): void {
+    this.scheduledTimers.forEach((timer) => clearTimeout(timer))
+    this.scheduledTimers.clear()
+  }
+
+  private updateStatus(status: TransportStatus): void {
+    this.status = status
+    this.statusListeners.forEach((listener) => listener(status))
+  }
+}
+
+export function createRecordedSession(label: string, events: RecordedSessionEvent[], description?: string): RecordedSession {
+  return {
+    version: 1,
+    label,
+    description,
+    events: [...events].sort((left, right) => left.atMs - right.atMs)
+  }
+}
+
+export function createRecordedSessionEvent(frame: Uint8Array, direction: RecordedSessionEvent['direction'], atMs: number): RecordedSessionEvent {
+  return {
+    atMs,
+    direction,
+    frameBase64: encodeBase64(frame)
+  }
+}
+
+export function serializeRecordedSession(session: RecordedSession): string {
+  return JSON.stringify(session, null, 2)
+}
+
+export function parseRecordedSession(raw: string): RecordedSession {
+  const parsed = JSON.parse(raw) as Partial<RecordedSession>
+  if (parsed.version !== 1 || !Array.isArray(parsed.events)) {
+    throw new Error('Invalid recorded session payload.')
+  }
+
+  return {
+    version: 1,
+    label: typeof parsed.label === 'string' ? parsed.label : undefined,
+    description: typeof parsed.description === 'string' ? parsed.description : undefined,
+    events: parsed.events
+      .map((event) => {
+        const candidate = event as Partial<RecordedSessionEvent>
+        if (
+          typeof candidate.atMs !== 'number' ||
+          (candidate.direction !== 'in' && candidate.direction !== 'out') ||
+          typeof candidate.frameBase64 !== 'string'
+        ) {
+          throw new Error('Invalid recorded session event payload.')
+        }
+
+        return {
+          atMs: candidate.atMs,
+          direction: candidate.direction,
+          frameBase64: candidate.frameBase64
+        }
+      })
+      .sort((left, right) => left.atMs - right.atMs)
+  }
+}
+
+export function decodeRecordedSessionFrame(event: RecordedSessionEvent): Uint8Array {
+  return decodeBase64(event.frameBase64)
+}
+
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) {
+    return false
+  }
+
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false
+    }
+  }
+
+  return true
+}
+
+function encodeBase64(frame: Uint8Array): string {
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(frame).toString('base64')
+  }
+
+  let binary = ''
+  frame.forEach((byte) => {
+    binary += String.fromCharCode(byte)
+  })
+  return btoa(binary)
+}
+
+function decodeBase64(value: string): Uint8Array {
+  if (typeof Buffer !== 'undefined') {
+    return new Uint8Array(Buffer.from(value, 'base64'))
+  }
+
+  const binary = atob(value)
+  const frame = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) {
+    frame[index] = binary.charCodeAt(index)
+  }
+  return frame
+}

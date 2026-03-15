@@ -5,9 +5,15 @@ import {
   ArduPilotConfiguratorRuntime,
   ParameterBatchWriteError,
   createParameterBackup,
+  createParameterSnapshot,
+  createParameterSnapshotLibrary,
   deriveDraftValuesFromParameterBackup,
   parseParameterBackup,
-  serializeParameterBackup
+  parseParameterSnapshotInput,
+  parseParameterSnapshotLibrary,
+  resolveParameterSnapshotInput,
+  serializeParameterBackup,
+  serializeParameterSnapshotLibrary
 } from '../packages/ardupilot-core/dist/index.js'
 import { createMockSITL } from '../packages/mock-sitl/dist/index.js'
 import { arducopterMetadata } from '../packages/param-metadata/dist/index.js'
@@ -120,6 +126,104 @@ test('parameter backups round-trip into staged restore diffs', async () => {
     assert.deepEqual(restore.draftValues, {
       FLTMODE1: '5'
     })
+  } finally {
+    await sitl.disconnect().catch(() => {})
+    sitl.destroy()
+  }
+})
+
+test('snapshot backups exclude volatile STAT_ parameters and ignore them on restore', () => {
+  const snapshot = {
+    vehicle: {
+      firmware: 'ArduPilot',
+      vehicle: 'ArduCopter',
+      systemId: 1,
+      componentId: 1,
+      flightMode: 'Stabilize'
+    },
+    parameters: [
+      {
+        id: 'FLTMODE1',
+        value: 0,
+        index: 0,
+        count: 3,
+        definition: arducopterMetadata.parameters.FLTMODE1
+      },
+      {
+        id: 'STAT_RUNTIME',
+        value: 100,
+        index: 1,
+        count: 3
+      },
+      {
+        id: 'STAT_BOOTCNT',
+        value: 12,
+        index: 2,
+        count: 3
+      }
+    ]
+  }
+
+  const backup = createParameterBackup(snapshot)
+  assert.equal(backup.parameterCount, 1)
+  assert.deepEqual(
+    backup.parameters.map((parameter) => parameter.id),
+    ['FLTMODE1']
+  )
+
+  const legacyBackupWithStats = {
+    ...backup,
+    parameterCount: 3,
+    parameters: [
+      ...backup.parameters,
+      { id: 'STAT_RUNTIME', value: 999 },
+      { id: 'STAT_BOOTCNT', value: 99 }
+    ]
+  }
+
+  const restore = deriveDraftValuesFromParameterBackup(snapshot.parameters, legacyBackupWithStats)
+  assert.equal(restore.changedCount, 0)
+  assert.deepEqual(restore.draftValues, {})
+  assert.deepEqual(restore.unknownParameterIds, [])
+})
+
+test('snapshot libraries round-trip and select snapshots by label', async () => {
+  const sitl = createMockSITL()
+
+  try {
+    const initialSnapshot = await sitl.connectAndSync({
+      heartbeatTimeoutMs: 2000,
+      parameterTimeoutMs: 5000
+    })
+
+    const baselineBackup = createParameterBackup(initialSnapshot)
+    const modifiedBackup = createParameterBackup(initialSnapshot)
+    modifiedBackup.parameters.find((parameter) => parameter.id === 'FLTMODE1').value = 5
+
+    const library = createParameterSnapshotLibrary('MOZ7 Baselines', [
+      createParameterSnapshot(modifiedBackup, 'Aggressive tune', {
+        source: 'captured',
+        tags: ['moz7', 'tune']
+      }),
+      createParameterSnapshot(baselineBackup, 'Known-good baseline', {
+        source: 'captured',
+        protected: true
+      })
+    ])
+
+    const parsedLibrary = parseParameterSnapshotLibrary(serializeParameterSnapshotLibrary(library))
+    assert.equal(parsedLibrary.snapshots.length, 2)
+
+    const selectedSnapshot = resolveParameterSnapshotInput(
+      parseParameterSnapshotInput(serializeParameterSnapshotLibrary(library)),
+      {
+        label: 'Known-good baseline'
+      }
+    )
+
+    assert.equal(selectedSnapshot.label, 'Known-good baseline')
+    assert.equal(selectedSnapshot.protected, true)
+    assert.deepEqual(selectedSnapshot.tags, [])
   } finally {
     await sitl.disconnect().catch(() => {})
     sitl.destroy()

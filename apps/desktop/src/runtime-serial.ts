@@ -26,11 +26,17 @@ import { arducopterMetadata, type GuidedActionId, type SessionProfile } from '@a
 import { MavlinkSession, MavlinkV2Codec } from '@arduconfig/protocol-mavlink'
 
 import { NativeSerialTransport, type NativeSerialPortInfo } from './native-serial-transport.js'
+import {
+  listSnapshotLibraryFile,
+  maybeRunSnapshotOperations,
+  type SnapshotCommandOptions,
+  type SnapshotRestoreDecision,
+} from './snapshot-ops.js'
 
 type SnapshotFormat = 'off' | 'pretty' | 'json'
 type ReadOnlyExerciseKind = 'mode-switch' | 'rc-ranges' | 'rc-mapping'
 
-interface RuntimeSerialOptions {
+interface RuntimeSerialOptions extends SnapshotCommandOptions {
   path?: string
   portIndex?: number
   baudRate: number
@@ -81,7 +87,14 @@ const defaults: RuntimeSerialOptions = {
   motorTestDurationSeconds: 1,
   executeParameterValidation: false,
   restoreAfterValidation: true,
-  parameterWriteVerifyTimeoutMs: 3000
+  parameterWriteVerifyTimeoutMs: 3000,
+  captureSnapshot: false,
+  listSnapshotLibrary: false,
+  compareSnapshot: false,
+  restoreSnapshot: false,
+  executeSnapshotRestore: false,
+  snapshotTags: [],
+  snapshotProtected: false
 }
 
 async function main(): Promise<void> {
@@ -90,6 +103,11 @@ async function main(): Promise<void> {
 
   if (options.listPorts) {
     printPorts(ports)
+    return
+  }
+
+  if (options.listSnapshotLibrary) {
+    await listSnapshotLibraryFile(options.snapshotLibraryFile, '[runtime]')
     return
   }
 
@@ -139,6 +157,10 @@ async function main(): Promise<void> {
 
     latestSnapshot = await maybeRunMotorTest(runtime, latestSnapshot, options)
     latestSnapshot = await maybeValidateParameterWrite(runtime, latestSnapshot, options)
+    latestSnapshot = await maybeRunSnapshotOperations(runtime, latestSnapshot, options, {
+      logPrefix: '[runtime]',
+      evaluateRestore: (currentSnapshot) => evaluateSnapshotRestoreDecision(currentSnapshot, options)
+    })
 
     renderSnapshot(latestSnapshot, options.snapshot)
 
@@ -189,6 +211,36 @@ function parseArgs(argv: string[]): RuntimeSerialOptions {
 
     if (argument === '--execute-parameter-validation') {
       options.executeParameterValidation = true
+      continue
+    }
+
+    if (argument === '--capture-snapshot') {
+      options.captureSnapshot = true
+      continue
+    }
+
+    if (argument === '--list-snapshot-library') {
+      options.listSnapshotLibrary = true
+      continue
+    }
+
+    if (argument === '--compare-snapshot') {
+      options.compareSnapshot = true
+      continue
+    }
+
+    if (argument === '--restore-snapshot') {
+      options.restoreSnapshot = true
+      continue
+    }
+
+    if (argument === '--execute-snapshot-restore') {
+      options.executeSnapshotRestore = true
+      continue
+    }
+
+    if (argument === '--snapshot-protected') {
+      options.snapshotProtected = true
       continue
     }
 
@@ -262,6 +314,33 @@ function parseArgs(argv: string[]): RuntimeSerialOptions {
         break
       case 'parameter-write-verify-timeout-ms':
         options.parameterWriteVerifyTimeoutMs = Number(rawValue)
+        break
+      case 'snapshot-input-file':
+        options.snapshotInputFile = rawValue
+        break
+      case 'snapshot-output-file':
+        options.snapshotOutputFile = rawValue
+        break
+      case 'snapshot-library-file':
+        options.snapshotLibraryFile = rawValue
+        break
+      case 'snapshot-label':
+        options.snapshotLabel = rawValue
+        break
+      case 'snapshot-note':
+        options.snapshotNote = rawValue
+        break
+      case 'snapshot-tags':
+        options.snapshotTags = rawValue
+          .split(',')
+          .map((tag) => tag.trim())
+          .filter((tag) => tag.length > 0)
+        break
+      case 'snapshot-id':
+        options.snapshotSelectId = rawValue
+        break
+      case 'snapshot-select-label':
+        options.snapshotSelectLabel = rawValue
         break
       default:
         break
@@ -405,6 +484,38 @@ function evaluateGuidedAction(
 
   if (options.executeGuidedAction && !options.benchSession) {
     reasons.push('Pass --bench-session to acknowledge this is an intentional disarmed bench session.')
+  }
+
+  return {
+    allowed: reasons.length === 0,
+    reasons
+  }
+}
+
+function evaluateSnapshotRestoreDecision(
+  snapshot: ConfiguratorSnapshot,
+  options: RuntimeSerialOptions
+): SnapshotRestoreDecision {
+  const reasons: string[] = []
+
+  if (snapshot.connection.kind !== 'connected') {
+    reasons.push('The transport is not connected.')
+  }
+
+  if (!snapshot.vehicle) {
+    reasons.push('No vehicle heartbeat has been identified yet.')
+  }
+
+  if (snapshot.vehicle?.armed) {
+    reasons.push('The vehicle reports armed=true.')
+  }
+
+  if (snapshot.parameterStats.status !== 'complete') {
+    reasons.push('Parameter sync is not complete yet.')
+  }
+
+  if (options.executeSnapshotRestore && !options.benchSession) {
+    reasons.push('Pass --bench-session to acknowledge this is an intentional disarmed bench session before restoring a snapshot.')
   }
 
   return {
