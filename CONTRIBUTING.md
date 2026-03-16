@@ -76,6 +76,8 @@ A good change should usually include:
 - documentation/status updates when user-facing behavior changed
 - a concise explanation of what was validated
 
+Use the issue and PR templates in `.github` unless there is a strong reason not to.
+
 ## License Note
 
-The repository does not have a finalized top-level license yet. Do not add third-party code or assets casually; keep provenance and licensing clear.
+The repository is licensed under `GPL-3.0-only`. Do not add third-party code or assets casually; keep provenance and licensing clear, and make sure new additions are compatible with the repository license.

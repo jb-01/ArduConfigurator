@@ -87,7 +87,7 @@ import {
 } from '@arduconfig/param-metadata'
 import { MavlinkSession, MavlinkV2Codec, createArduCopterMockScenario } from '@arduconfig/protocol-mavlink'
 import { MockTransport, WebSerialTransport, WebSocketTransport } from '@arduconfig/transport'
-import { KeyValueRow, Panel, StatusBadge, buttonStyle } from '@arduconfig/ui-kit'
+import { Panel, StatusBadge, buttonStyle } from '@arduconfig/ui-kit'
 
 import { getDesktopBridge } from './desktop-bridge'
 import { FlightDeckPreview } from './flight-deck-preview'
@@ -192,7 +192,7 @@ interface WorkspaceNavSection {
 interface RcChannelDisplay {
   channelNumber: number
   role: string
-  pwm?: number
+  pwm: number | undefined
   fillPercent: number
   trimPercent: number
   isModeChannel: boolean
@@ -7980,12 +7980,8 @@ export function App() {
             throttlePercent={motorTestThrottlePercent}
             onSelectOutput={(output) => setMotorTestOutput(output)}
             onThrottleChange={(percent) => setMotorTestThrottlePercent(percent)}
-            onTest={() => void handleMotorTest({
-              outputChannel: motorTestOutput!,
-              throttlePercent: motorTestThrottlePercent,
-              durationSeconds: motorTestDurationSeconds
-            })}
-            testDisabled={busyAction !== undefined || !motorTestEligibility.eligible || motorTestOutput === undefined}
+            onTest={() => void handleRunMotorTest()}
+            testDisabled={busyAction !== undefined || !motorTestEligibility.allowed || motorTestOutput === undefined}
             masterEnabled={false}
             testId="motor-test-sliders"
           />

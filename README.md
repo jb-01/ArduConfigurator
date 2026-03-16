@@ -27,8 +27,7 @@ What is still missing:
 
 - broader metadata/configuration coverage
 - packaging/distribution for the desktop shell
-- packaging/release flow
-- final license selection
+- release automation and packaged desktop artifacts
 
 ## Product Shape
 
@@ -125,7 +124,13 @@ Use the mock runtime, replay transport, true SITL, and live FC paths above as th
 
 - Architecture overview: [ARCHITECTURE.md](ARCHITECTURE.md)
 - Contributor workflow: [CONTRIBUTING.md](CONTRIBUTING.md)
+- Release and packaging guidance: [RELEASING.md](RELEASING.md)
+- Support process: [SUPPORT.md](SUPPORT.md)
+- Security policy: [SECURITY.md](SECURITY.md)
+- Community expectations: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 
 ## License
 
-Open-source/community adoption is part of the project goal, but the repository does not have a finalized top-level license yet.
+This repository is licensed under [GNU GPL v3.0 only](LICENSE).
+
+The rotating craft preview models in [apps/web/public/models](apps/web/public/models) were copied from the Betaflight Configurator project and remain subject to their upstream GPL-compatible redistribution obligations. See [apps/web/public/models/ATTRIBUTION.txt](apps/web/public/models/ATTRIBUTION.txt).

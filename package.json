@@ -1,7 +1,12 @@
 {
   "name": "arduconfigurator-workspace",
   "private": true,
+  "license": "GPL-3.0-only",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jb-01/ArduConfigurator.git"
+  },
   "packageManager": "npm@11.4.2",
   "workspaces": [
     "apps/*",

@@ -4,6 +4,9 @@ https://github.com/betaflight/betaflight-configurator
 Source location:
 - resources/models/*.gltf
 
+Upstream license:
+- GPL-3.0
+
 These assets are kept here so the browser Setup and Receiver experiences can provide a real
 rotating craft preview similar to Betaflight's configurator instead of a placeholder mockup.
 
