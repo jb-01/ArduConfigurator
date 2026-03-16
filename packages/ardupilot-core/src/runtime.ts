@@ -109,19 +109,21 @@ const DEFAULT_PARAMETER_WRITE_TOLERANCE = 0.0001
 const PRE_ARM_ISSUE_TTL_MS = 15000
 const MAX_GUIDED_ACTION_STATUS_TEXTS = 5
 const MOTOR_TEST_COMPLETION_BUFFER_MS = 250
-const LIVE_TELEMETRY_INTERVAL_US = 200000
 const LIVE_TELEMETRY_REQUESTS = [
   {
     messageId: MAVLINK_MESSAGE_IDS.ATTITUDE,
-    label: 'ATTITUDE'
+    label: 'ATTITUDE',
+    intervalUs: 25000
   },
   {
     messageId: MAVLINK_MESSAGE_IDS.RC_CHANNELS,
-    label: 'RC_CHANNELS'
+    label: 'RC_CHANNELS',
+    intervalUs: 50000
   },
   {
     messageId: MAVLINK_MESSAGE_IDS.SYS_STATUS,
-    label: 'SYS_STATUS'
+    label: 'SYS_STATUS',
+    intervalUs: 500000
   }
 ] as const
 const ARDUCOPTER_MAV_TYPES = new Set<number>([
@@ -616,7 +618,7 @@ export class ArduPilotConfiguratorRuntime {
           targetSystem: systemId,
           targetComponent: componentId,
           confirmation: 0,
-          params: [request.messageId, LIVE_TELEMETRY_INTERVAL_US, 0, 0, 0, 0, 0]
+          params: [request.messageId, request.intervalUs, 0, 0, 0, 0, 0]
         })
       }
 

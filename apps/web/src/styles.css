@@ -867,7 +867,7 @@ textarea {
 
 .flight-deck__model-frame {
   position: relative;
-  min-height: 330px;
+  height: clamp(300px, 32vw, 360px);
   border-radius: 18px;
   border: 1px solid #243049;
   background:
@@ -877,10 +877,12 @@ textarea {
 }
 
 .flight-deck--compact .flight-deck__model-frame {
-  min-height: 250px;
+  height: 248px;
 }
 
 .flight-deck__canvas {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   display: block;

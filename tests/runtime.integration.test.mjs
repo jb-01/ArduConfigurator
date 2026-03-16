@@ -17,7 +17,7 @@ import {
 } from '../packages/ardupilot-core/dist/index.js'
 import { createMockSITL } from '../packages/mock-sitl/dist/index.js'
 import { arducopterMetadata } from '../packages/param-metadata/dist/index.js'
-import { MAV_AUTOPILOT, MAV_CMD, MAV_TYPE } from '../packages/protocol-mavlink/dist/index.js'
+import { MAV_AUTOPILOT, MAV_CMD, MAV_TYPE, MAVLINK_MESSAGE_IDS } from '../packages/protocol-mavlink/dist/index.js'
 
 test('mock SITL connects and syncs a full parameter table', async () => {
   const sitl = createMockSITL()
@@ -350,6 +350,37 @@ test('ArduCopter detection accepts non-quad multirotor MAV types', async () => {
   }
 })
 
+test('live telemetry requests use responsive attitude rates and slower support streams', async () => {
+  const outbound = []
+  const runtime = new ArduPilotConfiguratorRuntime(
+    createEchoSession({}, () => false, () => false, (message) => {
+      outbound.push(message)
+    }),
+    arducopterMetadata
+  )
+
+  try {
+    await runtime.connect()
+    await sleep(10)
+
+    const telemetryRequests = outbound.filter(
+      (message) => message.type === 'COMMAND_LONG' && message.command === MAV_CMD.SET_MESSAGE_INTERVAL
+    )
+
+    assert.deepEqual(
+      telemetryRequests.map((message) => [message.params[0], message.params[1]]),
+      [
+        [MAVLINK_MESSAGE_IDS.ATTITUDE, 25000],
+        [MAVLINK_MESSAGE_IDS.RC_CHANNELS, 50000],
+        [MAVLINK_MESSAGE_IDS.SYS_STATUS, 500000]
+      ]
+    )
+  } finally {
+    await runtime.disconnect().catch(() => {})
+    runtime.destroy()
+  }
+})
+
 test('parameter verification waiters are cleaned up when outbound PARAM_SET send fails', async () => {
   const runtime = new ArduPilotConfiguratorRuntime(
     createEchoSession(
@@ -492,7 +523,7 @@ function createHeartbeatSession(events) {
   }
 }
 
-function createEchoSession(initialParameters, shouldDropWrite, shouldThrowSend = () => false) {
+function createEchoSession(initialParameters, shouldDropWrite, shouldThrowSend = () => false, onSend = () => {}) {
   const statusListeners = []
   const messageListeners = []
   const parameters = { ...initialParameters }
@@ -543,6 +574,8 @@ function createEchoSession(initialParameters, shouldDropWrite, shouldThrowSend =
     },
     destroy() {},
     async send(message) {
+      onSend(message)
+
       if (shouldThrowSend(message)) {
         throw new Error('simulated send failure')
       }

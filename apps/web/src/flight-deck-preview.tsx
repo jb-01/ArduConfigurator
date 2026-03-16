@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
@@ -19,8 +19,242 @@ interface ModelSceneState {
   renderer: THREE.WebGLRenderer
   scene: THREE.Scene
   camera: THREE.PerspectiveCamera
-  wrapper: THREE.Group
+  modelWrapper: THREE.Group
   model?: THREE.Object3D
+}
+
+interface TargetTelemetryState {
+  pitchRad: number
+  rollRad: number
+  yawRad: number
+  pitchVisual: number
+  rollVisual: number
+  headingDeg: number
+}
+
+interface CurrentTelemetryState extends TargetTelemetryState {}
+
+interface DisplayTelemetryState {
+  pitchVisual: number
+  rollVisual: number
+  headingDeg: number
+}
+
+const ZERO_TELEMETRY: TargetTelemetryState = {
+  pitchRad: 0,
+  rollRad: 0,
+  yawRad: 0,
+  pitchVisual: 0,
+  rollVisual: 0,
+  headingDeg: 0
+}
+
+function renderScene(state: ModelSceneState): void {
+  state.renderer.render(state.scene, state.camera)
+}
+
+function shortestAngleDeltaRadians(current: number, target: number): number {
+  let delta = (target - current) % (Math.PI * 2)
+  if (delta > Math.PI) {
+    delta -= Math.PI * 2
+  } else if (delta < -Math.PI) {
+    delta += Math.PI * 2
+  }
+  return delta
+}
+
+function shortestAngleDeltaDegrees(current: number, target: number): number {
+  let delta = (target - current) % 360
+  if (delta > 180) {
+    delta -= 360
+  } else if (delta < -180) {
+    delta += 360
+  }
+  return delta
+}
+
+function approachLinear(current: number, target: number, factor: number): number {
+  return current + (target - current) * factor
+}
+
+function approachWrappedRadians(current: number, target: number, factor: number): number {
+  return current + shortestAngleDeltaRadians(current, target) * factor
+}
+
+function approachWrappedDegrees(current: number, target: number, factor: number): number {
+  return current + shortestAngleDeltaDegrees(current, target) * factor
+}
+
+function mountModel(
+  state: ModelSceneState,
+  model: THREE.Object3D,
+  compact: boolean,
+  scaleMode: 'betaflight' | 'fit' = 'fit'
+): void {
+  if (state.model) {
+    state.modelWrapper.remove(state.model)
+  }
+
+  if (scaleMode === 'betaflight') {
+    model.scale.setScalar(compact ? 13 : 15)
+    model.position.set(0, 0, 0)
+  } else {
+    const box = new THREE.Box3().setFromObject(model)
+    const center = new THREE.Vector3()
+    const size = new THREE.Vector3()
+    box.getCenter(center)
+    box.getSize(size)
+
+    model.position.sub(center)
+
+    const maxDimension = Math.max(size.x, size.y, size.z, 1)
+    const targetSize = compact ? 62 : 72
+    const scale = targetSize / maxDimension
+    model.scale.setScalar(scale)
+  }
+
+  model.traverse((object) => {
+    if (!(object instanceof THREE.Mesh)) {
+      return
+    }
+
+    object.castShadow = false
+    object.receiveShadow = false
+
+    if (Array.isArray(object.material)) {
+      object.material.forEach((material) => {
+        material.side = THREE.FrontSide
+      })
+      return
+    }
+
+    object.material.side = THREE.FrontSide
+  })
+
+  state.model = model
+  state.modelWrapper.add(model)
+  renderScene(state)
+}
+
+function createArm(length: number, headingRad: number): THREE.Mesh {
+  const arm = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.12, 0.16, length, 18),
+    new THREE.MeshStandardMaterial({ color: 0x182435, metalness: 0.35, roughness: 0.55 })
+  )
+  arm.rotation.z = Math.PI / 2
+  arm.rotation.y = headingRad
+  arm.position.set(Math.cos(headingRad) * (length / 2), 0, Math.sin(headingRad) * (length / 2))
+  return arm
+}
+
+function createMotor(x: number, z: number, accentColor: number): THREE.Group {
+  const motor = new THREE.Group()
+  motor.position.set(x, 0, z)
+
+  const can = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.34, 0.34, 0.24, 24),
+    new THREE.MeshStandardMaterial({ color: 0x111821, metalness: 0.5, roughness: 0.36 })
+  )
+  can.position.y = 0.16
+  motor.add(can)
+
+  const propRing = new THREE.Mesh(
+    new THREE.TorusGeometry(0.64, 0.04, 10, 36),
+    new THREE.MeshStandardMaterial({ color: accentColor, metalness: 0.1, roughness: 0.45 })
+  )
+  propRing.rotation.x = Math.PI / 2
+  propRing.position.y = 0.24
+  motor.add(propRing)
+
+  return motor
+}
+
+function motorLayoutForModel(modelFile: string): Array<{ x: number; z: number }> {
+  switch (modelFile) {
+    case 'tricopter':
+      return [
+        { x: 0, z: -2.15 },
+        { x: -1.95, z: 1.45 },
+        { x: 1.95, z: 1.45 }
+      ]
+    case 'hex_plus':
+      return [
+        { x: 0, z: -2.35 },
+        { x: 2.05, z: -1.05 },
+        { x: 2.05, z: 1.05 },
+        { x: 0, z: 2.35 },
+        { x: -2.05, z: 1.05 },
+        { x: -2.05, z: -1.05 }
+      ]
+    case 'hex_x':
+    case 'y6':
+      return [
+        { x: 1.95, z: -1.15 },
+        { x: 2.15, z: 1.1 },
+        { x: 0, z: 2.35 },
+        { x: -1.95, z: 1.15 },
+        { x: -2.15, z: -1.1 },
+        { x: 0, z: -2.35 }
+      ]
+    case 'quad_x':
+    default:
+      return [
+        { x: -1.75, z: -1.75 },
+        { x: 1.75, z: -1.75 },
+        { x: -1.75, z: 1.75 },
+        { x: 1.75, z: 1.75 }
+      ]
+  }
+}
+
+function createProceduralModel(modelFile: string): THREE.Group {
+  const craft = new THREE.Group()
+
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(1.95, 0.34, 1.45),
+    new THREE.MeshStandardMaterial({ color: 0xd8e3f3, metalness: 0.18, roughness: 0.56 })
+  )
+  body.position.y = 0.08
+  craft.add(body)
+
+  const topPlate = new THREE.Mesh(
+    new THREE.BoxGeometry(1.35, 0.12, 1.1),
+    new THREE.MeshStandardMaterial({ color: 0x0f1722, metalness: 0.3, roughness: 0.5 })
+  )
+  topPlate.position.y = 0.33
+  craft.add(topPlate)
+
+  const stack = new THREE.Mesh(
+    new THREE.BoxGeometry(0.6, 0.16, 0.6),
+    new THREE.MeshStandardMaterial({ color: 0x61dafb, metalness: 0.12, roughness: 0.38 })
+  )
+  stack.position.y = 0.48
+  craft.add(stack)
+
+  const motorPositions = motorLayoutForModel(modelFile)
+  motorPositions.forEach(({ x, z }, index) => {
+    const heading = Math.atan2(z, x)
+    const length = Math.hypot(x, z)
+    craft.add(createArm(length, heading))
+    craft.add(createMotor(x, z, index % 2 === 0 ? 0x61dafb : 0xff815f))
+  })
+
+  const nose = new THREE.Mesh(
+    new THREE.ConeGeometry(0.24, 0.56, 3),
+    new THREE.MeshStandardMaterial({ color: 0xff815f, metalness: 0.08, roughness: 0.32 })
+  )
+  nose.rotation.z = Math.PI / 2
+  nose.position.set(0, 0.18, -1.08)
+  craft.add(nose)
+
+  const cameraPod = new THREE.Mesh(
+    new THREE.BoxGeometry(0.42, 0.28, 0.32),
+    new THREE.MeshStandardMaterial({ color: 0x1a2330, metalness: 0.24, roughness: 0.42 })
+  )
+  cameraPod.position.set(0, 0.18, -0.76)
+  craft.add(cameraPod)
+
+  return craft
 }
 
 function clampDegrees(value: number | undefined, limit: number): number {
@@ -60,7 +294,7 @@ function modelFileForAirframe(frameClassLabel: string | undefined, frameTypeLabe
     return 'quad_x'
   }
 
-  return 'fallback'
+  return 'quad_x'
 }
 
 function formatDegrees(value: number | undefined): string {
@@ -83,6 +317,17 @@ export function FlightDeckPreview({
   const sceneStateRef = useRef<ModelSceneState | null>(null)
   const resizeObserverRef = useRef<ResizeObserver | null>(null)
   const loaderRef = useRef<GLTFLoader | null>(null)
+  const animationFrameRef = useRef<number | null>(null)
+  const previousAnimationTimeRef = useRef<number | null>(null)
+  const targetTelemetryRef = useRef<TargetTelemetryState>({ ...ZERO_TELEMETRY })
+  const currentTelemetryRef = useRef<CurrentTelemetryState>({ ...ZERO_TELEMETRY })
+  const telemetryInitializedRef = useRef(false)
+  const uiUpdateTimeRef = useRef(0)
+  const [displayTelemetry, setDisplayTelemetry] = useState<DisplayTelemetryState>({
+    pitchVisual: 0,
+    rollVisual: 0,
+    headingDeg: 0
+  })
 
   const modelFile = useMemo(
     () => modelFileForAirframe(frameClassLabel, frameTypeLabel),
@@ -105,31 +350,25 @@ export function FlightDeckPreview({
     renderer.outputColorSpace = THREE.SRGBColorSpace
 
     const scene = new THREE.Scene()
-    const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 100)
-    camera.position.set(0, 2.8, 7.4)
+    const camera = new THREE.PerspectiveCamera(60, 1, 1, 10000)
+    camera.position.set(0, 0, 125)
+    camera.lookAt(0, 0, 0)
 
-    const wrapper = new THREE.Group()
-    scene.add(wrapper)
+    const modelWrapper = new THREE.Group()
+    scene.add(camera)
+    scene.add(modelWrapper)
 
-    const ambient = new THREE.AmbientLight(0xc7dcff, 1.7)
-    const keyLight = new THREE.DirectionalLight(0xffffff, 2.2)
-    keyLight.position.set(5, 8, 6)
-    const fillLight = new THREE.DirectionalLight(0x77b9ff, 0.8)
-    fillLight.position.set(-4, -3, 5)
+    const ambient = new THREE.AmbientLight(0x404040)
+    const keyLight = new THREE.DirectionalLight(0xffffff, 1.5)
+    keyLight.position.set(0, 1, 0)
+    const fillLight = new THREE.DirectionalLight(0x6fd8ff, 0.65)
+    fillLight.position.set(-0.35, 0.4, 1)
 
     scene.add(ambient)
     scene.add(keyLight)
     scene.add(fillLight)
 
-    const floor = new THREE.Mesh(
-      new THREE.RingGeometry(2.45, 2.72, 64),
-      new THREE.MeshBasicMaterial({ color: 0x27405d, transparent: true, opacity: 0.52, side: THREE.DoubleSide })
-    )
-    floor.rotation.x = -Math.PI / 2
-    floor.position.y = -1.3
-    scene.add(floor)
-
-    sceneStateRef.current = { renderer, scene, camera, wrapper }
+    sceneStateRef.current = { renderer, scene, camera, modelWrapper }
     loaderRef.current = new GLTFLoader()
 
     const resize = () => {
@@ -142,7 +381,7 @@ export function FlightDeckPreview({
       sceneStateRef.current.renderer.setSize(width, height, false)
       sceneStateRef.current.camera.aspect = width / height
       sceneStateRef.current.camera.updateProjectionMatrix()
-      sceneStateRef.current.renderer.render(sceneStateRef.current.scene, sceneStateRef.current.camera)
+      renderScene(sceneStateRef.current)
     }
 
     resize()
@@ -151,13 +390,61 @@ export function FlightDeckPreview({
     observer.observe(viewport)
     resizeObserverRef.current = observer
 
+    const animate = (now: number) => {
+      animationFrameRef.current = window.requestAnimationFrame(animate)
+
+      const state = sceneStateRef.current
+      if (!state) {
+        return
+      }
+
+      const previousTime = previousAnimationTimeRef.current ?? now
+      previousAnimationTimeRef.current = now
+      const deltaSeconds = Math.min((now - previousTime) / 1000, 0.05)
+      const interpolationFactor = 1 - Math.exp(-deltaSeconds * 10)
+
+      const target = targetTelemetryRef.current
+      const current = currentTelemetryRef.current
+
+      current.pitchRad = approachLinear(current.pitchRad, target.pitchRad, interpolationFactor)
+      current.rollRad = approachLinear(current.rollRad, target.rollRad, interpolationFactor)
+      current.yawRad = approachWrappedRadians(current.yawRad, target.yawRad, interpolationFactor)
+      current.pitchVisual = approachLinear(current.pitchVisual, target.pitchVisual, interpolationFactor)
+      current.rollVisual = approachLinear(current.rollVisual, target.rollVisual, interpolationFactor)
+      current.headingDeg = approachWrappedDegrees(current.headingDeg, target.headingDeg, interpolationFactor)
+
+      state.modelWrapper.rotation.y = current.yawRad
+      if (state.model) {
+        state.model.rotation.x = -current.pitchRad
+        state.model.rotation.z = -current.rollRad
+      }
+
+      renderScene(state)
+
+      if (now - uiUpdateTimeRef.current >= 33) {
+        uiUpdateTimeRef.current = now
+        setDisplayTelemetry({
+          pitchVisual: current.pitchVisual,
+          rollVisual: current.rollVisual,
+          headingDeg: current.headingDeg
+        })
+      }
+    }
+
+    animationFrameRef.current = window.requestAnimationFrame(animate)
+
     return () => {
       resizeObserverRef.current?.disconnect()
       resizeObserverRef.current = null
+      previousAnimationTimeRef.current = null
+      if (animationFrameRef.current !== null) {
+        window.cancelAnimationFrame(animationFrameRef.current)
+        animationFrameRef.current = null
+      }
 
       const state = sceneStateRef.current
       if (state?.model) {
-        state.wrapper.remove(state.model)
+        state.modelWrapper.remove(state.model)
       }
       state?.renderer.dispose()
       sceneStateRef.current = null
@@ -182,79 +469,14 @@ export function FlightDeckPreview({
           return
         }
 
-        if (state.model) {
-          state.wrapper.remove(state.model)
-        }
-
-        const model = gltf.scene
-        model.scale.setScalar(compact ? 1.45 : 1.65)
-        model.position.set(0, -0.35, 0)
-        model.traverse((object) => {
-          if (object instanceof THREE.Mesh) {
-            object.castShadow = false
-            object.receiveShadow = false
-          }
-        })
-
-        state.model = model
-        state.wrapper.add(model)
-        state.renderer.render(state.scene, state.camera)
+        mountModel(state, gltf.scene, compact, 'betaflight')
       },
       undefined,
       () => {
         if (!sceneStateRef.current) {
           return
         }
-
-        const fallback = new THREE.Group()
-
-        const body = new THREE.Mesh(
-          new THREE.BoxGeometry(1.4, 0.24, 0.95),
-          new THREE.MeshStandardMaterial({ color: 0xdce9f7, metalness: 0.2, roughness: 0.65 })
-        )
-        fallback.add(body)
-
-        const armGeometry = new THREE.CylinderGeometry(0.08, 0.08, 3.1, 20)
-        const armMaterial = new THREE.MeshStandardMaterial({ color: 0x1a2330, metalness: 0.35, roughness: 0.5 })
-        const armA = new THREE.Mesh(armGeometry, armMaterial)
-        armA.rotation.z = Math.PI / 2
-        armA.rotation.y = Math.PI / 4
-        fallback.add(armA)
-        const armB = armA.clone()
-        armB.rotation.y = -Math.PI / 4
-        fallback.add(armB)
-
-        const motorGeometry = new THREE.CylinderGeometry(0.28, 0.28, 0.2, 24)
-        const motorMaterial = new THREE.MeshStandardMaterial({ color: 0x64d9ff, metalness: 0.3, roughness: 0.4 })
-        ;[
-          [-1.05, 0.12, -1.05],
-          [1.05, 0.12, -1.05],
-          [-1.05, 0.12, 1.05],
-          [1.05, 0.12, 1.05]
-        ].forEach(([x, y, z]) => {
-          const motor = new THREE.Mesh(motorGeometry, motorMaterial)
-          motor.position.set(x, y, z)
-          fallback.add(motor)
-        })
-
-        const nose = new THREE.Mesh(
-          new THREE.ConeGeometry(0.18, 0.45, 3),
-          new THREE.MeshStandardMaterial({ color: 0xff7e63, metalness: 0.1, roughness: 0.35 })
-        )
-        nose.rotation.z = Math.PI / 2
-        nose.position.set(0, 0.06, -0.82)
-        fallback.add(nose)
-
-        fallback.scale.setScalar(compact ? 1.2 : 1.35)
-        fallback.position.set(0, -0.35, 0)
-
-        if (state.model) {
-          state.wrapper.remove(state.model)
-        }
-
-        state.model = fallback
-        state.wrapper.add(fallback)
-        state.renderer.render(state.scene, state.camera)
+        mountModel(state, createProceduralModel(modelFile), compact, 'fit')
       }
     )
 
@@ -264,22 +486,29 @@ export function FlightDeckPreview({
   }, [compact, modelFile])
 
   useEffect(() => {
-    const state = sceneStateRef.current
-    if (!state) {
-      return
+    const nextTelemetry = {
+      pitchRad: clampDegrees(pitchDeg, 70) * (Math.PI / 180),
+      rollRad: clampDegrees(rollDeg, 70) * (Math.PI / 180),
+      yawRad: normalizeHeading(yawDeg) * (Math.PI / 180),
+      pitchVisual: clampDegrees(pitchDeg, 28),
+      rollVisual: clampDegrees(rollDeg, 50),
+      headingDeg: normalizeHeading(yawDeg)
     }
 
-    const pitch = clampDegrees(pitchDeg, 70) * (Math.PI / 180)
-    const roll = clampDegrees(rollDeg, 70) * (Math.PI / 180)
-    const yaw = normalizeHeading(yawDeg) * (Math.PI / 180)
+    targetTelemetryRef.current = nextTelemetry
 
-    state.wrapper.rotation.set(-pitch, yaw, -roll)
-    state.renderer.render(state.scene, state.camera)
+    if (!telemetryInitializedRef.current) {
+      currentTelemetryRef.current = { ...nextTelemetry }
+      telemetryInitializedRef.current = true
+      setDisplayTelemetry({
+        pitchVisual: nextTelemetry.pitchVisual,
+        rollVisual: nextTelemetry.rollVisual,
+        headingDeg: nextTelemetry.headingDeg
+      })
+    }
   }, [pitchDeg, rollDeg, yawDeg])
 
-  const pitchVisual = clampDegrees(pitchDeg, 28)
-  const rollVisual = clampDegrees(rollDeg, 50)
-  const heading = normalizeHeading(yawDeg)
+  const heading = normalizeHeading(displayTelemetry.headingDeg)
 
   return (
     <div className={`flight-deck${compact ? ' flight-deck--compact' : ''}`} data-testid={testId}>
@@ -305,7 +534,7 @@ export function FlightDeckPreview({
             <div className="flight-instrument__horizon">
               <div
                 className={`flight-instrument__world${verified ? ' is-live' : ''}`}
-                style={{ transform: `translateY(${pitchVisual * 1.7}px) rotate(${rollVisual}deg)` }}
+                style={{ transform: `translateY(${displayTelemetry.pitchVisual * 1.7}px) rotate(${displayTelemetry.rollVisual}deg)` }}
               >
                 <div className="flight-instrument__sky" />
                 <div className="flight-instrument__ground" />
@@ -327,7 +556,10 @@ export function FlightDeckPreview({
         <div className="flight-instrument">
           <div className="flight-instrument__title">Heading</div>
           <div className="flight-instrument__dial flight-instrument__dial--heading">
-            <div className="flight-instrument__heading-ring" style={{ transform: `rotate(${-heading}deg)` }}>
+            <div
+              className="flight-instrument__heading-ring"
+              style={{ transform: `rotate(${-displayTelemetry.headingDeg}deg)` }}
+            >
               <span className="flight-instrument__cardinal flight-instrument__cardinal--north">N</span>
               <span className="flight-instrument__cardinal flight-instrument__cardinal--east">E</span>
               <span className="flight-instrument__cardinal flight-instrument__cardinal--south">S</span>
