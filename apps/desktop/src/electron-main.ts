@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 
+import { createDesktopWebPreferences } from './electron-window-options.js'
 import { desktopPlatformManifest } from './platform.js'
 import { startHostedWebUi, type HostedWebUi } from './web-ui-server.js'
 
@@ -46,13 +47,7 @@ async function createMainWindow(startUrl: string): Promise<BrowserWindow> {
     title: 'ArduConfigurator',
     autoHideMenuBar: true,
     backgroundColor: '#0b1014',
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-      spellcheck: false,
-      preload: PRELOAD_PATH
-    }
+    webPreferences: createDesktopWebPreferences(PRELOAD_PATH)
   })
 
   configurePermissions(window)

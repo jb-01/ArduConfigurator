@@ -90,7 +90,14 @@ import { MockTransport, WebSerialTransport, WebSocketTransport } from '@arduconf
 import { KeyValueRow, Panel, StatusBadge, buttonStyle } from '@arduconfig/ui-kit'
 
 import { getDesktopBridge } from './desktop-bridge'
-import { createSavedSnapshot, loadStoredSnapshots, persistSnapshots, type SavedParameterSnapshot } from './snapshot-library'
+import { FlightDeckPreview } from './flight-deck-preview'
+import {
+  createSavedSnapshot,
+  loadStoredSnapshots,
+  persistSnapshots,
+  type SavedParameterSnapshot,
+  type SnapshotStorageLoadResult
+} from './snapshot-library'
 
 const actionLabels = {
   'request-parameters': 'Pull Parameters',
@@ -384,6 +391,57 @@ function formatOrientationLabel(value: number | undefined): string {
 
 function formatDegrees(value: number | undefined): string {
   return value === undefined ? 'Unknown' : `${value.toFixed(1)}°`
+}
+
+function viewMonogram(viewId: AppViewId): string {
+  switch (viewId) {
+    case 'setup':
+      return 'ST'
+    case 'ports':
+      return 'PR'
+    case 'receiver':
+      return 'RX'
+    case 'outputs':
+      return 'OUT'
+    case 'power':
+      return 'PWR'
+    case 'snapshots':
+      return 'SNP'
+    case 'tuning':
+      return 'TUN'
+    case 'presets':
+      return 'PRE'
+    case 'parameters':
+      return 'PAR'
+    default:
+      return 'APP'
+  }
+}
+
+function AttitudePreview({
+  snapshot,
+  compact = false,
+  frameClassLabel,
+  frameTypeLabel
+}: {
+  snapshot: ConfiguratorSnapshot
+  compact?: boolean
+  frameClassLabel?: string
+  frameTypeLabel?: string
+}) {
+  return (
+    <FlightDeckPreview
+      rollDeg={snapshot.liveVerification.attitudeTelemetry.rollDeg}
+      pitchDeg={snapshot.liveVerification.attitudeTelemetry.pitchDeg}
+      yawDeg={snapshot.liveVerification.attitudeTelemetry.yawDeg}
+      flightMode={snapshot.vehicle?.flightMode}
+      verified={snapshot.liveVerification.attitudeTelemetry.verified}
+      frameClassLabel={frameClassLabel}
+      frameTypeLabel={frameTypeLabel}
+      compact={compact}
+      testId={compact ? undefined : 'setup-craft-preview'}
+    />
+  )
 }
 
 function createIdleOrientationExerciseState(): OrientationExerciseState {
@@ -854,8 +912,12 @@ function readStoredProductMode(): ProductMode {
     return 'basic'
   }
 
-  const stored = window.sessionStorage.getItem(PRODUCT_MODE_STORAGE_KEY)
-  return stored === 'expert' ? 'expert' : 'basic'
+  try {
+    const stored = window.sessionStorage.getItem(PRODUCT_MODE_STORAGE_KEY)
+    return stored === 'expert' ? 'expert' : 'basic'
+  } catch {
+    return 'basic'
+  }
 }
 
 function readParameterValue(snapshot: ConfiguratorSnapshot, paramId: string): number | undefined {
@@ -1291,13 +1353,31 @@ function formatParameterDelta(delta: number | undefined, unit: string | undefine
   return unit ? `${prefix}${delta} ${unit}` : `${prefix}${delta}`
 }
 
-function canApplyParameterChanges(snapshot: ConfiguratorSnapshot): boolean {
+function canApplyParameterChanges(snapshot: ConfiguratorSnapshot, parameterFollowUp?: ParameterFollowUp): boolean {
   return (
     snapshot.connection.kind === 'connected' &&
     snapshot.parameterStats.status === 'complete' &&
     snapshot.vehicle !== undefined &&
     !snapshot.vehicle.armed &&
-    !hasRunningGuidedAction(snapshot)
+    !hasRunningGuidedAction(snapshot) &&
+    !parameterFollowUp?.refreshRequired
+  )
+}
+
+function createDraftSignature(entries: readonly ParameterDraftEntry[]): string {
+  if (entries.length === 0) {
+    return 'none'
+  }
+
+  return JSON.stringify(
+    entries.map((entry) => ({
+      id: entry.id,
+      status: entry.status,
+      currentValue: entry.currentValue,
+      nextValue: entry.nextValue,
+      rawValue: entry.rawValue,
+      reason: entry.reason
+    }))
   )
 }
 
@@ -1443,6 +1523,16 @@ function mergeSavedSnapshots(
   return sortParameterSnapshots([...mergedById.values()])
 }
 
+function updateSavedSnapshot(
+  snapshots: readonly SavedParameterSnapshot[],
+  snapshotId: string,
+  transform: (snapshot: SavedParameterSnapshot) => SavedParameterSnapshot
+): SavedParameterSnapshot[] {
+  return sortParameterSnapshots(
+    snapshots.map((savedSnapshot) => (savedSnapshot.id === snapshotId ? transform(savedSnapshot) : savedSnapshot))
+  )
+}
+
 function downloadTextFile(filename: string, contents: string): void {
   const blob = new Blob([contents], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
@@ -1462,8 +1552,9 @@ export function App() {
   const [productMode, setProductMode] = useState<ProductMode>(readStoredProductMode)
   const [activeViewId, setActiveViewId] = useState<AppViewId>('setup')
   const runtime = useMemo(() => createRuntime(transportMode, websocketUrl), [transportMode, websocketUrl])
+  const initialSnapshotStorage = useMemo<SnapshotStorageLoadResult>(() => loadStoredSnapshots(), [])
   const [snapshot, setSnapshot] = useState<ConfiguratorSnapshot>(runtime.getSnapshot())
-  const [savedSnapshots, setSavedSnapshots] = useState<SavedParameterSnapshot[]>(loadStoredSnapshots)
+  const [savedSnapshots, setSavedSnapshots] = useState<SavedParameterSnapshot[]>(initialSnapshotStorage.snapshots)
   const [selectedSnapshotId, setSelectedSnapshotId] = useState<string>()
   const [selectedPresetId, setSelectedPresetId] = useState<string>()
   const [desktopSnapshotLibraryPath, setDesktopSnapshotLibraryPath] = useState<string>()
@@ -1477,6 +1568,14 @@ export function App() {
   const [selectedParameterId, setSelectedParameterId] = useState<string>()
   const [parameterNotice, setParameterNotice] = useState<ParameterNotice>()
   const [snapshotNotice, setSnapshotNotice] = useState<ParameterNotice>()
+  const [snapshotStorageNotice, setSnapshotStorageNotice] = useState<ParameterNotice | undefined>(() =>
+    initialSnapshotStorage.warning
+      ? {
+          tone: 'warning',
+          text: initialSnapshotStorage.warning
+        }
+      : undefined
+  )
   const [presetNotice, setPresetNotice] = useState<ParameterNotice>()
   const [parameterFollowUp, setParameterFollowUp] = useState<ParameterFollowUp>()
   const [busyAction, setBusyAction] = useState<string>()
@@ -1587,7 +1686,7 @@ export function App() {
     !snapshot.vehicle.armed &&
     snapshot.sessionProfile === 'full-power' &&
     outputMapping.motorOutputs.length > 0
-  const canApplyDraftParameters = canApplyParameterChanges(snapshot)
+  const canApplyDraftParameters = canApplyParameterChanges(snapshot, parameterFollowUp)
 
   useEffect(() => {
     setSnapshot(runtime.getSnapshot())
@@ -1805,13 +1904,13 @@ export function App() {
     () => selectedSnapshotDiffEntries.filter((entry) => entry.status === 'invalid'),
     [selectedSnapshotDiffEntries]
   )
+  const selectedSnapshotDiffSignature = useMemo(
+    () => createDraftSignature(selectedSnapshotDiffEntries),
+    [selectedSnapshotDiffEntries]
+  )
   const selectedSnapshotRebootSensitiveCount = useMemo(
     () => selectedSnapshotChangedEntries.filter((entry) => entry.definition?.rebootRequired).length,
     [selectedSnapshotChangedEntries]
-  )
-  const protectedSnapshotCount = useMemo(
-    () => savedSnapshots.filter((savedSnapshot) => savedSnapshot.protected).length,
-    [savedSnapshots]
   )
   const selectedSnapshotStatusTone = selectedSnapshot
     ? selectedSnapshotInvalidEntries.length > 0
@@ -1869,6 +1968,10 @@ export function App() {
   )
   const selectedPresetInvalidEntries = useMemo(
     () => selectedPresetDiffEntries.filter((entry) => entry.status === 'invalid'),
+    [selectedPresetDiffEntries]
+  )
+  const selectedPresetDiffSignature = useMemo(
+    () => createDraftSignature(selectedPresetDiffEntries),
     [selectedPresetDiffEntries]
   )
   const receiverDraftEntries = useMemo(
@@ -2613,15 +2716,19 @@ export function App() {
 
   function applyParsedSnapshotImport(
     parsedInput: ReturnType<typeof parseParameterSnapshotInput>,
-    fileNameHint?: string
+    fileNameHint?: string,
+    mode: 'merge' | 'replace' = 'merge'
   ): void {
     if (parsedInput.kind === 'library') {
       const importedSnapshots = parsedInput.library.snapshots
-      setSavedSnapshots((current) => mergeSavedSnapshots(current, importedSnapshots))
+      setSavedSnapshots((current) => (mode === 'replace' ? importedSnapshots : mergeSavedSnapshots(current, importedSnapshots)))
       setSelectedSnapshotId(importedSnapshots[0]?.id)
       setSnapshotNotice({
         tone: 'success',
-        text: `Imported ${importedSnapshots.length} snapshot(s) from library "${parsedInput.library.name}".`
+        text:
+          mode === 'replace'
+            ? `Opened ${importedSnapshots.length} snapshot(s) from desktop library "${parsedInput.library.name}".`
+            : `Imported ${importedSnapshots.length} snapshot(s) from library "${parsedInput.library.name}".`
       })
       return
     }
@@ -2722,7 +2829,7 @@ export function App() {
         clearDesktopSnapshotLibraryLink()
       }
 
-      applyParsedSnapshotImport(parsedInput, file.name)
+      applyParsedSnapshotImport(parsedInput, file.name, parsedInput.kind === 'library' ? 'replace' : 'merge')
     } catch (error) {
       setSnapshotNotice({
         tone: 'danger',
@@ -2806,10 +2913,38 @@ export function App() {
       return
     }
 
+    if (selectedSnapshot.protected) {
+      setSnapshotNotice({
+        tone: 'warning',
+        text: `Snapshot "${selectedSnapshot.label}" is protected. Unprotect it before deleting it from the active library.`
+      })
+      return
+    }
+
     setSavedSnapshots((current) => current.filter((entry) => entry.id !== selectedSnapshot.id))
     setSnapshotNotice({
       tone: 'neutral',
       text: `Deleted snapshot "${selectedSnapshot.label}" from the local browser library.`
+    })
+  }
+
+  function handleToggleSelectedSnapshotProtection(): void {
+    if (!selectedSnapshot) {
+      return
+    }
+
+    const nextProtected = !selectedSnapshot.protected
+    setSavedSnapshots((current) =>
+      updateSavedSnapshot(current, selectedSnapshot.id, (savedSnapshot) => ({
+        ...savedSnapshot,
+        protected: nextProtected
+      }))
+    )
+    setSnapshotNotice({
+      tone: 'success',
+      text: nextProtected
+        ? `Snapshot "${selectedSnapshot.label}" is now protected against deletion.`
+        : `Snapshot "${selectedSnapshot.label}" is no longer protected.`
     })
   }
 
@@ -4387,7 +4522,6 @@ export function App() {
     () => appViews.filter((view) => isExpertMode || !isExpertOnlyView(view.id)),
     [appViews, isExpertMode]
   )
-
   function formatCategoryLabel(categoryId: string | undefined): string {
     if (!categoryId) {
       return 'Uncategorized'
@@ -4520,11 +4654,23 @@ export function App() {
       return
     }
 
-    window.sessionStorage.setItem(PRODUCT_MODE_STORAGE_KEY, productMode)
+    try {
+      window.sessionStorage.setItem(PRODUCT_MODE_STORAGE_KEY, productMode)
+    } catch {
+      // Ignore session storage failures; the mode still applies for the current render tree.
+    }
   }, [productMode])
 
   useEffect(() => {
-    persistSnapshots(savedSnapshots)
+    const persistence = persistSnapshots(savedSnapshots)
+    setSnapshotStorageNotice(
+      persistence.warning
+        ? {
+            tone: 'warning',
+            text: persistence.warning
+          }
+        : undefined
+    )
   }, [savedSnapshots])
 
   useEffect(() => {
@@ -4555,12 +4701,12 @@ export function App() {
 
   useEffect(() => {
     setSnapshotRestoreAcknowledged(false)
-  }, [selectedSnapshot?.id])
+  }, [selectedSnapshotDiffSignature])
 
   useEffect(() => {
     setPresetApplyAcknowledged(false)
     setPresetNotice(undefined)
-  }, [selectedPreset?.id])
+  }, [selectedPresetDiffSignature])
 
   useEffect(() => {
     if (isExpertMode || !isExpertOnlyView(activeViewId)) {
@@ -4615,21 +4761,42 @@ export function App() {
 
   return (
 	    <main className="app-shell">
-	      <header className="hero">
-	        <div>
-	          <p className="eyebrow">Browser-First ArduPilot Configurator</p>
-	          <h1>ArduConfigurator</h1>
-	          <p className="lede">
-	            ArduCopter-first setup, configuration, and tuning with a shared runtime for browser and desktop workflows.
-	          </p>
+	      <header className="app-header">
+	        <div className="app-header__brand">
+            <div className="app-header__mark">AC</div>
+	          <div>
+	            <p className="eyebrow">ArduPilot FPV Configurator</p>
+	            <h1>ArduConfigurator</h1>
+	            <p className="app-header__lede">A cleaner setup-first browser configurator for ArduCopter FPV work.</p>
+	          </div>
 	        </div>
-	        <StatusBadge tone={toneForConnection(snapshot.connection.kind)}>{snapshot.connection.kind}</StatusBadge>
+          <div className="app-header__summary">
+            <div className="config-pills">
+              <span>{snapshot.vehicle?.vehicle ?? 'Waiting for heartbeat'}</span>
+              <span>{snapshot.vehicle?.flightMode ?? 'No active mode'}</span>
+              <span>{snapshot.vehicle?.armed ? 'Armed' : 'Disarmed'}</span>
+              <span>
+                {snapshot.parameterStats.status === 'complete' ? `${snapshot.parameterStats.downloaded} params` : formatParameterSync(snapshot)}
+              </span>
+              <span>{snapshot.sessionProfile === 'usb-bench' ? 'USB bench' : 'Full power'}</span>
+              {parameterFollowUp ? <span className="is-target">{parameterFollowUp.requiresReboot ? 'Reboot required' : 'Refresh required'}</span> : null}
+            </div>
+            <StatusBadge tone={toneForConnection(snapshot.connection.kind)}>{snapshot.connection.kind}</StatusBadge>
+          </div>
 	      </header>
 
       <div className="workspace-layout">
         <aside className="workspace-sidebar">
-          <Panel title="Session" subtitle="Always-visible runtime summary for the active vehicle session.">
-            <div className="workspace-sidebar__stack">
+          <div className="workspace-sidebar__shell">
+            <section className="workspace-rail-section workspace-rail-section--session">
+              <div className="workspace-rail-section__header">
+                <div>
+                  <strong>Session</strong>
+                  <small>Connect once, then stay in the active task.</small>
+                </div>
+                <StatusBadge tone={toneForConnection(snapshot.connection.kind)}>{snapshot.connection.kind}</StatusBadge>
+              </div>
+
               <div className="button-row">
                 <select
                   data-testid="transport-mode-select"
@@ -4667,15 +4834,15 @@ export function App() {
                   <small>Run `npm run bridge:websocket -- --demo` or `npm run bridge:websocket -- --path=/dev/tty.usbmodemXXXX` to use the bundled local bridge.</small>
                 </label>
               ) : null}
-	              <div className="button-row">
-	                <button
-                    data-testid="connect-button"
-	                  style={buttonStyle('primary')}
-	                  onClick={() => void handleConnect()}
-	                  disabled={busyAction !== undefined || snapshot.connection.kind === 'connected'}
-	                >
-	                  {connectButtonLabel(snapshot, parameterFollowUp)}
-	                </button>
+              <div className="button-row">
+                <button
+                  data-testid="connect-button"
+                  style={buttonStyle('primary')}
+                  onClick={() => void handleConnect()}
+                  disabled={busyAction !== undefined || snapshot.connection.kind === 'connected'}
+                >
+                  {connectButtonLabel(snapshot, parameterFollowUp)}
+                </button>
                 <button
                   data-testid="disconnect-button"
                   style={buttonStyle()}
@@ -4685,10 +4852,12 @@ export function App() {
                   Disconnect
                 </button>
               </div>
+
               <div className="workspace-sidebar__meta">
                 <strong data-testid="session-vehicle-name">{snapshot.vehicle?.vehicle ?? 'Waiting for heartbeat'}</strong>
                 <span>{snapshot.vehicle?.flightMode ?? 'No active mode yet'}</span>
               </div>
+
               <div className="config-pills">
                 <span>{snapshot.connection.kind}</span>
                 <span>{snapshot.sessionProfile === 'usb-bench' ? 'USB bench' : 'Full power'}</span>
@@ -4697,55 +4866,95 @@ export function App() {
                 </span>
                 <span>{snapshot.preArmStatus.healthy ? 'Pre-arm clear' : `${snapshot.preArmStatus.issues.length} pre-arm`}</span>
               </div>
-	              <div className="sync-meter" aria-hidden="true">
-	                <div className="sync-meter__fill" style={{ width: `${parameterSyncWidth}%` }} />
-	              </div>
-	              {parameterFollowUp ? (
-	                <div className="session-follow-up">
-	                  <div className="session-follow-up__header">
-	                    <strong>Session action required</strong>
-	                    <StatusBadge tone={parameterFollowUp.requiresReboot ? 'warning' : 'neutral'}>
-	                      {parameterFollowUp.requiresReboot ? 'reboot' : 'refresh'}
-	                    </StatusBadge>
-	                  </div>
-	                  <p>
-	                    {snapshot.connection.kind === 'connected'
-	                      ? parameterFollowUp.text
-	                      : `${parameterFollowUp.text} Reconnect from the session controls above to continue.`}
-	                  </p>
-	                  {snapshot.connection.kind === 'connected' ? (
-	                    <div className="button-row">
-	                      {parameterFollowUp.requiresReboot ? (
-	                        <button
-	                          style={buttonStyle()}
-	                          onClick={() => void handleGuidedAction('reboot-autopilot')}
-	                          disabled={busyAction !== undefined || !canRunGuidedAction(snapshot, 'reboot-autopilot')}
-	                        >
-	                          Request Reboot
-	                        </button>
-	                      ) : null}
-	                      <button
-	                        style={buttonStyle()}
-	                        onClick={() => void handleGuidedAction('request-parameters')}
-	                        disabled={parameterFollowUp.requiresReboot || busyAction !== undefined || !canRunGuidedAction(snapshot, 'request-parameters')}
-	                      >
-	                        Pull Parameters
-	                      </button>
-	                    </div>
-	                  ) : null}
-	                </div>
-	              ) : null}
-	            </div>
-	          </Panel>
+              <div className="sync-meter" aria-hidden="true">
+                <div className="sync-meter__fill" style={{ width: `${parameterSyncWidth}%` }} />
+              </div>
+              {parameterFollowUp ? (
+                <div className="session-follow-up">
+                  <div className="session-follow-up__header">
+                    <strong>Session action required</strong>
+                    <StatusBadge tone={parameterFollowUp.requiresReboot ? 'warning' : 'neutral'}>
+                      {parameterFollowUp.requiresReboot ? 'reboot' : 'refresh'}
+                    </StatusBadge>
+                  </div>
+                  <p>
+                    {snapshot.connection.kind === 'connected'
+                      ? parameterFollowUp.text
+                      : `${parameterFollowUp.text} Reconnect from the session controls above to continue.`}
+                  </p>
+                  {snapshot.connection.kind === 'connected' ? (
+                    <div className="button-row">
+                      {parameterFollowUp.requiresReboot ? (
+                        <button
+                          style={buttonStyle()}
+                          onClick={() => void handleGuidedAction('reboot-autopilot')}
+                          disabled={busyAction !== undefined || !canRunGuidedAction(snapshot, 'reboot-autopilot')}
+                        >
+                          Request Reboot
+                        </button>
+                      ) : null}
+                      <button
+                        style={buttonStyle()}
+                        onClick={() => void handleGuidedAction('request-parameters')}
+                        disabled={parameterFollowUp.requiresReboot || busyAction !== undefined || !canRunGuidedAction(snapshot, 'request-parameters')}
+                      >
+                        Pull Parameters
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </section>
 
-          <Panel
-            title="Baseline Snapshot"
-            subtitle="The selected snapshot becomes the active compare and restore baseline across the whole configurator."
-          >
-            <div className="workspace-sidebar__stack">
+            <nav className="workspace-nav" aria-label="Primary configurator views">
+              {visibleAppViews.map((view) => (
+                <button
+                  key={view.id}
+                  type="button"
+                  data-testid={`view-button-${view.id}`}
+                  className={`workspace-nav__item${view.id === activeViewId ? ' is-active' : ''}`}
+                  onClick={() => setActiveViewId(view.id)}
+                >
+                  <div className="workspace-nav__item-copy">
+                    <span className="workspace-nav__mark">{viewMonogram(view.id)}</span>
+                    <strong>{view.label}</strong>
+                  </div>
+                  <StatusBadge tone={view.tone}>{view.badge}</StatusBadge>
+                </button>
+              ))}
+            </nav>
+
+            <section className="workspace-rail-section workspace-rail-section--workspace">
+              <div className="workspace-rail-section__header">
+                <div>
+                  <strong>Workspace</strong>
+                  <small>Basic for setup. Expert for raw parameter work.</small>
+                </div>
+                <StatusBadge tone={isExpertMode ? 'warning' : 'success'}>{isExpertMode ? 'expert' : 'basic'}</StatusBadge>
+              </div>
+
+              <div className="mode-toggle mode-toggle--compact" role="tablist" aria-label="Configurator product mode">
+                <button
+                  type="button"
+                  data-testid="product-mode-basic"
+                  className={`mode-toggle__option${productMode === 'basic' ? ' is-active' : ''}`}
+                  onClick={() => setProductMode('basic')}
+                >
+                  <strong>Basic</strong>
+                </button>
+                <button
+                  type="button"
+                  data-testid="product-mode-expert"
+                  className={`mode-toggle__option${productMode === 'expert' ? ' is-active' : ''}`}
+                  onClick={() => setProductMode('expert')}
+                >
+                  <strong>Expert</strong>
+                </button>
+              </div>
+
               {selectedSnapshot ? (
-                <div className="baseline-summary">
-                  <div className="baseline-summary__header">
+                <div className="baseline-strip">
+                  <div className="baseline-strip__copy">
                     <div>
                       <strong data-testid="active-baseline-label">{selectedSnapshot.label}</strong>
                       <small>{formatSnapshotTimestamp(selectedSnapshot.capturedAt)}</small>
@@ -4756,45 +4965,18 @@ export function App() {
                   <div className="config-pills">
                     <span>{selectedSnapshot.source === 'captured' ? 'captured here' : 'imported'}</span>
                     <span>{selectedSnapshot.backup.parameterCount} params</span>
+                    <span>{selectedSnapshotChangedEntries.length} drift</span>
+                    <span>{selectedSnapshotRebootSensitiveCount} reboot</span>
                     {selectedSnapshot.protected ? <span className="is-target">protected</span> : null}
                     {selectedSnapshot.tags.slice(0, 2).map((tag) => (
                       <span key={`${selectedSnapshot.id}:sidebar:${tag}`}>#{tag}</span>
                     ))}
                   </div>
-
-                  <div className="baseline-summary__metrics">
-                    <article>
-                      <span>Saved</span>
-                      <strong>{savedSnapshots.length}</strong>
-                    </article>
-                    <article>
-                      <span>Protected</span>
-                      <strong>{protectedSnapshotCount}</strong>
-                    </article>
-                    <article>
-                      <span>Drift</span>
-                      <strong>{selectedSnapshotChangedEntries.length}</strong>
-                    </article>
-                    <article>
-                      <span>Reboot</span>
-                      <strong>{selectedSnapshotRebootSensitiveCount}</strong>
-                    </article>
-                  </div>
-
-                  <p className="baseline-summary__text">
-                    {selectedSnapshotChangedEntries.length > 0
-                      ? 'Live controller values currently differ from this baseline. Review the diff before making more changes.'
-                      : 'Live controller values currently match this baseline snapshot.'}
-                  </p>
-
-                  {selectedSnapshot.note ? <p className="baseline-summary__note">{selectedSnapshot.note}</p> : null}
                 </div>
               ) : (
-                <div className="workspace-mode-summary workspace-mode-summary--muted">
+                <div className="workspace-mode-summary workspace-mode-summary--muted workspace-mode-summary--compact">
                   <StatusBadge tone="neutral">no baseline</StatusBadge>
-                  <p>
-                    No snapshot is selected yet. Capture or import one from the Snapshots view before riskier configuration changes or preset applies.
-                  </p>
+                  <p>No snapshot baseline selected yet.</p>
                 </div>
               )}
 
@@ -4809,139 +4991,154 @@ export function App() {
                 ) : null}
               </div>
 
-              <p className="workspace-sidebar__hint">
-                Selecting a snapshot in the library updates this baseline everywhere else in the app.
-              </p>
-            </div>
-          </Panel>
-
-          <Panel
-            title="Workspace Mode"
-            subtitle="Choose whether this browser session stays focused on guided setup or exposes deeper power-user surfaces."
-          >
-            <div className="workspace-sidebar__stack">
-              <div className="mode-toggle" role="tablist" aria-label="Configurator product mode">
-                <button
-                  type="button"
-                  data-testid="product-mode-basic"
-                  className={`mode-toggle__option${productMode === 'basic' ? ' is-active' : ''}`}
-                  onClick={() => setProductMode('basic')}
-                >
-                  <strong>Basic</strong>
-                  <small>Setup, ports, receiver, outputs, and power.</small>
-                </button>
-                <button
-                  type="button"
-                  data-testid="product-mode-expert"
-                  className={`mode-toggle__option${productMode === 'expert' ? ' is-active' : ''}`}
-                  onClick={() => setProductMode('expert')}
-                >
-                  <strong>Expert</strong>
-                  <small>Unlocks raw parameter editing and deeper system changes.</small>
-                </button>
-              </div>
-
-              <div className="workspace-mode-summary">
-                <StatusBadge tone={isExpertMode ? 'warning' : 'success'}>{isExpertMode ? 'expert' : 'basic'}</StatusBadge>
-                <p>
-                  {isExpertMode
-                    ? 'Expert mode is active for this browser session. The full parameter platform is available.'
-                    : 'Basic mode is active for this browser session. Raw parameter editing stays hidden until you switch to Expert.'}
-                </p>
-              </div>
-
               {!isExpertMode ? (
-                <div className="workspace-mode-summary workspace-mode-summary--muted">
+                <div className="workspace-mode-summary workspace-mode-summary--muted workspace-mode-summary--compact">
                   <StatusBadge tone="neutral">hidden</StatusBadge>
-                  <p>
-                    Expert-only surfaces: {appViews.filter((view) => isExpertOnlyView(view.id)).map((view) => view.label).join(', ')}.
-                  </p>
+                  <p>{appViews.filter((view) => isExpertOnlyView(view.id)).map((view) => view.label).join(', ')} stay hidden.</p>
                 </div>
               ) : null}
 
               {!isExpertMode && stagedParameterDrafts.length > 0 ? (
-                <div className="workspace-mode-summary workspace-mode-summary--warning">
+                <div className="workspace-mode-summary workspace-mode-summary--warning workspace-mode-summary--compact">
                   <StatusBadge tone="warning">{stagedParameterDrafts.length} staged</StatusBadge>
                   <p>There are advanced parameter drafts in progress. Switch to Expert to review or apply them.</p>
                 </div>
               ) : null}
-            </div>
-          </Panel>
-
-          <nav className="workspace-nav" aria-label="Primary configurator views">
-            {visibleAppViews.map((view) => (
-              <button
-                key={view.id}
-                type="button"
-                data-testid={`view-button-${view.id}`}
-                className={`workspace-nav__item${view.id === activeViewId ? ' is-active' : ''}`}
-                onClick={() => setActiveViewId(view.id)}
-              >
-                <div>
-                  <strong>{view.label}</strong>
-                  <small>{view.description}</small>
-                </div>
-                <StatusBadge tone={view.tone}>{view.badge}</StatusBadge>
-              </button>
-            ))}
-          </nav>
+            </section>
+          </div>
         </aside>
 
         <div className="workspace-main">
       {activeViewId === 'setup' ? (
       <>
-      <section className="grid two-up">
-	        <div id="setup-panel-link">
-	          <Panel
-	            title="Vehicle Link"
-	            subtitle="Session controls live in the sidebar. This panel stays focused on live link state, sync status, and current vehicle identity."
-	          >
-	            <p className="telemetry-note">
-	              Use the sidebar session controls to connect, reconnect, change transport, or switch between full-power and USB-bench workflows.
-	            </p>
-	            <KeyValueRow
-	              label="Transport"
-	              value={
-                  transportMode === 'demo'
-                    ? 'Demo MAVLink stream'
-                    : transportMode === 'web-serial'
-                      ? webSerialSupported
-                        ? 'Browser Web Serial'
-                        : 'Unavailable'
-                      : `WebSocket (${websocketUrl})`
-                }
-            />
-            <KeyValueRow label="Session" value={snapshot.sessionProfile === 'usb-bench' ? 'USB Bench' : 'Full Power'} />
-            <KeyValueRow label="Vehicle" value={snapshot.vehicle?.vehicle ?? 'Waiting for heartbeat'} />
-            <KeyValueRow label="Firmware" value={snapshot.vehicle?.firmware ?? 'Unknown'} />
-            <KeyValueRow label="Mode" value={snapshot.vehicle?.flightMode ?? 'Unknown'} />
-            <KeyValueRow label="RC Link" value={formatRcLink(snapshot)} />
-            <KeyValueRow label="Battery" value={formatBatteryTelemetry(snapshot)} />
-            <KeyValueRow label="Sync" value={formatParameterSync(snapshot)} />
-            {isExpertMode ? <KeyValueRow label="Duplicate Frames" value={String(snapshot.parameterStats.duplicateFrames)} /> : null}
-            <div className="sync-meter" aria-hidden="true">
-              <div className="sync-meter__fill" style={{ width: `${parameterSyncWidth}%` }} />
+      <section className="grid one-up">
+        <div id="setup-panel-link">
+          <Panel
+            title="Setup Overview"
+            subtitle="Live attitude, vehicle state, and the most relevant setup status in one place."
+          >
+            <div className="setup-overview">
+              <div className="setup-overview__visual">
+                <AttitudePreview
+                  snapshot={snapshot}
+                  frameClassLabel={airframe.frameClassLabel}
+                  frameTypeLabel={airframe.frameTypeLabel}
+                />
+              </div>
+
+              <div className="setup-overview__summary">
+                <div className="setup-overview__facts">
+                  <div className="setup-overview__fact-list">
+                    <KeyValueRow label="Transport" value={
+                      transportMode === 'demo'
+                        ? 'Demo MAVLink stream'
+                        : transportMode === 'web-serial'
+                          ? webSerialSupported
+                            ? 'Browser Web Serial'
+                            : 'Unavailable'
+                          : `WebSocket (${websocketUrl})`
+                    } />
+                    <KeyValueRow label="Session" value={snapshot.sessionProfile === 'usb-bench' ? 'USB Bench' : 'Full Power'} />
+                    <KeyValueRow label="Vehicle" value={snapshot.vehicle?.vehicle ?? 'Waiting for heartbeat'} />
+                    <KeyValueRow label="Firmware" value={snapshot.vehicle?.firmware ?? 'Unknown'} />
+                    <KeyValueRow label="RC Link" value={formatRcLink(snapshot)} />
+                    <KeyValueRow label="Battery" value={formatBatteryTelemetry(snapshot)} />
+                  </div>
+
+                  <div className="setup-overview__fact-grid">
+                    <article className="telemetry-metric-card">
+                      <span>Mode</span>
+                      <strong>{snapshot.vehicle?.flightMode ?? 'Unknown'}</strong>
+                    </article>
+                    <article className="telemetry-metric-card">
+                      <span>Parameters</span>
+                      <strong>
+                        {snapshot.parameterStats.status === 'complete'
+                          ? `${snapshot.parameterStats.downloaded}/${snapshot.parameterStats.total || snapshot.parameterStats.downloaded}`
+                          : formatParameterSync(snapshot)}
+                      </strong>
+                    </article>
+                    <article className="telemetry-metric-card">
+                      <span>Pre-arm</span>
+                      <strong>{snapshot.preArmStatus.healthy ? 'Clear' : `${snapshot.preArmStatus.issues.length} issue(s)`}</strong>
+                    </article>
+                    <article className="telemetry-metric-card">
+                      <span>Airframe</span>
+                      <strong>{airframe.frameClassLabel}</strong>
+                    </article>
+                  </div>
+                </div>
+
+                <div className="setup-overview__signal-row">
+                  <span className={snapshot.liveVerification.rcInput.verified ? 'is-complete' : undefined}>
+                    {snapshot.liveVerification.rcInput.verified ? `${snapshot.liveVerification.rcInput.channelCount} RC channels live` : 'RC waiting'}
+                  </span>
+                  <span className={snapshot.liveVerification.batteryTelemetry.verified ? 'is-complete' : undefined}>
+                    {snapshot.liveVerification.batteryTelemetry.verified ? 'Battery telemetry live' : 'Battery telemetry waiting'}
+                  </span>
+                  <span className={snapshot.liveVerification.attitudeTelemetry.verified ? 'is-complete' : undefined}>
+                    {snapshot.liveVerification.attitudeTelemetry.verified ? 'Attitude telemetry live' : 'Attitude waiting'}
+                  </span>
+                  <span className={snapshot.preArmStatus.healthy ? 'is-complete' : 'is-target'}>
+                    {snapshot.preArmStatus.healthy ? 'Pre-arm clear' : `${snapshot.preArmStatus.issues.length} pre-arm issue(s)`}
+                  </span>
+                </div>
+
+                <div className={`setup-overview__notice${snapshot.preArmStatus.healthy ? ' is-healthy' : ''}`}>
+                  <strong>{snapshot.preArmStatus.healthy ? 'Ready for the next setup step' : 'Pre-arm attention required'}</strong>
+                  <p>
+                    {snapshot.preArmStatus.healthy
+                      ? 'Use the guided flow below, then move into Ports, Receiver, Outputs, or Power for focused configuration work.'
+                      : snapshot.preArmStatus.issues.slice(0, 2).map((issue) => issue.text).join(' · ')}
+                  </p>
+                </div>
+
+                <div className="setup-overview__status-strip">
+                  <div className="switch-exercise-card__header">
+                    <div>
+                      <strong>Recent status</strong>
+                      <p>Most recent autopilot text relevant to setup and safety.</p>
+                    </div>
+                    <StatusBadge tone={snapshot.statusTexts.some((entry) => entry.severity === 'error') ? 'danger' : 'neutral'}>
+                      {snapshot.statusTexts.length} lines
+                    </StatusBadge>
+                  </div>
+                  <div className="status-log">
+                    {snapshot.statusTexts.length === 0 ? <p>No status text received yet.</p> : null}
+                    {snapshot.statusTexts.slice(0, 4).map((entry) => (
+                      <div key={`${entry.severity}-${entry.text}`} className={`status-entry ${entry.severity}`}>
+                        <strong>{entry.severity}</strong>
+                        <span>{entry.text}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="button-row">
+                  <button
+                    style={buttonStyle('primary')}
+                    onClick={() => void handleGuidedAction('request-parameters')}
+                    disabled={busyAction !== undefined || !canRunGuidedAction(snapshot, 'request-parameters')}
+                  >
+                    {guidedActionButtonLabel('request-parameters', snapshot, busyAction)}
+                  </button>
+                  <button style={buttonStyle()} onClick={() => setActiveViewId('snapshots')}>
+                    Open Snapshot Library
+                  </button>
+                  <button style={buttonStyle()} onClick={() => setActiveViewId('outputs')}>
+                    Review Outputs
+                  </button>
+                </div>
+              </div>
             </div>
           </Panel>
         </div>
-
-        <Panel title="Status Log" subtitle="Recent autopilot status text from the shared runtime.">
-          <div className="status-log">
-            {snapshot.statusTexts.length === 0 ? <p>No status text received yet.</p> : null}
-            {snapshot.statusTexts.map((entry) => (
-              <div key={`${entry.severity}-${entry.text}`} className={`status-entry ${entry.severity}`}>
-                <strong>{entry.severity}</strong>
-                <span>{entry.text}</span>
-              </div>
-            ))}
-          </div>
-        </Panel>
       </section>
 
       {selectedSetupSection ? (
         <Panel
           title="Setup Flow"
-          subtitle="A stricter guided sequence for the current ArduCopter setup session, with explicit completion criteria and locked later steps until earlier work is verified."
+          subtitle="Guided sequence for the current setup session."
           actions={
             <div className="button-row">
               <StatusBadge tone={completedSetupSectionCount === setupFlowSections.length ? 'success' : 'warning'}>
@@ -5763,51 +5960,75 @@ export function App() {
             subtitle="Receiver telemetry, calibrated channel bars, and an estimated flight-mode switch position from the current RC stream."
           >
           <div className="telemetry-stack">
-            <div className="telemetry-header">
-              <div>
-                <h3>Receiver status</h3>
-                <p>
-                  {snapshot.liveVerification.rcInput.verified
-                    ? `Showing the first ${rcChannelDisplays.length} channels from a ${snapshot.liveVerification.rcInput.channelCount}-channel stream.`
-                    : 'Waiting for live receiver telemetry before promoting radio and mode setup.'}
-                </p>
-              </div>
-              <StatusBadge tone={snapshot.liveVerification.rcInput.verified ? 'success' : 'warning'}>
-                {snapshot.liveVerification.rcInput.verified ? `${snapshot.liveVerification.rcInput.channelCount} channels live` : 'No RC telemetry'}
-              </StatusBadge>
-            </div>
+            <div className="receiver-workspace">
+              <div className="receiver-workspace__live">
+                <div className="telemetry-header">
+                  <div>
+                    <h3>Receiver status</h3>
+                    <p>
+                      {snapshot.liveVerification.rcInput.verified
+                        ? `Showing the first ${rcChannelDisplays.length} channels from a ${snapshot.liveVerification.rcInput.channelCount}-channel stream.`
+                        : 'Waiting for live receiver telemetry before promoting radio and mode setup.'}
+                    </p>
+                  </div>
+                  <StatusBadge tone={snapshot.liveVerification.rcInput.verified ? 'success' : 'warning'}>
+                    {snapshot.liveVerification.rcInput.verified ? `${snapshot.liveVerification.rcInput.channelCount} channels live` : 'No RC telemetry'}
+                  </StatusBadge>
+                </div>
 
-            <div className="mode-estimate-card">
-              <div className="mode-estimate-card__header">
-                <strong>Flight mode switch</strong>
-                <StatusBadge tone={recentModeSwitchChange ? 'warning' : modeSwitchEstimate.estimatedSlot !== undefined ? 'success' : 'neutral'}>
-                  {recentModeSwitchChange ? 'Switch moved' : modeSwitchEstimate.estimatedSlot !== undefined ? 'Stable' : 'Waiting'}
-                </StatusBadge>
-              </div>
-              <p>
-                {modeSwitchEstimate.channelNumber === undefined
-                  ? 'Mode channel is not configured yet.'
-                  : modeSwitchEstimate.pwm === undefined
-                    ? `Configured for CH${modeSwitchEstimate.channelNumber}, waiting for that channel to stream.`
-                    : `Estimated slot ${modeSwitchEstimate.estimatedSlot} on CH${modeSwitchEstimate.channelNumber} at ${modeSwitchEstimate.pwm} us.`}
-              </p>
-              <small>
-                {modeSwitchEstimate.configuredParamId && modeSwitchEstimate.configuredValue !== undefined
-                  ? `${modeSwitchEstimate.configuredParamId} = ${formatModeAssignment(modeSwitchEstimate.configuredValue)}`
-                  : `Heartbeat mode: ${snapshot.vehicle?.flightMode ?? 'Unknown'}`}
-              </small>
-              {modeSwitchActivity ? (
-                <small>
-                  {modeSwitchActivity.previousSlot !== undefined && modeSwitchActivity.previousSlot !== modeSwitchActivity.currentSlot
-                    ? `Last slot change: ${formatModeAssignment(readRoundedParameter(snapshot, `FLTMODE${modeSwitchActivity.previousSlot}`))} -> ${formatModeAssignment(
-                        readRoundedParameter(snapshot, `FLTMODE${modeSwitchActivity.currentSlot}`)
-                      )}`
-                    : `Last switch movement: ${modeSwitchActivity.previousPwm ?? modeSwitchActivity.currentPwm} us -> ${modeSwitchActivity.currentPwm} us`}
-                </small>
-              ) : null}
-            </div>
+                <div className="mode-estimate-card">
+                  <div className="mode-estimate-card__header">
+                    <strong>Flight mode switch</strong>
+                    <StatusBadge tone={recentModeSwitchChange ? 'warning' : modeSwitchEstimate.estimatedSlot !== undefined ? 'success' : 'neutral'}>
+                      {recentModeSwitchChange ? 'Switch moved' : modeSwitchEstimate.estimatedSlot !== undefined ? 'Stable' : 'Waiting'}
+                    </StatusBadge>
+                  </div>
+                  <p>
+                    {modeSwitchEstimate.channelNumber === undefined
+                      ? 'Mode channel is not configured yet.'
+                      : modeSwitchEstimate.pwm === undefined
+                        ? `Configured for CH${modeSwitchEstimate.channelNumber}, waiting for that channel to stream.`
+                        : `Estimated slot ${modeSwitchEstimate.estimatedSlot} on CH${modeSwitchEstimate.channelNumber} at ${modeSwitchEstimate.pwm} us.`}
+                  </p>
+                  <small>
+                    {modeSwitchEstimate.configuredParamId && modeSwitchEstimate.configuredValue !== undefined
+                      ? `${modeSwitchEstimate.configuredParamId} = ${formatModeAssignment(modeSwitchEstimate.configuredValue)}`
+                      : `Heartbeat mode: ${snapshot.vehicle?.flightMode ?? 'Unknown'}`}
+                  </small>
+                  {modeSwitchActivity ? (
+                    <small>
+                      {modeSwitchActivity.previousSlot !== undefined && modeSwitchActivity.previousSlot !== modeSwitchActivity.currentSlot
+                        ? `Last slot change: ${formatModeAssignment(readRoundedParameter(snapshot, `FLTMODE${modeSwitchActivity.previousSlot}`))} -> ${formatModeAssignment(
+                            readRoundedParameter(snapshot, `FLTMODE${modeSwitchActivity.currentSlot}`)
+                          )}`
+                        : `Last switch movement: ${modeSwitchActivity.previousPwm ?? modeSwitchActivity.currentPwm} us -> ${modeSwitchActivity.currentPwm} us`}
+                    </small>
+                  ) : null}
+                </div>
 
-            <div className="switch-exercise-card">
+                <div className="rc-channel-grid">
+                  {rcChannelDisplays.map((channel) => (
+                    <article
+                      key={channel.channelNumber}
+                      className={`rc-channel-card${channel.isModeChannel ? ' rc-channel-card--mode' : ''}${channel.isModeChannel && recentModeSwitchChange ? ' rc-channel-card--active' : ''}`}
+                    >
+                      <div className="rc-channel-card__header">
+                        <strong>CH{channel.channelNumber}</strong>
+                        <span>{channel.role}</span>
+                      </div>
+                      <div className="rc-bar" aria-hidden="true">
+                        <div className="rc-bar__trim" style={{ left: `${channel.trimPercent}%` }} />
+                        <div className="rc-bar__fill" style={{ width: `${channel.fillPercent}%` }} />
+                      </div>
+                      <div className="rc-channel-card__footer">
+                        <span>{channel.pwm !== undefined ? `${channel.pwm} us` : 'No data'}</span>
+                        <span>{channel.isModeChannel ? 'Mode channel' : 'Live input'}</span>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+
+                <div className="switch-exercise-card">
               <div className="switch-exercise-card__header">
                 <div>
                   <strong>Switch exercise</strong>
@@ -5871,9 +6092,9 @@ export function App() {
                   Mark Failed
                 </button>
               </div>
-            </div>
+                </div>
 
-            <div className="rc-range-card">
+                <div className="rc-range-card">
               <div className="switch-exercise-card__header">
                 <div>
                   <strong>Stick range exercise</strong>
@@ -5940,9 +6161,12 @@ export function App() {
                   Mark Failed
                 </button>
               </div>
-            </div>
+                </div>
+              </div>
 
-            <div className="rc-mapping-card">
+              <div className="receiver-workspace__config">
+
+                <div className="rc-mapping-card">
               <div className="switch-exercise-card__header">
                 <div>
                   <strong>RC channel mapping</strong>
@@ -6038,7 +6262,7 @@ export function App() {
                   Mark Failed
                 </button>
               </div>
-            </div>
+                </div>
 
 	            <div className="rc-calibration-card">
               <div className="switch-exercise-card__header">
@@ -6391,29 +6615,9 @@ export function App() {
                 'Apply Additional Receiver Changes',
                 'additional receiver settings'
               )}
-
-	            <div className="rc-channel-grid">
-              {rcChannelDisplays.map((channel) => (
-                  <article
-                    key={channel.channelNumber}
-                    className={`rc-channel-card${channel.isModeChannel ? ' rc-channel-card--mode' : ''}${channel.isModeChannel && recentModeSwitchChange ? ' rc-channel-card--active' : ''}`}
-                  >
-                  <div className="rc-channel-card__header">
-                    <strong>CH{channel.channelNumber}</strong>
-                    <span>{channel.role}</span>
-                  </div>
-                  <div className="rc-bar" aria-hidden="true">
-                    <div className="rc-bar__trim" style={{ left: `${channel.trimPercent}%` }} />
-                    <div className="rc-bar__fill" style={{ width: `${channel.fillPercent}%` }} />
-                  </div>
-                  <div className="rc-channel-card__footer">
-                    <span>{channel.pwm !== undefined ? `${channel.pwm} us` : 'No data'}</span>
-                    <span>{channel.isModeChannel ? 'Mode channel' : 'Live input'}</span>
-                  </div>
-                </article>
-              ))}
+              </div>
             </div>
-            </div>
+          </div>
           </Panel>
         </div>
         ) : null}
@@ -6887,6 +7091,13 @@ export function App() {
               </div>
               <StatusBadge tone={toneForModeSwitchExercise(orientationExercise.status)}>{orientationExercise.status}</StatusBadge>
             </div>
+
+            <AttitudePreview
+              snapshot={snapshot}
+              compact
+              frameClassLabel={airframe.frameClassLabel}
+              frameTypeLabel={airframe.frameTypeLabel}
+            />
 
             <div className="telemetry-metric-grid">
               <article className="telemetry-metric-card">
@@ -7905,6 +8116,13 @@ export function App() {
               </div>
             ) : null}
 
+            {snapshotStorageNotice ? (
+              <div className="parameter-review__notice">
+                <StatusBadge tone={snapshotStorageNotice.tone}>{snapshotStorageNotice.tone}</StatusBadge>
+                <p>{snapshotStorageNotice.text}</p>
+              </div>
+            ) : null}
+
             {snapshotNotice ? (
               <div className="parameter-review__notice">
                 <StatusBadge tone={snapshotNotice.tone}>{snapshotNotice.tone}</StatusBadge>
@@ -8156,7 +8374,20 @@ export function App() {
                   <button style={buttonStyle()} onClick={handleExportSelectedSnapshot} disabled={busyAction !== undefined}>
                     Export Selected
                   </button>
-                  <button style={buttonStyle()} onClick={handleDeleteSelectedSnapshot} disabled={busyAction !== undefined}>
+                  <button
+                    data-testid="toggle-selected-snapshot-protection-button"
+                    style={buttonStyle()}
+                    onClick={handleToggleSelectedSnapshotProtection}
+                    disabled={busyAction !== undefined}
+                  >
+                    {selectedSnapshot.protected ? 'Unprotect Selected' : 'Protect Selected'}
+                  </button>
+                  <button
+                    data-testid="delete-selected-snapshot-button"
+                    style={buttonStyle()}
+                    onClick={handleDeleteSelectedSnapshot}
+                    disabled={busyAction !== undefined || selectedSnapshot.protected}
+                  >
                     Delete Selected
                   </button>
                 </div>
@@ -8240,6 +8471,7 @@ export function App() {
                       <label key={parameter.id} className={`scoped-editor-field scoped-editor-field--${draft?.status ?? 'unchanged'}`}>
                         <span>{parameter.definition?.label ?? parameter.id}</span>
                         <input
+                          data-testid={`tuning-input-${parameter.id}`}
                           type="number"
                           min={parameter.id === 'ANGLE_MAX' ? 10 : parameter.definition?.minimum}
                           max={parameter.id === 'ANGLE_MAX' ? 80 : parameter.definition?.maximum}
@@ -8285,6 +8517,7 @@ export function App() {
                       <label key={parameter.id} className={`scoped-editor-field scoped-editor-field--${draft?.status ?? 'unchanged'}`}>
                         <span>{parameter.definition?.label ?? parameter.id}</span>
                         <input
+                          data-testid={`tuning-input-${parameter.id}`}
                           type="number"
                           min={parameter.definition?.minimum}
                           max={parameter.definition?.maximum}
@@ -8358,6 +8591,7 @@ export function App() {
 
               <div className="switch-exercise-controls">
                 <button
+                  data-testid="apply-tuning-changes-button"
                   style={buttonStyle('primary')}
                   onClick={() => void handleApplyScopedParameterDrafts(tuningDraftEntries, 'tuning:apply', 'Tuning')}
                   disabled={

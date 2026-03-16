@@ -29,7 +29,8 @@ export class ReplayTransport implements Transport {
 
   private status: TransportStatus = { kind: 'idle' }
   private readonly scheduledTimers = new Set<ReturnType<typeof setTimeout>>()
-  private expectedOutboundIndex = 0
+  private eventIndex = 0
+  private lastProcessedAtMs = 0
   private connected = false
 
   constructor(id = 'replay-session', options: ReplayTransportOptions) {
@@ -47,9 +48,15 @@ export class ReplayTransport implements Transport {
     }
 
     this.connected = true
-    this.expectedOutboundIndex = 0
+    this.eventIndex = 0
+    this.lastProcessedAtMs = 0
     this.updateStatus({ kind: 'connecting' })
     this.updateStatus({ kind: 'connected' })
+
+    if (this.options.strictOutbound) {
+      this.advanceStrictReplay()
+      return
+    }
 
     const speedMultiplier = this.options.speedMultiplier ?? 1
     const inboundEvents = [...this.options.session.events]
@@ -74,6 +81,18 @@ export class ReplayTransport implements Transport {
   async disconnect(): Promise<void> {
     this.connected = false
     this.clearTimers()
+
+    const remainingOutboundEvents = this.options.strictOutbound
+      ? this.options.session.events.slice(this.eventIndex).filter((event) => event.direction === 'out')
+      : []
+
+    if (remainingOutboundEvents.length > 0) {
+      const noun = remainingOutboundEvents.length === 1 ? 'frame was' : 'frames were'
+      const message = `Replay session ${this.id} ended before ${remainingOutboundEvents.length} required outbound ${noun} emitted.`
+      this.updateStatus({ kind: 'error', message })
+      throw new Error(message)
+    }
+
     this.updateStatus({ kind: 'disconnected', reason: 'Replay session disconnected.' })
   }
 
@@ -86,22 +105,23 @@ export class ReplayTransport implements Transport {
       return
     }
 
-    const expectedOutboundEvents = this.options.session.events.filter((event) => event.direction === 'out')
-    const expected = expectedOutboundEvents[this.expectedOutboundIndex]
-    if (!expected) {
-      const message = `Unexpected outbound frame ${this.expectedOutboundIndex + 1} for replay session ${this.id}.`
+    const expected = this.options.session.events[this.eventIndex]
+    if (!expected || expected.direction !== 'out') {
+      const message = `Unexpected outbound frame at replay event ${this.eventIndex + 1} for session ${this.id}.`
       this.updateStatus({ kind: 'error', message })
       throw new Error(message)
     }
 
     const expectedFrame = decodeRecordedSessionFrame(expected)
     if (!bytesEqual(expectedFrame, frame)) {
-      const message = `Outbound frame ${this.expectedOutboundIndex + 1} did not match the recorded session.`
+      const message = `Outbound frame at replay event ${this.eventIndex + 1} did not match the recorded session.`
       this.updateStatus({ kind: 'error', message })
       throw new Error(message)
     }
 
-    this.expectedOutboundIndex += 1
+    this.lastProcessedAtMs = expected.atMs
+    this.eventIndex += 1
+    this.advanceStrictReplay()
   }
 
   onFrame(listener: FrameListener): Unsubscribe {
@@ -127,6 +147,38 @@ export class ReplayTransport implements Transport {
   private updateStatus(status: TransportStatus): void {
     this.status = status
     this.statusListeners.forEach((listener) => listener(status))
+  }
+
+  private advanceStrictReplay(): void {
+    if (!this.connected) {
+      return
+    }
+
+    const event = this.options.session.events[this.eventIndex]
+    if (!event) {
+      return
+    }
+
+    if (event.direction === 'out') {
+      return
+    }
+
+    const speedMultiplier = this.options.speedMultiplier ?? 1
+    const delayMs = speedMultiplier <= 0 ? 0 : Math.max(0, event.atMs - this.lastProcessedAtMs) / speedMultiplier
+    const timer = setTimeout(() => {
+      this.scheduledTimers.delete(timer)
+      if (!this.connected) {
+        return
+      }
+
+      const frame = decodeRecordedSessionFrame(event)
+      this.frameListeners.forEach((listener) => listener(frame))
+      this.lastProcessedAtMs = event.atMs
+      this.eventIndex += 1
+      this.advanceStrictReplay()
+    }, delayMs)
+
+    this.scheduledTimers.add(timer)
   }
 }
 

@@ -16,9 +16,25 @@ async function openView(page: Page, viewId: string): Promise<void> {
   await page.getByTestId(`view-button-${viewId}`).click()
 }
 
+async function pullParameters(page: Page): Promise<void> {
+  const pullParametersButton = page.getByRole('button', { name: 'Pull Parameters' })
+  await expect(pullParametersButton).toBeVisible()
+  await pullParametersButton.click()
+  await expect(pullParametersButton).toHaveCount(0)
+  await expect(page.getByTestId('session-parameter-summary')).toHaveText('125 params')
+}
+
+async function applySingleTuningChange(page: Page, value: string): Promise<void> {
+  await openView(page, 'tuning')
+  await page.getByTestId('tuning-input-ATC_INPUT_TC').fill(value)
+  await page.getByTestId('apply-tuning-changes-button').click()
+  await expect(page.getByText('Verified 1 tuning change(s) from this view.')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Pull Parameters' })).toBeVisible()
+}
+
 test.describe('browser configurator regression flows', () => {
   test('bundled websocket demo keeps core configuration surfaces reachable', async ({ page }) => {
-    await connectToVehicle(page, 'websocket')
+    await connectToVehicle(page, 'demo')
 
     await expect(page.getByTestId('view-button-setup')).toBeVisible()
     await expect(page.getByTestId('view-button-ports')).toBeVisible()
@@ -29,6 +45,8 @@ test.describe('browser configurator regression flows', () => {
     await expect(page.getByTestId('view-button-tuning')).toBeVisible()
     await expect(page.getByTestId('view-button-presets')).toBeVisible()
     await expect(page.getByTestId('view-button-parameters')).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Setup Overview' })).toBeVisible()
+    await expect(page.getByTestId('setup-craft-preview')).toBeVisible()
 
     await openView(page, 'ports')
     await expect(page.getByRole('heading', { name: 'Ports & Peripherals' })).toBeVisible()
@@ -51,8 +69,8 @@ test.describe('browser configurator regression flows', () => {
     await expect(page.getByTestId('view-button-parameters')).toBeVisible()
   })
 
-  test('snapshots and presets round-trip through the bundled websocket demo bridge', async ({ page }) => {
-    await connectToVehicle(page, 'websocket')
+  test('snapshots and presets stay consistent through a tuning-write round-trip', async ({ page }) => {
+    await connectToVehicle(page, 'demo')
 
     await openView(page, 'snapshots')
     await page.getByTestId('snapshot-label-input').fill('E2E baseline')
@@ -64,15 +82,19 @@ test.describe('browser configurator regression flows', () => {
 
     await openView(page, 'presets')
     await page.getByTestId('preset-card-flight-feel-soft').click()
-    await page.getByTestId('preset-apply-ack').check()
-    await page.getByTestId('apply-preset-button').click()
+    await expect(page.getByRole('heading', { name: 'Smooth Explorer' })).toBeVisible()
+    await expect(page.getByTestId('apply-preset-button')).toBeVisible()
 
-    await expect(page.getByText(/Applied preset "Smooth Explorer" with 4 verified write\(s\)\./)).toBeVisible()
+    await applySingleTuningChange(page, '0.2')
 
     await openView(page, 'snapshots')
-    await expect(page.getByText('ArduCopter pre-preset Smooth Explorer')).toBeVisible()
     await expect(page.getByText('restore available')).toBeVisible()
 
+    await expect(page.getByTestId('snapshot-restore-ack')).not.toBeChecked()
+    await page.getByTestId('snapshot-restore-ack').check()
+    await expect(page.getByTestId('apply-snapshot-restore-button')).toBeDisabled()
+    await pullParameters(page)
+    await expect(page.getByTestId('snapshot-restore-ack')).not.toBeChecked()
     await page.getByTestId('snapshot-restore-ack').check()
     await page.getByTestId('apply-snapshot-restore-button').click()
 
@@ -86,5 +108,105 @@ test.describe('browser configurator regression flows', () => {
     await expect(page.getByText('WebSocket (ws://127.0.0.1:14550)')).toBeVisible()
     await openView(page, 'ports')
     await expect(page.getByRole('heading', { name: 'Ports & Peripherals' })).toBeVisible()
+  })
+
+  test('refresh-required follow-up blocks additional preset writes until parameters are pulled again', async ({ page }) => {
+    await connectToVehicle(page, 'demo')
+
+    await applySingleTuningChange(page, '0.2')
+
+    await openView(page, 'presets')
+    await page.getByTestId('preset-card-flight-feel-balanced').click()
+    await expect(page.getByTestId('preset-apply-ack')).not.toBeChecked()
+    await page.getByTestId('preset-apply-ack').check()
+    await expect(page.getByTestId('apply-preset-button')).toBeDisabled()
+
+    await pullParameters(page)
+    await expect(page.getByTestId('preset-apply-ack')).not.toBeChecked()
+  })
+
+  test('destructive acknowledgments reset when preset and snapshot diffs change', async ({ page }) => {
+    await connectToVehicle(page, 'demo')
+
+    await openView(page, 'snapshots')
+    await page.getByTestId('snapshot-label-input').fill('Ack reset baseline')
+    await page.getByTestId('capture-live-snapshot-button').click()
+    await expect(page.getByText('Saved snapshot "Ack reset baseline" with 125 parameters.')).toBeVisible()
+
+    await openView(page, 'presets')
+    await page.getByTestId('preset-card-flight-feel-soft').click()
+    await expect(page.getByTestId('preset-apply-ack')).not.toBeChecked()
+    await page.getByTestId('preset-apply-ack').check()
+    await expect(page.getByTestId('preset-apply-ack')).toBeChecked()
+
+    await applySingleTuningChange(page, '0.2')
+
+    await openView(page, 'presets')
+    await expect(page.getByTestId('preset-apply-ack')).not.toBeChecked()
+
+    await pullParameters(page)
+
+    await openView(page, 'snapshots')
+    await expect(page.getByTestId('snapshot-restore-ack')).not.toBeChecked()
+    await page.getByTestId('snapshot-restore-ack').check()
+    await expect(page.getByTestId('snapshot-restore-ack')).toBeChecked()
+
+    await applySingleTuningChange(page, '0.24')
+
+    await openView(page, 'snapshots')
+    await expect(page.getByTestId('snapshot-restore-ack')).not.toBeChecked()
+  })
+
+  test('protected snapshots must be unprotected before deletion', async ({ page }) => {
+    await connectToVehicle(page, 'demo')
+
+    await openView(page, 'snapshots')
+    await page.getByTestId('snapshot-label-input').fill('Protected baseline')
+    await page.getByTestId('snapshot-protected-toggle').check()
+    await page.getByTestId('capture-live-snapshot-button').click()
+
+    await expect(page.getByText('Saved snapshot "Protected baseline" with 125 parameters.')).toBeVisible()
+    await expect(page.getByTestId('delete-selected-snapshot-button')).toBeDisabled()
+
+    await page.getByTestId('toggle-selected-snapshot-protection-button').click()
+    await expect(page.getByText('is no longer protected.')).toBeVisible()
+    await expect(page.getByTestId('delete-selected-snapshot-button')).toBeEnabled()
+  })
+
+  test('snapshot view degrades gracefully when browser local storage is unavailable', async ({ page }) => {
+    await page.addInitScript(() => {
+      const originalGetItem = Storage.prototype.getItem
+      const originalSetItem = Storage.prototype.setItem
+
+      Object.defineProperty(Storage.prototype, 'getItem', {
+        configurable: true,
+        value(this: Storage, key: string) {
+          if (this === window.localStorage && key === 'arduconfig:snapshot-library') {
+            throw new Error('local storage unavailable for test')
+          }
+
+          return originalGetItem.call(this, key)
+        }
+      })
+
+      Object.defineProperty(Storage.prototype, 'setItem', {
+        configurable: true,
+        value(this: Storage, key: string, value: string) {
+          if (this === window.localStorage && key === 'arduconfig:snapshot-library') {
+            throw new Error('local storage unavailable for test')
+          }
+
+          return originalSetItem.call(this, key, value)
+        }
+      })
+    })
+
+    await connectToVehicle(page, 'demo')
+    await openView(page, 'snapshots')
+    await expect(page.getByText('Browser snapshot storage is unavailable.')).toBeVisible()
+
+    await page.getByTestId('snapshot-label-input').fill('In-memory baseline')
+    await page.getByTestId('capture-live-snapshot-button').click()
+    await expect(page.getByText('Saved snapshot "In-memory baseline" with 125 parameters.')).toBeVisible()
   })
 })

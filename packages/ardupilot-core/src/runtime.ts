@@ -82,6 +82,11 @@ interface ParameterValueWaiter {
   timer: ReturnType<typeof setTimeout>
 }
 
+interface WaiterHandle<T> {
+  promise: Promise<T>
+  cancel: (error: Error) => void
+}
+
 export interface WaitForVehicleOptions {
   timeoutMs?: number
 }
@@ -119,6 +124,12 @@ const LIVE_TELEMETRY_REQUESTS = [
     label: 'SYS_STATUS'
   }
 ] as const
+const ARDUCOPTER_MAV_TYPES = new Set<number>([
+  MAV_TYPE.QUADROTOR,
+  MAV_TYPE.HEXAROTOR,
+  MAV_TYPE.OCTOROTOR,
+  MAV_TYPE.TRICOPTER
+])
 
 export class ParameterBatchWriteError extends Error {
   constructor(
@@ -368,17 +379,24 @@ export class ArduPilotConfiguratorRuntime {
     const known = this.parameters.get(paramId)
     const writeVerification = this.waitForParameterValue(paramId, paramValue, options)
 
-    await this.session.send({
-      type: 'PARAM_SET',
-      targetSystem: this.vehicle?.systemId ?? 1,
-      targetComponent: this.vehicle?.componentId ?? 1,
-      paramId,
-      paramValue,
-      paramType: MAV_PARAM_TYPE.REAL32
-    })
+    try {
+      await this.session.send({
+        type: 'PARAM_SET',
+        targetSystem: this.vehicle?.systemId ?? 1,
+        targetComponent: this.vehicle?.componentId ?? 1,
+        paramId,
+        paramValue,
+        paramType: MAV_PARAM_TYPE.REAL32
+      })
+    } catch (error) {
+      const sendError = error instanceof Error ? error : new Error('Unknown parameter send error.')
+      writeVerification.cancel(sendError)
+      void writeVerification.promise.catch(() => {})
+      throw sendError
+    }
 
     try {
-      const confirmed = await writeVerification
+      const confirmed = await writeVerification.promise
       this.appendStatusEntry('info', `Verified parameter ${paramId} = ${formatParameterValueForLog(confirmed.value)}.`)
       this.emit()
       return {
@@ -573,10 +591,17 @@ export class ArduPilotConfiguratorRuntime {
       params: params as CommandLongMessage['params']
     }
 
-    const ackPromise = options.waitForAck ? this.waitForCommandAck(command, options.ackTimeoutMs) : undefined
-    await this.session.send(message)
-    if (ackPromise) {
-      return ackPromise
+    const ackWaiter = options.waitForAck ? this.waitForCommandAck(command, options.ackTimeoutMs) : undefined
+    try {
+      await this.session.send(message)
+    } catch (error) {
+      const sendError = error instanceof Error ? error : new Error('Unknown command send error.')
+      ackWaiter?.cancel(sendError)
+      void ackWaiter?.promise.catch(() => {})
+      throw sendError
+    }
+    if (ackWaiter) {
+      return ackWaiter.promise
     }
   }
 
@@ -635,15 +660,15 @@ export class ArduPilotConfiguratorRuntime {
   }
 
   private processHeartbeat(message: HeartbeatMessage, systemId: number, componentId: number): void {
-    const isCopter = message.autopilot === MAV_AUTOPILOT.ARDUPILOTMEGA && message.vehicleType === MAV_TYPE.QUADROTOR
-    this.vehicle = {
-      firmware: isCopter ? 'ArduPilot' : 'Unknown',
-      vehicle: isCopter ? 'ArduCopter' : 'Unknown',
-      systemId,
-      componentId,
-      armed: Boolean(message.baseMode & MAV_MODE_FLAG.SAFETY_ARMED),
-      flightMode: formatArduPilotMode(message.customMode)
+    if (!isAuthoritativeHeartbeat(message)) {
+      return
     }
+
+    if (this.vehicle && (this.vehicle.systemId !== systemId || this.vehicle.componentId !== componentId)) {
+      return
+    }
+
+    this.vehicle = createVehicleIdentity(message, systemId, componentId)
 
     if (this.parameterSync.status === 'awaiting-vehicle') {
       this.parameterSync = createIdleParameterSync()
@@ -886,15 +911,19 @@ export class ArduPilotConfiguratorRuntime {
     this.commandAckWaiters.clear()
   }
 
-  private waitForCommandAck(command: number, timeoutMs = DEFAULT_COMMAND_ACK_TIMEOUT_MS): Promise<CommandAckMessage> {
-    return new Promise((resolve, reject) => {
+  private waitForCommandAck(command: number, timeoutMs = DEFAULT_COMMAND_ACK_TIMEOUT_MS): WaiterHandle<CommandAckMessage> {
+    let cancel = (_error: Error) => {}
+    const promise = new Promise<CommandAckMessage>((resolve, reject) => {
+      let settled = false
       const waiter: CommandAckWaiter = {
         command,
         resolve: (message) => {
+          settled = true
           clearTimeout(timer)
           resolve(message)
         },
         reject: (error) => {
+          settled = true
           clearTimeout(timer)
           reject(error)
         },
@@ -902,33 +931,54 @@ export class ArduPilotConfiguratorRuntime {
       }
 
       const timer = setTimeout(() => {
+        settled = true
         this.commandAckWaiters.delete(waiter)
         reject(new Error(`Timed out waiting for ${mavCommandLabel(command)} acknowledgment after ${timeoutMs}ms.`))
       }, timeoutMs)
 
       waiter.timer = timer
       this.commandAckWaiters.add(waiter)
+
+      cancel = (error: Error) => {
+        if (settled) {
+          return
+        }
+
+        settled = true
+        clearTimeout(timer)
+        this.commandAckWaiters.delete(waiter)
+        reject(error)
+      }
     })
+
+    return {
+      promise,
+      cancel
+    }
   }
 
   private waitForParameterValue(
     paramId: string,
     expectedValue: number,
     options: ParameterWriteOptions = {}
-  ): Promise<ParameterState> {
+  ): WaiterHandle<ParameterState> {
     const timeoutMs = options.verifyTimeoutMs ?? DEFAULT_PARAMETER_WRITE_TIMEOUT_MS
     const tolerance = options.tolerance ?? DEFAULT_PARAMETER_WRITE_TOLERANCE
 
-    return new Promise((resolve, reject) => {
+    let cancel = (_error: Error) => {}
+    const promise = new Promise<ParameterState>((resolve, reject) => {
+      let settled = false
       const waiter: ParameterValueWaiter = {
         paramId,
         expectedValue,
         tolerance,
         resolve: (parameter) => {
+          settled = true
           clearTimeout(timer)
           resolve(parameter)
         },
         reject: (error) => {
+          settled = true
           clearTimeout(timer)
           reject(error)
         },
@@ -936,13 +986,30 @@ export class ArduPilotConfiguratorRuntime {
       }
 
       const timer = setTimeout(() => {
+        settled = true
         this.parameterValueWaiters.delete(waiter)
         reject(new Error(`Timed out waiting for ${paramId} readback after ${timeoutMs}ms.`))
       }, timeoutMs)
 
       waiter.timer = timer
       this.parameterValueWaiters.add(waiter)
+
+      cancel = (error: Error) => {
+        if (settled) {
+          return
+        }
+
+        settled = true
+        clearTimeout(timer)
+        this.parameterValueWaiters.delete(waiter)
+        reject(error)
+      }
     })
+
+    return {
+      promise,
+      cancel
+    }
   }
 
   private resolveCommandAckWaiters(message: CommandAckMessage): void {
@@ -1515,6 +1582,22 @@ const GUIDED_ACTION_IDS: GuidedActionId[] = [
   'calibrate-compass',
   'reboot-autopilot'
 ]
+
+function isAuthoritativeHeartbeat(message: HeartbeatMessage): boolean {
+  return message.autopilot === MAV_AUTOPILOT.ARDUPILOTMEGA
+}
+
+function createVehicleIdentity(message: HeartbeatMessage, systemId: number, componentId: number): VehicleIdentity {
+  const isCopter = ARDUCOPTER_MAV_TYPES.has(message.vehicleType)
+  return {
+    firmware: 'ArduPilot',
+    vehicle: isCopter ? 'ArduCopter' : 'Unknown',
+    systemId,
+    componentId,
+    armed: Boolean(message.baseMode & MAV_MODE_FLAG.SAFETY_ARMED),
+    flightMode: formatArduPilotMode(message.customMode)
+  }
+}
 
 function recomputeSatisfiedSignals(liveVerification: LiveVerificationState): LiveSignalId[] {
   const signals: LiveSignalId[] = []

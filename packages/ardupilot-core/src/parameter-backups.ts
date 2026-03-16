@@ -1,6 +1,7 @@
 import type { ConfiguratorSnapshot, ParameterState } from './types.js'
 
 const SNAPSHOT_EXCLUDED_PREFIXES = ['STAT_'] as const
+const SNAPSHOT_COMPARE_TOLERANCE = 0.0001
 
 export interface ParameterBackupEntry {
   id: string
@@ -110,7 +111,7 @@ export function deriveDraftValuesFromParameterBackup(
     }
 
     matchedCount += 1
-    if (Object.is(current.value, entry.value)) {
+    if (parameterValuesMatch(current.value, entry.value)) {
       unchangedCount += 1
       return
     }
@@ -153,4 +154,8 @@ function isSnapshotExcludedParameterState(parameter: ParameterState): boolean {
 
 function isSnapshotExcludedBackupEntry(entry: ParameterBackupEntry): boolean {
   return SNAPSHOT_EXCLUDED_PREFIXES.some((prefix) => entry.id.startsWith(prefix))
+}
+
+function parameterValuesMatch(left: number, right: number, tolerance = SNAPSHOT_COMPARE_TOLERANCE): boolean {
+  return Object.is(left, right) || Math.abs(left - right) <= tolerance
 }

@@ -12,6 +12,16 @@ import {
 export type SavedSnapshotSource = ParameterSnapshotRecord['source']
 export type SavedParameterSnapshot = ParameterSnapshotRecord
 
+export interface SnapshotStorageLoadResult {
+  snapshots: SavedParameterSnapshot[]
+  warning?: string
+}
+
+export interface SnapshotStoragePersistResult {
+  ok: boolean
+  warning?: string
+}
+
 interface LegacySavedParameterSnapshot {
   id: string
   label: string
@@ -27,31 +37,54 @@ interface LegacySavedSnapshotLibraryFile {
 }
 
 const SNAPSHOT_LIBRARY_STORAGE_KEY = 'arduconfig:snapshot-library'
+const SNAPSHOT_STORAGE_WARNING =
+  'Browser snapshot storage is unavailable. Snapshot changes will stay in memory for this session only until browser storage works again.'
 
-export function loadStoredSnapshots(): SavedParameterSnapshot[] {
+export function loadStoredSnapshots(): SnapshotStorageLoadResult {
   if (typeof window === 'undefined') {
-    return []
+    return { snapshots: [] }
   }
 
-  const raw = window.localStorage.getItem(SNAPSHOT_LIBRARY_STORAGE_KEY)
+  let raw: string | null
+  try {
+    raw = window.localStorage.getItem(SNAPSHOT_LIBRARY_STORAGE_KEY)
+  } catch {
+    return {
+      snapshots: [],
+      warning: SNAPSHOT_STORAGE_WARNING
+    }
+  }
+
   if (!raw) {
-    return []
+    return { snapshots: [] }
   }
 
   try {
-    return parseParameterSnapshotLibrary(raw).snapshots
+    return {
+      snapshots: parseParameterSnapshotLibrary(raw).snapshots
+    }
   } catch {
-    return loadLegacyStoredSnapshots(raw)
+    return {
+      snapshots: loadLegacyStoredSnapshots(raw)
+    }
   }
 }
 
-export function persistSnapshots(snapshots: SavedParameterSnapshot[]): void {
+export function persistSnapshots(snapshots: SavedParameterSnapshot[]): SnapshotStoragePersistResult {
   if (typeof window === 'undefined') {
-    return
+    return { ok: true }
   }
 
-  const library = createParameterSnapshotLibrary('Browser Local Snapshot Library', snapshots)
-  window.localStorage.setItem(SNAPSHOT_LIBRARY_STORAGE_KEY, serializeParameterSnapshotLibrary(library))
+  try {
+    const library = createParameterSnapshotLibrary('Browser Local Snapshot Library', snapshots)
+    window.localStorage.setItem(SNAPSHOT_LIBRARY_STORAGE_KEY, serializeParameterSnapshotLibrary(library))
+    return { ok: true }
+  } catch {
+    return {
+      ok: false,
+      warning: SNAPSHOT_STORAGE_WARNING
+    }
+  }
 }
 
 export function createSavedSnapshot(

@@ -1,0 +1,10 @@
+3D craft preview models in this folder were copied from the Betaflight Configurator project:
+https://github.com/betaflight/betaflight-configurator
+
+Source location:
+- resources/models/*.gltf
+
+These assets are kept here so the browser Setup and Receiver experiences can provide a real
+rotating craft preview similar to Betaflight's configurator instead of a placeholder mockup.
+
+Retain upstream license obligations when redistributing these files.

@@ -1,11 +1,11 @@
 import type { CSSProperties, PropsWithChildren, ReactNode } from 'react'
 
 const palette = {
-  surface: '#0f172a',
-  surfaceRaised: '#172033',
-  border: '#243049',
+  surface: '#0b1320',
+  surfaceRaised: '#111c2d',
+  border: '#27354d',
   text: '#e6edf7',
-  muted: '#96a4bd',
+  muted: '#8fa0bc',
   accent: '#61dafb',
   success: '#2cb67d',
   warning: '#f4b942',
@@ -21,21 +21,20 @@ export function Panel({
   return (
     <section
       style={{
-        background: palette.surfaceRaised,
+        background: 'linear-gradient(180deg, rgba(16, 24, 37, 0.96), rgba(11, 18, 29, 0.98))',
         border: `1px solid ${palette.border}`,
         borderRadius: 18,
-        padding: 20,
-        boxShadow: '0 18px 48px rgba(0, 0, 0, 0.22)'
+        padding: 18
       }}
     >
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
         <div>
-          <h2 style={{ margin: 0, color: palette.text, fontSize: 20 }}>{title}</h2>
-          {subtitle ? <p style={{ margin: '8px 0 0', color: palette.muted }}>{subtitle}</p> : null}
+          <h2 style={{ margin: 0, color: palette.text, fontSize: 17, letterSpacing: '-0.02em' }}>{title}</h2>
+          {subtitle ? <p style={{ margin: '6px 0 0', color: palette.muted, lineHeight: 1.5, fontSize: 14 }}>{subtitle}</p> : null}
         </div>
         {actions}
       </div>
-      <div style={{ marginTop: 18 }}>{children}</div>
+      <div style={{ marginTop: 16 }}>{children}</div>
     </section>
   )
 }
@@ -54,7 +53,7 @@ export function StatusBadge({ tone, children }: PropsWithChildren<{ tone: 'neutr
         borderRadius: 999,
         border: `1px solid ${color}55`,
         color,
-        background: `${color}14`,
+        background: `${color}12`,
         fontSize: 12,
         fontWeight: 700,
         textTransform: 'uppercase',
@@ -73,7 +72,7 @@ export function KeyValueRow({ label, value }: { label: string; value: ReactNode 
         display: 'flex',
         justifyContent: 'space-between',
         gap: 12,
-        padding: '10px 0',
+        padding: '11px 0',
         borderBottom: `1px solid ${palette.border}`
       }}
     >
@@ -86,12 +85,12 @@ export function KeyValueRow({ label, value }: { label: string; value: ReactNode 
 export function buttonStyle(kind: 'primary' | 'secondary' = 'secondary'): CSSProperties {
   return {
     border: `1px solid ${kind === 'primary' ? palette.accent : palette.border}`,
-    background: kind === 'primary' ? '#102d3b' : palette.surface,
+    background: kind === 'primary' ? 'linear-gradient(180deg, #153548, #102634)' : palette.surface,
     color: palette.text,
-    padding: '10px 14px',
+    padding: '9px 13px',
     borderRadius: 12,
     fontWeight: 700,
+    boxShadow: kind === 'primary' ? '0 8px 20px rgba(8, 20, 32, 0.24)' : 'none',
     cursor: 'pointer'
   }
 }
-

@@ -42,13 +42,13 @@ export default defineConfig({
     {
       command: 'npm run preview --workspace @arduconfig/web -- --host 127.0.0.1 --port 4173 --strictPort',
       url: 'http://127.0.0.1:4173',
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: process.env.ARDUCONFIG_E2E_REUSE_EXISTING === '1',
       timeout: 120_000
     },
     {
       command: 'node apps/desktop/dist/bridge-websocket.js --demo --host=127.0.0.1 --port=14550',
       url: 'http://127.0.0.1:14550',
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: process.env.ARDUCONFIG_E2E_REUSE_EXISTING === '1',
       timeout: 120_000
     }
   ]

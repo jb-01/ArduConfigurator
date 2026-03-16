@@ -17,6 +17,7 @@ import {
 } from '../packages/ardupilot-core/dist/index.js'
 import { createMockSITL } from '../packages/mock-sitl/dist/index.js'
 import { arducopterMetadata } from '../packages/param-metadata/dist/index.js'
+import { MAV_AUTOPILOT, MAV_CMD, MAV_TYPE } from '../packages/protocol-mavlink/dist/index.js'
 
 test('mock SITL connects and syncs a full parameter table', async () => {
   const sitl = createMockSITL()
@@ -187,6 +188,35 @@ test('snapshot backups exclude volatile STAT_ parameters and ignore them on rest
   assert.deepEqual(restore.unknownParameterIds, [])
 })
 
+test('snapshot restore ignores benign float variance when values are effectively equal', () => {
+  const snapshot = {
+    vehicle: {
+      firmware: 'ArduPilot',
+      vehicle: 'ArduCopter',
+      systemId: 1,
+      componentId: 1,
+      flightMode: 'Stabilize'
+    },
+    parameters: [
+      {
+        id: 'ATC_INPUT_TC',
+        value: 0.15000000596046448,
+        index: 0,
+        count: 1,
+        definition: arducopterMetadata.parameters.ATC_INPUT_TC
+      }
+    ]
+  }
+
+  const backup = createParameterBackup(snapshot)
+  backup.parameters[0].value = 0.15
+
+  const restore = deriveDraftValuesFromParameterBackup(snapshot.parameters, backup)
+  assert.equal(restore.changedCount, 0)
+  assert.equal(restore.unchangedCount, 1)
+  assert.deepEqual(restore.draftValues, {})
+})
+
 test('snapshot libraries round-trip and select snapshots by label', async () => {
   const sitl = createMockSITL()
 
@@ -255,6 +285,124 @@ test('guided accelerometer flow completes through mock status text feedback', as
   }
 })
 
+test('authoritative ArduPilot heartbeat target is not replaced by later non-autopilot heartbeats', async () => {
+  const session = createHeartbeatSession([
+    {
+      atMs: 0,
+      systemId: 1,
+      componentId: 1,
+      autopilot: MAV_AUTOPILOT.ARDUPILOTMEGA,
+      vehicleType: MAV_TYPE.QUADROTOR
+    },
+    {
+      atMs: 10,
+      systemId: 1,
+      componentId: 100,
+      autopilot: 0,
+      vehicleType: MAV_TYPE.QUADROTOR
+    }
+  ])
+  const runtime = new ArduPilotConfiguratorRuntime(session, arducopterMetadata)
+
+  try {
+    await runtime.connect()
+    await runtime.waitForVehicle({ timeoutMs: 200 })
+    await sleep(40)
+
+    const vehicle = runtime.getSnapshot().vehicle
+    assert.equal(vehicle?.systemId, 1)
+    assert.equal(vehicle?.componentId, 1)
+    assert.equal(vehicle?.vehicle, 'ArduCopter')
+
+    await runtime.requestParameterList({ timeoutMs: 200 })
+    const request = session.sentMessages.find((message) => message.type === 'PARAM_REQUEST_LIST')
+    assert.ok(request)
+    assert.equal(request.targetSystem, 1)
+    assert.equal(request.targetComponent, 1)
+  } finally {
+    await runtime.disconnect().catch(() => {})
+    runtime.destroy()
+  }
+})
+
+test('ArduCopter detection accepts non-quad multirotor MAV types', async () => {
+  const session = createHeartbeatSession([
+    {
+      atMs: 0,
+      systemId: 1,
+      componentId: 1,
+      autopilot: MAV_AUTOPILOT.ARDUPILOTMEGA,
+      vehicleType: MAV_TYPE.HEXAROTOR
+    }
+  ])
+  const runtime = new ArduPilotConfiguratorRuntime(session, arducopterMetadata)
+
+  try {
+    await runtime.connect()
+    const vehicle = await runtime.waitForVehicle({ timeoutMs: 200 })
+
+    assert.equal(vehicle.firmware, 'ArduPilot')
+    assert.equal(vehicle.vehicle, 'ArduCopter')
+    assert.equal(runtime.getSnapshot().vehicle?.vehicle, 'ArduCopter')
+  } finally {
+    await runtime.disconnect().catch(() => {})
+    runtime.destroy()
+  }
+})
+
+test('parameter verification waiters are cleaned up when outbound PARAM_SET send fails', async () => {
+  const runtime = new ArduPilotConfiguratorRuntime(
+    createEchoSession(
+      {
+        FLTMODE1: 0
+      },
+      () => false,
+      (message) => message.type === 'PARAM_SET'
+    ),
+    arducopterMetadata
+  )
+
+  try {
+    await runtime.connect()
+    await runtime.requestParameterList({ timeoutMs: 200 })
+    await runtime.waitForParameterSync({ timeoutMs: 200 })
+
+    await assert.rejects(() => runtime.setParameter('FLTMODE1', 5, { verifyTimeoutMs: 50 }), /simulated send failure/i)
+    assert.equal(runtime.parameterValueWaiters.size, 0)
+  } finally {
+    await runtime.disconnect().catch(() => {})
+    runtime.destroy()
+  }
+})
+
+test('command ack waiters are cleaned up when outbound COMMAND_LONG send fails', async () => {
+  const runtime = new ArduPilotConfiguratorRuntime(
+    createEchoSession(
+      {
+        FLTMODE1: 0
+      },
+      () => false,
+      (message) => message.type === 'COMMAND_LONG'
+    ),
+    arducopterMetadata
+  )
+
+  try {
+    await runtime.connect()
+    await runtime.requestParameterList({ timeoutMs: 200 })
+    await runtime.waitForParameterSync({ timeoutMs: 200 })
+
+    await assert.rejects(
+      () => runtime.sendCommand(MAV_CMD.DO_MOTOR_TEST, [1, 0, 5, 1, 1, 0, 0], { waitForAck: true, ackTimeoutMs: 50 }),
+      /simulated send failure/i
+    )
+    assert.equal(runtime.commandAckWaiters.size, 0)
+  } finally {
+    await runtime.disconnect().catch(() => {})
+    runtime.destroy()
+  }
+})
+
 async function waitFor(predicate, timeoutMs) {
   const deadline = Date.now() + timeoutMs
 
@@ -272,7 +420,79 @@ function sleep(durationMs) {
   return new Promise((resolve) => setTimeout(resolve, durationMs))
 }
 
-function createEchoSession(initialParameters, shouldDropWrite) {
+function createHeartbeatSession(events) {
+  const statusListeners = []
+  const messageListeners = []
+  const timers = new Set()
+  const sentMessages = []
+  let connected = false
+
+  const emit = ({ systemId, componentId, autopilot, vehicleType, customMode = 0, baseMode = 0, systemStatus = 4 }) => {
+    messageListeners.forEach((listener) =>
+      listener({
+        header: {
+          systemId,
+          componentId,
+          sequence: 0
+        },
+        message: {
+          type: 'HEARTBEAT',
+          autopilot,
+          vehicleType,
+          baseMode,
+          customMode,
+          systemStatus,
+          mavlinkVersion: 3
+        },
+        timestampMs: Date.now()
+      })
+    )
+  }
+
+  return {
+    sentMessages,
+    getTransportStatus() {
+      return connected ? { kind: 'connected' } : { kind: 'disconnected' }
+    },
+    onStatus(listener) {
+      statusListeners.push(listener)
+      return () => {}
+    },
+    onMessage(listener) {
+      messageListeners.push(listener)
+      return () => {}
+    },
+    async connect() {
+      connected = true
+      statusListeners.forEach((listener) => listener({ kind: 'connected' }))
+      events.forEach((event) => {
+        const timer = setTimeout(() => {
+          timers.delete(timer)
+          if (!connected) {
+            return
+          }
+          emit(event)
+        }, event.atMs)
+        timers.add(timer)
+      })
+    },
+    async disconnect() {
+      connected = false
+      timers.forEach((timer) => clearTimeout(timer))
+      timers.clear()
+      statusListeners.forEach((listener) => listener({ kind: 'disconnected', reason: 'test disconnect' }))
+    },
+    destroy() {
+      timers.forEach((timer) => clearTimeout(timer))
+      timers.clear()
+    },
+    async send(message) {
+      sentMessages.push(message)
+    }
+  }
+}
+
+function createEchoSession(initialParameters, shouldDropWrite, shouldThrowSend = () => false) {
   const statusListeners = []
   const messageListeners = []
   const parameters = { ...initialParameters }
@@ -323,6 +543,10 @@ function createEchoSession(initialParameters, shouldDropWrite) {
     },
     destroy() {},
     async send(message) {
+      if (shouldThrowSend(message)) {
+        throw new Error('simulated send failure')
+      }
+
       if (message.type === 'PARAM_REQUEST_LIST') {
         Object.entries(parameters).forEach(([paramId, paramValue], index, entries) => {
           emit({

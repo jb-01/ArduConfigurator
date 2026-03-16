@@ -7,12 +7,26 @@ export interface NativeSerialTransportOptions {
   baudRate: number
 }
 
+export interface NativeSerialTransportDependencies {
+  createPort?: (options: NativeSerialTransportOptions & { autoOpen: false }) => NativeSerialPort
+}
+
 export interface NativeSerialPortInfo {
   path: string
   manufacturer?: string
   serialNumber?: string
   vendorId?: string
   productId?: string
+}
+
+interface NativeSerialPort {
+  readonly isOpen: boolean
+  on(event: 'data', listener: (data: Buffer) => void): unknown
+  on(event: 'error', listener: (error: Error) => void): unknown
+  on(event: 'close', listener: () => void): unknown
+  open(callback: (error: Error | null | undefined) => void): void
+  close(callback: (error: Error | null | undefined) => void): void
+  write(data: Buffer, callback: (error: Error | null | undefined) => void): void
 }
 
 export class NativeSerialTransport implements Transport {
@@ -22,13 +36,22 @@ export class NativeSerialTransport implements Transport {
   private readonly frameListeners = new Set<FrameListener>()
   private readonly statusListeners = new Set<StatusListener>()
   private readonly options: NativeSerialTransportOptions
+  private readonly createPort: (options: NativeSerialTransportOptions & { autoOpen: false }) => NativeSerialPort
 
   private status: TransportStatus = { kind: 'idle' }
-  private port?: SerialPort
+  private port?: NativeSerialPort
 
-  constructor(id: string, options: NativeSerialTransportOptions) {
+  constructor(id: string, options: NativeSerialTransportOptions, dependencies: NativeSerialTransportDependencies = {}) {
     this.id = id
     this.options = options
+    this.createPort =
+      dependencies.createPort ??
+      ((serialOptions) =>
+        new SerialPort({
+          path: serialOptions.path,
+          baudRate: serialOptions.baudRate,
+          autoOpen: serialOptions.autoOpen
+        }))
   }
 
   static async listPorts(): Promise<NativeSerialPortInfo[]> {
@@ -53,21 +76,29 @@ export class NativeSerialTransport implements Transport {
 
     this.updateStatus({ kind: 'connecting' })
 
-    const port = new SerialPort({
-      path: this.options.path,
-      baudRate: this.options.baudRate,
-      autoOpen: false
-    })
-
-    await new Promise<void>((resolve, reject) => {
-      port.open((error) => {
-        if (error) {
-          reject(error)
-          return
-        }
-        resolve()
+    let port: NativeSerialPort
+    try {
+      port = this.createPort({
+        path: this.options.path,
+        baudRate: this.options.baudRate,
+        autoOpen: false
       })
-    })
+
+      await new Promise<void>((resolve, reject) => {
+        port.open((error) => {
+          if (error) {
+            reject(error)
+            return
+          }
+          resolve()
+        })
+      })
+    } catch (error) {
+      this.port = undefined
+      const message = error instanceof Error ? error.message : 'Unknown native serial error.'
+      this.updateStatus({ kind: 'error', message })
+      throw error instanceof Error ? error : new Error(message)
+    }
 
     port.on('data', (data: Buffer) => {
       this.frameListeners.forEach((listener) => listener(new Uint8Array(data)))

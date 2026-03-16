@@ -13,6 +13,8 @@ import {
   parseRecordedSession,
   serializeRecordedSession
 } from '../packages/transport/dist/index.js'
+import { NativeSerialTransport } from '../apps/desktop/dist/native-serial-transport.js'
+import { createDesktopWebPreferences } from '../apps/desktop/dist/electron-window-options.js'
 import { startWebSocketBridgeServer } from '../apps/desktop/dist/websocket-bridge-server.js'
 
 test('WebSocketTransport connects, relays frames, and disconnects with an injected socket', async () => {
@@ -76,12 +78,74 @@ test('ReplayTransport replays inbound frames and validates strict outbound frame
 
   await transport.connect()
   await transport.send(outboundA)
+  await wait(20)
   await transport.send(outboundB)
   await wait(20)
   await transport.disconnect()
 
   assert.deepEqual(receivedFrames, [[10, 11, 12], [13, 14, 15]])
   assert.deepEqual(statuses, ['idle', 'connecting', 'connected', 'disconnected'])
+})
+
+test('ReplayTransport strict mode gates inbound frames behind matched outbound steps', async () => {
+  const outboundA = new Uint8Array([1, 2, 3])
+  const outboundB = new Uint8Array([4, 5, 6])
+  const inboundA = new Uint8Array([10, 11, 12])
+  const inboundB = new Uint8Array([13, 14, 15])
+
+  const transport = new ReplayTransport('strict-gated-replay', {
+    session: createRecordedSession('strict gated replay', [
+      createRecordedSessionEvent(outboundA, 'out', 0),
+      createRecordedSessionEvent(inboundA, 'in', 5),
+      createRecordedSessionEvent(outboundB, 'out', 10),
+      createRecordedSessionEvent(inboundB, 'in', 15)
+    ]),
+    strictOutbound: true,
+    speedMultiplier: 50
+  })
+
+  const receivedFrames = []
+  transport.onFrame((frame) => {
+    receivedFrames.push([...frame])
+  })
+
+  await transport.connect()
+  await wait(20)
+  assert.deepEqual(receivedFrames, [])
+
+  await transport.send(outboundA)
+  await wait(20)
+  assert.deepEqual(receivedFrames, [[10, 11, 12]])
+
+  await transport.send(outboundB)
+  await wait(20)
+  assert.deepEqual(receivedFrames, [[10, 11, 12], [13, 14, 15]])
+  await transport.disconnect()
+})
+
+test('ReplayTransport strict mode fails disconnect when required outbound frames were never emitted', async () => {
+  const outboundA = new Uint8Array([1, 2, 3])
+  const inboundA = new Uint8Array([10, 11, 12])
+  const transport = new ReplayTransport('strict-missing-outbound', {
+    session: createRecordedSession('strict missing outbound', [
+      createRecordedSessionEvent(outboundA, 'out', 0),
+      createRecordedSessionEvent(inboundA, 'in', 5)
+    ]),
+    strictOutbound: true,
+    speedMultiplier: 50
+  })
+
+  const statuses = []
+  transport.onStatus((status) => {
+    statuses.push(status.kind)
+  })
+
+  await transport.connect()
+  await assert.rejects(
+    () => transport.disconnect(),
+    /ended before 1 required outbound frame was emitted/i
+  )
+  assert.deepEqual(statuses, ['idle', 'connecting', 'connected', 'error'])
 })
 
 test('ReplayTransport can drive runtime heartbeat and parameter sync from a recorded session', async () => {
@@ -245,6 +309,41 @@ test('Bundled WebSocket bridge can drive runtime heartbeat and parameter sync fr
   }
 })
 
+test('NativeSerialTransport surfaces an error status when opening the port fails', async () => {
+  const statuses = []
+  const transport = new NativeSerialTransport(
+    'failing-native-serial',
+    {
+      path: '/dev/tty.invalid',
+      baudRate: 115200
+    },
+    {
+      createPort: () => new FailingNativeSerialPort(new Error('Permission denied'))
+    }
+  )
+
+  transport.onStatus((status) => {
+    statuses.push(status)
+  })
+
+  await assert.rejects(() => transport.connect(), /Permission denied/)
+  assert.deepEqual(statuses, [
+    { kind: 'idle' },
+    { kind: 'connecting' },
+    { kind: 'error', message: 'Permission denied' }
+  ])
+  assert.deepEqual(transport.getStatus(), { kind: 'error', message: 'Permission denied' })
+})
+
+test('Desktop Electron web preferences keep the renderer sandbox enabled', () => {
+  const webPreferences = createDesktopWebPreferences('/tmp/arduconfig-preload.js')
+
+  assert.equal(webPreferences.contextIsolation, true)
+  assert.equal(webPreferences.nodeIntegration, false)
+  assert.equal(webPreferences.sandbox, true)
+  assert.equal(webPreferences.preload, '/tmp/arduconfig-preload.js')
+})
+
 class FakeWebSocket {
   binaryType = 'blob'
   readyState = 0
@@ -280,6 +379,29 @@ class FakeWebSocket {
 
   emitMessage(data) {
     this.#listeners.message.forEach((listener) => listener({ type: 'message', data }))
+  }
+}
+
+class FailingNativeSerialPort {
+  constructor(error) {
+    this.error = error
+    this.isOpen = false
+  }
+
+  on() {
+    return this
+  }
+
+  open(callback) {
+    callback(this.error)
+  }
+
+  close(callback) {
+    callback(undefined)
+  }
+
+  write(_data, callback) {
+    callback(undefined)
   }
 }
 
