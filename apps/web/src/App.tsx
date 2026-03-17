@@ -963,6 +963,31 @@ function connectButtonLabel(snapshot: ConfiguratorSnapshot, parameterFollowUp: P
   return 'Connect'
 }
 
+function describeConnectFailure(
+  transportMode: TransportMode,
+  connection: ConfiguratorSnapshot['connection'],
+  error: unknown
+): string {
+  const message =
+    connection.kind === 'error'
+      ? connection.message
+      : error instanceof Error
+        ? error.message
+        : 'Unknown connection error.'
+
+  if (message.includes('Timed out waiting for vehicle heartbeat')) {
+    return transportMode === 'web-serial'
+      ? 'The serial link opened, but no ArduPilot heartbeat arrived in time. Re-select the flight controller port, close any other serial app using it, and try again.'
+      : 'The link opened, but no ArduPilot heartbeat arrived in time. Confirm the selected transport is pointed at a live flight controller and try again.'
+  }
+
+  if (transportMode === 'web-serial') {
+    return `${message} If the flight controller is already plugged in, close any other app using the serial port and reconnect.`
+  }
+
+  return message
+}
+
 function isExpertOnlyView(viewId: AppViewId): boolean {
   return viewId === 'parameters'
 }
@@ -1642,6 +1667,7 @@ export function App() {
       : undefined
   )
   const [presetNotice, setPresetNotice] = useState<ParameterNotice>()
+  const [sessionNotice, setSessionNotice] = useState<ParameterNotice>()
   const [parameterFollowUp, setParameterFollowUp] = useState<ParameterFollowUp>()
   const [busyAction, setBusyAction] = useState<string>()
   const [orientationExercise, setOrientationExercise] = useState<OrientationExerciseState>(createIdleOrientationExerciseState)
@@ -1761,16 +1787,49 @@ export function App() {
     const unsubscribe = runtime.subscribe(setSnapshot)
     return () => {
       unsubscribe()
-      runtime.destroy()
+      void runtime.disconnect().catch(() => {}).finally(() => {
+        runtime.destroy()
+      })
+    }
+  }, [runtime])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+
+    const handlePageHide = () => {
+      void runtime.disconnect().catch(() => {})
+    }
+
+    window.addEventListener('pagehide', handlePageHide)
+    return () => {
+      window.removeEventListener('pagehide', handlePageHide)
     }
   }, [runtime])
 
   useEffect(() => {
     setParameterNotice(undefined)
     setPresetNotice(undefined)
+    setSessionNotice(undefined)
     setParameterFollowUp(undefined)
     setSetupConfirmations({})
   }, [runtime])
+
+  useEffect(() => {
+    if (snapshot.connection.kind === 'connected' && snapshot.vehicle !== undefined) {
+      setSessionNotice(undefined)
+    }
+  }, [snapshot.connection.kind, snapshot.vehicle])
+
+  useEffect(() => {
+    if (snapshot.connection.kind === 'error') {
+      setSessionNotice({
+        tone: 'danger',
+        text: snapshot.connection.message
+      })
+    }
+  }, [snapshot.connection])
 
   useEffect(() => {
     runtime.setSessionProfile(sessionProfile)
@@ -2521,11 +2580,21 @@ export function App() {
   async function handleConnect(): Promise<void> {
     setBusyAction('connect')
     try {
+      setSessionNotice(undefined)
       await runtime.connect()
       await runtime.requestParameterList()
       if (parameterFollowUp?.refreshRequired) {
         await runtime.waitForParameterSync()
         setParameterFollowUp(undefined)
+      }
+    } catch (error) {
+      const currentSnapshot = runtime.getSnapshot()
+      setSessionNotice({
+        tone: 'danger',
+        text: describeConnectFailure(transportMode, currentSnapshot.connection, error)
+      })
+      if (currentSnapshot.connection.kind === 'connected' && currentSnapshot.vehicle === undefined) {
+        await runtime.disconnect().catch(() => {})
       }
     } finally {
       setBusyAction(undefined)
@@ -2535,6 +2604,7 @@ export function App() {
   async function handleDisconnect(): Promise<void> {
     setBusyAction('disconnect')
     try {
+      setSessionNotice(undefined)
       await runtime.disconnect()
     } finally {
       setBusyAction(undefined)
@@ -5129,6 +5199,15 @@ export function App() {
               <div className="sync-meter" aria-hidden="true" style={{ margin: '0 4px' }}>
                 <div className="sync-meter__fill" style={{ width: `${parameterSyncWidth}%` }} />
               </div>
+              {sessionNotice ? (
+                <div className="session-follow-up session-follow-up--error" data-testid="session-connection-notice">
+                  <div className="session-follow-up__header">
+                    <strong>Connection issue</strong>
+                    <StatusBadge tone={sessionNotice.tone}>{sessionNotice.tone}</StatusBadge>
+                  </div>
+                  <p>{sessionNotice.text}</p>
+                </div>
+              ) : null}
               {parameterFollowUp ? (
                 <div className="session-follow-up">
                   <div className="session-follow-up__header">

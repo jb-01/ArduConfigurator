@@ -9,6 +9,22 @@ The project is aiming at the same category as `app.betaflight.com`, but for Ardu
 - safe configuration workflows
 - narrow, curated tuning instead of a raw-parameter-first experience
 
+## How This Differs
+
+ArduPilot already has adjacent configurator efforts, including:
+
+- the older [`ArduPilot/ArduConfigurator`](https://github.com/ArduPilot/ArduConfigurator)
+- the step-driven [`ArduPilot/MethodicConfigurator`](https://github.com/ArduPilot/MethodicConfigurator)
+
+This repository is not pretending those efforts do not exist. The goal here is different:
+
+- a browser-first product, rather than a Chrome-app-era or desktop-first toolchain
+- a reusable backend split across transport, MAVLink/session, runtime, and metadata packages that can be reused by future tools
+- an FPV-first configuration experience for ArduCopter-style hobby aircraft, especially the Betaflight-adjacent setup/configuration workflow
+- stronger emphasis on verified writes, snapshots, guarded actions, and recoverability
+
+This project is not trying to become a general-purpose GCS. The focus is a modern configuration app that makes ArduPilot more approachable for small multirotors while keeping the underlying runtime portable to future web tools or other ground-control surfaces.
+
 ## Current State
 
 The repository is beyond prototype stage, but not finished.

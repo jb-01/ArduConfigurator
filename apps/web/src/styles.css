@@ -609,6 +609,15 @@ textarea:focus {
   background: rgba(201, 164, 94, 0.06);
 }
 
+.session-follow-up--error {
+  border-color: rgba(188, 92, 88, 0.34);
+  background: rgba(188, 92, 88, 0.08);
+}
+
+.session-follow-up--error .session-follow-up__header strong {
+  color: var(--danger);
+}
+
 .session-follow-up__header {
   display: flex;
   justify-content: space-between;

@@ -29,6 +29,7 @@ export class WebSerialTransport implements Transport {
   private port?: WebSerialPortLike
   private reader?: ReadableStreamDefaultReader<Uint8Array>
   private writer?: WritableStreamDefaultWriter<Uint8Array>
+  private intentionalDisconnect = false
 
   constructor(id = 'web-serial', options: WebSerialTransportOptions) {
     this.id = id
@@ -51,36 +52,55 @@ export class WebSerialTransport implements Transport {
 
     const serial = getSerialNavigator()
     if (!this.port && !serial) {
-      this.updateStatus({ kind: 'error', message: 'Web Serial is not available in this browser.' })
-      return
+      const error = new Error('Web Serial is not available in this browser.')
+      this.updateStatus({ kind: 'error', message: error.message })
+      throw error
     }
 
     this.updateStatus({ kind: 'connecting' })
+    this.intentionalDisconnect = false
 
-    this.port = this.port ?? (await serial!.requestPort())
-    await this.port.open({
-      baudRate: this.options.baudRate,
-      bufferSize: this.options.bufferSize
-    })
+    let openedPort = false
+    try {
+      this.port = this.port ?? (await serial!.requestPort())
+      await this.port.open({
+        baudRate: this.options.baudRate,
+        bufferSize: this.options.bufferSize
+      })
+      openedPort = true
 
-    if (!this.port.readable || !this.port.writable) {
-      this.updateStatus({ kind: 'error', message: 'Selected serial port does not expose readable/writable streams.' })
-      return
+      if (!this.port.readable || !this.port.writable) {
+        throw new Error('Selected serial port does not expose readable/writable streams.')
+      }
+
+      this.reader = this.port.readable.getReader()
+      this.writer = this.port.writable.getWriter()
+      this.updateStatus({ kind: 'connected' })
+      void this.readLoop()
+    } catch (error) {
+      this.reader?.releaseLock()
+      this.writer?.releaseLock()
+      this.reader = undefined
+      this.writer = undefined
+
+      if (openedPort) {
+        await this.port?.close().catch(() => {})
+      }
+
+      const message = error instanceof Error ? error.message : 'Unknown Web Serial error.'
+      this.updateStatus({ kind: 'error', message })
+      throw error instanceof Error ? error : new Error(message)
     }
-
-    this.reader = this.port.readable.getReader()
-    this.writer = this.port.writable.getWriter()
-    this.updateStatus({ kind: 'connected' })
-    void this.readLoop()
   }
 
   async disconnect(): Promise<void> {
-    await this.reader?.cancel()
+    this.intentionalDisconnect = true
+    await this.reader?.cancel().catch(() => {})
     this.reader?.releaseLock()
     this.writer?.releaseLock()
     this.reader = undefined
     this.writer = undefined
-    await this.port?.close()
+    await this.port?.close().catch(() => {})
     this.updateStatus({ kind: 'disconnected', reason: 'Serial port closed.' })
   }
 
@@ -108,8 +128,8 @@ export class WebSerialTransport implements Transport {
   }
 
   private async readLoop(): Promise<void> {
-    try {
-      while (this.reader) {
+    while (this.reader) {
+      try {
         const { value, done } = await this.reader.read()
         if (done) {
           break
@@ -119,16 +139,28 @@ export class WebSerialTransport implements Transport {
         }
 
         this.frameListeners.forEach((listener) => listener(value))
-      }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown Web Serial error.'
+        if (this.intentionalDisconnect) {
+          break
+        }
 
-      if (this.status.kind === 'connected') {
-        this.updateStatus({ kind: 'disconnected', reason: 'Serial read loop ended.' })
+        if (isRecoverableWebSerialReadError(message) && this.port?.readable) {
+          this.reader?.releaseLock()
+          this.reader = this.port.readable.getReader()
+          continue
+        }
+
+        this.updateStatus({
+          kind: 'error',
+          message
+        })
+        return
       }
-    } catch (error) {
-      this.updateStatus({
-        kind: 'error',
-        message: error instanceof Error ? error.message : 'Unknown Web Serial error.'
-      })
+    }
+
+    if (!this.intentionalDisconnect && this.status.kind === 'connected') {
+      this.updateStatus({ kind: 'disconnected', reason: 'Serial read loop ended.' })
     }
   }
 
@@ -141,4 +173,9 @@ export class WebSerialTransport implements Transport {
 function getSerialNavigator(): WebSerialNavigatorLike | undefined {
   const candidate = navigator as Navigator & { serial?: WebSerialNavigatorLike }
   return candidate.serial
+}
+
+function isRecoverableWebSerialReadError(message: string): boolean {
+  const normalized = message.toLowerCase()
+  return normalized.includes('break received')
 }

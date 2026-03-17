@@ -120,6 +120,17 @@ test.describe('browser configurator regression flows', () => {
     await expect(page.getByRole('heading', { name: 'Ports & Peripherals' })).toBeVisible()
   })
 
+  test('connection failures surface a clear session notice instead of leaving the UI idle and ambiguous', async ({ page }) => {
+    await page.goto('/')
+    await page.getByTestId('transport-mode-select').selectOption('websocket')
+    await page.getByTestId('websocket-url-input').fill('ws://127.0.0.1:1')
+    await page.getByTestId('connect-button').click()
+
+    await expect(page.getByTestId('session-connection-notice')).toBeVisible()
+    await expect(page.getByTestId('session-connection-notice')).toContainText('Failed to open WebSocket')
+    await expect(page.getByTestId('session-vehicle-name')).toHaveText('No vehicle')
+  })
+
   test('refresh-required follow-up blocks additional preset writes until parameters are pulled again', async ({ page }) => {
     await connectToVehicle(page, 'demo')
 

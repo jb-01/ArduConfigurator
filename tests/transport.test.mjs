@@ -7,6 +7,7 @@ import { MavlinkSession, MavlinkV2Codec, createArduCopterMockScenario } from '..
 import {
   MockTransport,
   ReplayTransport,
+  WebSerialTransport,
   WebSocketTransport,
   createRecordedSession,
   createRecordedSessionEvent,
@@ -45,6 +46,56 @@ test('WebSocketTransport connects, relays frames, and disconnects with an inject
   assert.deepEqual(receivedFrames, [[9, 8, 7]])
 
   await transport.disconnect()
+  assert.deepEqual(statuses, ['idle', 'connecting', 'connected', 'disconnected'])
+})
+
+test('WebSerialTransport reports an error when the selected port fails to open', async () => {
+  const failingPort = {
+    readable: {},
+    writable: {},
+    async open() {
+      throw new Error('The port is already open.')
+    },
+    async close() {}
+  }
+  const transport = new WebSerialTransport('test-web-serial', {
+    baudRate: 115200,
+    port: failingPort
+  })
+
+  const statuses = []
+  transport.onStatus((status) => {
+    statuses.push(status.kind)
+  })
+
+  await assert.rejects(() => transport.connect(), /already open/i)
+  assert.deepEqual(statuses, ['idle', 'connecting', 'error'])
+  assert.deepEqual(transport.getStatus(), { kind: 'error', message: 'The port is already open.' })
+})
+
+test('WebSerialTransport recovers from a transient break during read instead of erroring the session', async () => {
+  const receivedFrames = []
+  const statuses = []
+  const transport = new WebSerialTransport('recovering-web-serial', {
+    baudRate: 115200,
+    port: new RecoveringWebSerialPort([
+      { type: 'throw', error: new Error('Break received') },
+      { type: 'value', value: new Uint8Array([9, 8, 7]) },
+      { type: 'done' }
+    ])
+  })
+
+  transport.onStatus((status) => {
+    statuses.push(status.kind)
+  })
+  transport.onFrame((frame) => {
+    receivedFrames.push([...frame])
+  })
+
+  await transport.connect()
+  await wait(20)
+
+  assert.deepEqual(receivedFrames, [[9, 8, 7]])
   assert.deepEqual(statuses, ['idle', 'connecting', 'connected', 'disconnected'])
 })
 
@@ -403,6 +454,46 @@ class FailingNativeSerialPort {
   write(_data, callback) {
     callback(undefined)
   }
+}
+
+class RecoveringWebSerialPort {
+  constructor(steps) {
+    this.steps = steps
+    this.readable = {
+      getReader: () => new RecoveringWebSerialReader(this.steps)
+    }
+    this.writable = {
+      getWriter: () => ({
+        releaseLock() {},
+        async write() {}
+      })
+    }
+  }
+
+  async open() {}
+
+  async close() {}
+}
+
+class RecoveringWebSerialReader {
+  constructor(steps) {
+    this.steps = steps
+  }
+
+  async read() {
+    const step = this.steps.shift() ?? { type: 'done' }
+    if (step.type === 'throw') {
+      throw step.error
+    }
+    if (step.type === 'done') {
+      return { value: undefined, done: true }
+    }
+    return { value: step.value, done: false }
+  }
+
+  async cancel() {}
+
+  releaseLock() {}
 }
 
 function wait(durationMs) {
