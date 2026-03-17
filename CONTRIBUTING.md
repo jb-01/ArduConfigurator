@@ -52,6 +52,11 @@ Use the lowest-risk validation path that can prove your change:
 
 Use the repo validation ladder directly: `typecheck`, `test`, `test:sitl` when relevant, then a short live-FC pass for hardware-facing changes.
 
+For accelerometer-calibration changes specifically:
+
+- cover both explicit completion-signal handling and the final-pose fallback path in runtime tests
+- confirm live-FC behavior for first-pose advance and end-of-flow completion when that workflow is touched
+
 ## Live Hardware Safety
 
 - Remove props before any motor/output test.
@@ -66,6 +71,7 @@ Use the repo validation ladder directly: `typecheck`, `test`, `test:sitl` when r
 - Preserve the separation between transport, MAVLink/session, runtime behavior, and UI.
 - Add tests for transport/runtime logic when behavior changes.
 - Keep README / CONTRIBUTING / ARCHITECTURE aligned when major contributor-facing workflow changes land.
+- Keep third-party UI assets attributed and license-compatible when reusing reference visuals such as pose diagrams.
 
 ## Pull Requests
 

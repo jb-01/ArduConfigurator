@@ -36,7 +36,9 @@ What is already real:
 - a thin Electron desktop shell that hosts the same web app over localhost, including native snapshot-library open/save/export dialogs inside the shared `Snapshots` view
 - real MAVLink v2 framing/parsing
 - shared runtime for sync, writes, guided setup, snapshots, and presets
+- guided setup now includes in-flow orientation checks, motor verification, and accelerometer calibration posture guidance instead of forcing users to hunt through the workbench manually
 - live FC validation in the browser for `Ports`, `Receiver`, `Outputs`, `Snapshots`, `Presets`, and guarded motor test
+- live FC validation for accelerometer calibration startup and first-pose progression, with QGroundControl-derived posture reference images in the web UI
 - automated mock, replay-session, and true SITL validation paths
 
 What is still missing:

@@ -17,7 +17,7 @@ import {
 } from '../packages/ardupilot-core/dist/index.js'
 import { createMockSITL } from '../packages/mock-sitl/dist/index.js'
 import { arducopterMetadata } from '../packages/param-metadata/dist/index.js'
-import { MAV_AUTOPILOT, MAV_CMD, MAV_TYPE, MAVLINK_MESSAGE_IDS } from '../packages/protocol-mavlink/dist/index.js'
+import { MAV_AUTOPILOT, MAV_CMD, MAV_RESULT, MAV_TYPE, MAVLINK_MESSAGE_IDS } from '../packages/protocol-mavlink/dist/index.js'
 
 test('mock SITL connects and syncs a full parameter table', async () => {
   const sitl = createMockSITL()
@@ -79,6 +79,42 @@ test('verified parameter writes resolve on PARAM_VALUE readback', async () => {
   } finally {
     await sitl.disconnect().catch(() => {})
     sitl.destroy()
+  }
+})
+
+test('parameter sync retries when the initial stream stalls before the full table arrives', async () => {
+  const sentMessages = []
+  const runtime = new ArduPilotConfiguratorRuntime(
+    createStalledParamSession(
+      {
+        FLTMODE1: 0,
+        FLTMODE2: 1,
+        FRAME_CLASS: 1,
+        FRAME_TYPE: 1
+      },
+      sentMessages
+    ),
+    arducopterMetadata
+  )
+
+  try {
+    await runtime.connect()
+    await runtime.requestParameterList({ timeoutMs: 200 })
+    const stats = await runtime.waitForParameterSync({ timeoutMs: 4000 })
+
+    assert.equal(stats.status, 'complete')
+    assert.equal(stats.downloaded, 4)
+    assert.equal(
+      sentMessages.filter((message) => message.type === 'PARAM_REQUEST_LIST').length,
+      2
+    )
+    assert.match(
+      runtime.getSnapshot().statusTexts.map((entry) => entry.text).join('\n'),
+      /Re-requesting the table/
+    )
+  } finally {
+    await runtime.disconnect().catch(() => {})
+    runtime.destroy()
   }
 })
 
@@ -301,6 +337,177 @@ test('guided accelerometer flow completes through mock status text feedback', as
   } finally {
     await sitl.disconnect().catch(() => {})
     sitl.destroy()
+  }
+})
+
+test('guided accelerometer flow also completes when the autopilot emits a generic calibration successful status text', async () => {
+  const runtime = new ArduPilotConfiguratorRuntime(createGuidedActionStatusSession('Calibration successful'), arducopterMetadata)
+
+  try {
+    await runtime.connect()
+    await runtime.requestParameterList({ timeoutMs: 200 })
+    await runtime.waitForParameterSync({ timeoutMs: 200 })
+
+    await runtime.runGuidedAction('calibrate-accelerometer')
+    await waitFor(
+      () => runtime.getSnapshot().guidedActions['calibrate-accelerometer'].status === 'succeeded',
+      1000
+    )
+
+    const action = runtime.getSnapshot().guidedActions['calibrate-accelerometer']
+    assert.equal(action.status, 'succeeded')
+    assert.equal(action.summary, 'Accelerometer calibration complete.')
+    assert.ok(action.statusTexts.some((text) => text.includes('Calibration successful')))
+  } finally {
+    await runtime.disconnect().catch(() => {})
+    runtime.destroy()
+  }
+})
+
+test('guided accelerometer flow completes on a bare successful status text while active', async () => {
+  const runtime = new ArduPilotConfiguratorRuntime(createGuidedActionStatusSession('Successful'), arducopterMetadata)
+
+  try {
+    await runtime.connect()
+    await runtime.requestParameterList({ timeoutMs: 200 })
+    await runtime.waitForParameterSync({ timeoutMs: 200 })
+
+    await runtime.runGuidedAction('calibrate-accelerometer')
+    await waitFor(
+      () => runtime.getSnapshot().guidedActions['calibrate-accelerometer'].status === 'succeeded',
+      1000
+    )
+
+    const action = runtime.getSnapshot().guidedActions['calibrate-accelerometer']
+    assert.equal(action.status, 'succeeded')
+    assert.equal(action.summary, 'Accelerometer calibration complete.')
+    assert.ok(action.statusTexts.some((text) => text.includes('Successful')))
+  } finally {
+    await runtime.disconnect().catch(() => {})
+    runtime.destroy()
+  }
+})
+
+test('guided accelerometer flow exposes posture confirmation steps after the calibration command is accepted', async () => {
+  const { session, sentMessages } = createAccelerometerHandshakeSession()
+  const runtime = new ArduPilotConfiguratorRuntime(session, arducopterMetadata, {
+    accelerometerInitialWarmupMs: 20,
+    accelerometerStepAdvanceMs: 20
+  })
+
+  try {
+    await runtime.connect()
+    await runtime.requestParameterList({ timeoutMs: 200 })
+    await runtime.waitForParameterSync({ timeoutMs: 200 })
+
+    await runtime.runGuidedAction('calibrate-accelerometer')
+    let action = runtime.getSnapshot().guidedActions['calibrate-accelerometer']
+    assert.equal(action.status, 'running')
+    await waitFor(() => runtime.getSnapshot().guidedActions['calibrate-accelerometer'].ctaLabel === 'Confirm Level Position', 200)
+    action = runtime.getSnapshot().guidedActions['calibrate-accelerometer']
+    assert.equal(action.ctaLabel, 'Confirm Level Position')
+    assert.equal(action.summary, 'Place the vehicle level and keep it still.')
+
+    await runtime.runGuidedAction('calibrate-accelerometer')
+    await waitFor(
+      () => runtime.getSnapshot().guidedActions['calibrate-accelerometer'].status === 'succeeded',
+      1500
+    )
+
+    action = runtime.getSnapshot().guidedActions['calibrate-accelerometer']
+    assert.equal(action.status, 'succeeded')
+    assert.equal(action.summary, 'Accelerometer calibration complete.')
+    assert.ok(
+      sentMessages.some(
+        (message) => message.type === 'COMMAND_ACK' && message.command === 0 && message.result === MAV_RESULT.TEMPORARILY_REJECTED
+      )
+    )
+  } finally {
+    await runtime.disconnect().catch(() => {})
+    runtime.destroy()
+  }
+})
+
+test('guided accelerometer flow falls back to the first posture prompt when no accel prompt arrives from the FC', async () => {
+  const runtime = new ArduPilotConfiguratorRuntime(createAccelerometerPromptlessHandshakeSession(), arducopterMetadata, {
+    accelerometerInitialWarmupMs: 50
+  })
+
+  try {
+    await runtime.connect()
+    await runtime.requestParameterList({ timeoutMs: 200 })
+    await runtime.waitForParameterSync({ timeoutMs: 200 })
+
+    await runtime.runGuidedAction('calibrate-accelerometer')
+    await waitFor(() => runtime.getSnapshot().guidedActions['calibrate-accelerometer'].ctaLabel === 'Confirm Level Position', 250)
+
+    const action = runtime.getSnapshot().guidedActions['calibrate-accelerometer']
+    assert.equal(action.status, 'running')
+    assert.equal(action.ctaLabel, 'Confirm Level Position')
+    assert.equal(action.summary, 'Place the vehicle level and keep it still.')
+  } finally {
+    await runtime.disconnect().catch(() => {})
+    runtime.destroy()
+  }
+})
+
+test('guided accelerometer flow completes after the final pose even when the FC does not emit an explicit completion message', async () => {
+  const runtime = new ArduPilotConfiguratorRuntime(createAccelerometerPromptlessHandshakeSession(), arducopterMetadata, {
+    accelerometerInitialWarmupMs: 10,
+    accelerometerStepAdvanceMs: 10,
+    accelerometerCompletionFallbackMs: 20
+  })
+
+  try {
+    await runtime.connect()
+    await runtime.requestParameterList({ timeoutMs: 200 })
+    await runtime.waitForParameterSync({ timeoutMs: 200 })
+
+    await runtime.runGuidedAction('calibrate-accelerometer')
+    for (let index = 0; index < 6; index += 1) {
+      await waitFor(
+        () => runtime.getSnapshot().guidedActions['calibrate-accelerometer'].ctaLabel !== undefined,
+        250
+      )
+      await runtime.runGuidedAction('calibrate-accelerometer')
+    }
+
+    await waitFor(
+      () => runtime.getSnapshot().guidedActions['calibrate-accelerometer'].status === 'succeeded',
+      500
+    )
+
+    const action = runtime.getSnapshot().guidedActions['calibrate-accelerometer']
+    assert.equal(action.status, 'succeeded')
+    assert.equal(action.summary, 'Accelerometer calibration complete.')
+  } finally {
+    await runtime.disconnect().catch(() => {})
+    runtime.destroy()
+  }
+})
+
+test('guided accelerometer flow fails when the autopilot reports accelerometer calibration failure after a posture confirmation', async () => {
+  const runtime = new ArduPilotConfiguratorRuntime(createFailedAccelerometerHandshakeSession(), arducopterMetadata, {
+    accelerometerInitialWarmupMs: 20,
+    accelerometerStepAdvanceMs: 20
+  })
+
+  try {
+    await runtime.connect()
+    await runtime.requestParameterList({ timeoutMs: 200 })
+    await runtime.waitForParameterSync({ timeoutMs: 200 })
+
+    await runtime.runGuidedAction('calibrate-accelerometer')
+    await waitFor(() => runtime.getSnapshot().guidedActions['calibrate-accelerometer'].ctaLabel === 'Confirm Level Position', 200)
+    await runtime.runGuidedAction('calibrate-accelerometer')
+    await waitFor(() => runtime.getSnapshot().guidedActions['calibrate-accelerometer'].status === 'failed', 500)
+
+    const action = runtime.getSnapshot().guidedActions['calibrate-accelerometer']
+    assert.equal(action.status, 'failed')
+    assert.match(action.summary, /accelerometer calibration failed/i)
+  } finally {
+    await runtime.disconnect().catch(() => {})
+    runtime.destroy()
   }
 })
 
@@ -627,6 +834,484 @@ function createEchoSession(initialParameters, shouldDropWrite, shouldThrowSend =
           paramType: 9,
           paramCount: Object.keys(parameters).length,
           paramIndex: Object.keys(parameters).indexOf(message.paramId)
+        })
+      }
+    }
+  }
+}
+
+function createStalledParamSession(initialParameters, sentMessages) {
+  const statusListeners = []
+  const messageListeners = []
+  const parameters = { ...initialParameters }
+  let connected = false
+  let parameterRequestCount = 0
+
+  const emit = (message) => {
+    messageListeners.forEach((listener) =>
+      listener({
+        header: {
+          systemId: 1,
+          componentId: 1,
+          sequence: 0
+        },
+        message,
+        timestampMs: Date.now()
+      })
+    )
+  }
+
+  return {
+    getTransportStatus() {
+      return connected ? { kind: 'connected' } : { kind: 'disconnected' }
+    },
+    onStatus(listener) {
+      statusListeners.push(listener)
+      return () => {}
+    },
+    onMessage(listener) {
+      messageListeners.push(listener)
+      return () => {}
+    },
+    async connect() {
+      connected = true
+      statusListeners.forEach((listener) => listener({ kind: 'connected' }))
+      emit({
+        type: 'HEARTBEAT',
+        autopilot: 3,
+        vehicleType: 2,
+        baseMode: 0,
+        customMode: 0,
+        systemStatus: 4,
+        mavlinkVersion: 3
+      })
+    },
+    async disconnect() {
+      connected = false
+      statusListeners.forEach((listener) => listener({ kind: 'disconnected', reason: 'test disconnect' }))
+    },
+    destroy() {},
+    async send(message) {
+      sentMessages.push(message)
+
+      if (message.type !== 'PARAM_REQUEST_LIST') {
+        return
+      }
+
+      parameterRequestCount += 1
+      const entries = Object.entries(parameters)
+      const visibleEntries =
+        parameterRequestCount === 1
+          ? entries.slice(0, Math.max(entries.length - 1, 1))
+          : entries
+
+      visibleEntries.forEach(([paramId, paramValue]) => {
+        emit({
+          type: 'PARAM_VALUE',
+          paramId,
+          paramValue,
+          paramType: 9,
+          paramCount: entries.length,
+          paramIndex: entries.findIndex(([candidateParamId]) => candidateParamId === paramId)
+        })
+      })
+    }
+  }
+}
+
+function createGuidedActionStatusSession(statusText) {
+  const statusListeners = []
+  const messageListeners = []
+  const parameters = {
+    FRAME_CLASS: 1,
+    FRAME_TYPE: 1,
+    AHRS_ORIENTATION: 0,
+    FLTMODE1: 0
+  }
+  let connected = false
+
+  const emit = (message) => {
+    messageListeners.forEach((listener) =>
+      listener({
+        header: {
+          systemId: 1,
+          componentId: 1,
+          sequence: 0
+        },
+        message,
+        timestampMs: Date.now()
+      })
+    )
+  }
+
+  return {
+    getTransportStatus() {
+      return connected ? { kind: 'connected' } : { kind: 'disconnected' }
+    },
+    onStatus(listener) {
+      statusListeners.push(listener)
+      return () => {}
+    },
+    onMessage(listener) {
+      messageListeners.push(listener)
+      return () => {}
+    },
+    async connect() {
+      connected = true
+      statusListeners.forEach((listener) => listener({ kind: 'connected' }))
+      emit({
+        type: 'HEARTBEAT',
+        autopilot: 3,
+        vehicleType: 2,
+        baseMode: 0,
+        customMode: 0,
+        systemStatus: 4,
+        mavlinkVersion: 3
+      })
+    },
+    async disconnect() {
+      connected = false
+      statusListeners.forEach((listener) => listener({ kind: 'disconnected', reason: 'test disconnect' }))
+    },
+    destroy() {},
+    async send(message) {
+      if (message.type === 'PARAM_REQUEST_LIST') {
+        Object.entries(parameters).forEach(([paramId, paramValue], index, entries) => {
+          emit({
+            type: 'PARAM_VALUE',
+            paramId,
+            paramValue,
+            paramType: 9,
+            paramCount: entries.length,
+            paramIndex: index
+          })
+        })
+        return
+      }
+
+      if (message.type === 'COMMAND_LONG' && message.command === MAV_CMD.PREFLIGHT_CALIBRATION) {
+        emit({
+          type: 'COMMAND_ACK',
+          command: MAV_CMD.PREFLIGHT_CALIBRATION,
+          result: MAV_RESULT.ACCEPTED,
+          progress: 0,
+          resultParam2: 0,
+          targetSystem: 255,
+          targetComponent: 190
+        })
+        emit({
+          type: 'STATUSTEXT',
+          severity: 6,
+          text: 'Accelerometer calibration started.',
+          statusId: 0,
+          chunkSequence: 0
+        })
+        setTimeout(() => {
+          emit({
+            type: 'STATUSTEXT',
+            severity: 6,
+            text: statusText,
+            statusId: 0,
+            chunkSequence: 0
+          })
+        }, 10)
+      }
+    }
+  }
+}
+
+function createAccelerometerHandshakeSession() {
+  const statusListeners = []
+  const messageListeners = []
+  const sentMessages = []
+  const parameters = {
+    FRAME_CLASS: 1,
+    FRAME_TYPE: 1,
+    AHRS_ORIENTATION: 0,
+    FLTMODE1: 0
+  }
+  let connected = false
+
+  const emit = (message) => {
+    messageListeners.forEach((listener) =>
+      listener({
+        header: {
+          systemId: 1,
+          componentId: 1,
+          sequence: 0
+        },
+        message,
+        timestampMs: Date.now()
+      })
+    )
+  }
+
+  return {
+    sentMessages,
+    session: {
+      getTransportStatus() {
+        return connected ? { kind: 'connected' } : { kind: 'disconnected' }
+      },
+      onStatus(listener) {
+        statusListeners.push(listener)
+        return () => {}
+      },
+      onMessage(listener) {
+        messageListeners.push(listener)
+        return () => {}
+      },
+      async connect() {
+        connected = true
+        statusListeners.forEach((listener) => listener({ kind: 'connected' }))
+        emit({
+          type: 'HEARTBEAT',
+          autopilot: 3,
+          vehicleType: 2,
+          baseMode: 0,
+          customMode: 0,
+          systemStatus: 4,
+          mavlinkVersion: 3
+        })
+      },
+      async disconnect() {
+        connected = false
+        statusListeners.forEach((listener) => listener({ kind: 'disconnected', reason: 'test disconnect' }))
+      },
+      destroy() {},
+      async send(message) {
+        sentMessages.push(message)
+
+        if (message.type === 'PARAM_REQUEST_LIST') {
+          Object.entries(parameters).forEach(([paramId, paramValue], index, entries) => {
+            emit({
+              type: 'PARAM_VALUE',
+              paramId,
+              paramValue,
+              paramType: 9,
+              paramCount: entries.length,
+              paramIndex: index
+            })
+          })
+          return
+        }
+
+        if (message.type === 'COMMAND_LONG' && message.command === MAV_CMD.PREFLIGHT_CALIBRATION) {
+          emit({
+            type: 'COMMAND_ACK',
+            command: MAV_CMD.PREFLIGHT_CALIBRATION,
+            result: MAV_RESULT.ACCEPTED,
+            progress: 0,
+            resultParam2: 0,
+            targetSystem: 255,
+            targetComponent: 190
+          })
+          setTimeout(() => {
+            emit({
+              type: 'COMMAND_LONG',
+              command: MAV_CMD.ACCELCAL_VEHICLE_POS,
+              targetSystem: 0,
+              targetComponent: 0,
+              confirmation: 0,
+              params: [1, 0, 0, 0, 0, 0, 0]
+            })
+          }, 10)
+          return
+        }
+
+        if (message.type === 'COMMAND_ACK' && message.command === 0 && message.result === MAV_RESULT.TEMPORARILY_REJECTED) {
+          setTimeout(() => {
+            emit({
+              type: 'STATUSTEXT',
+              severity: 6,
+              text: 'Accelerometer calibration complete.',
+              statusId: 0,
+              chunkSequence: 0
+            })
+          }, 10)
+        }
+      }
+    }
+  }
+}
+
+function createFailedAccelerometerHandshakeSession() {
+  const statusListeners = []
+  const messageListeners = []
+  const parameters = {
+    FRAME_CLASS: 1,
+    FRAME_TYPE: 1,
+    AHRS_ORIENTATION: 0,
+    FLTMODE1: 0
+  }
+  let connected = false
+
+  const emit = (message) => {
+    messageListeners.forEach((listener) =>
+      listener({
+        header: {
+          systemId: 1,
+          componentId: 1,
+          sequence: 0
+        },
+        message,
+        timestampMs: Date.now()
+      })
+    )
+  }
+
+  return {
+    getTransportStatus() {
+      return connected ? { kind: 'connected' } : { kind: 'disconnected' }
+    },
+    onStatus(listener) {
+      statusListeners.push(listener)
+      return () => {}
+    },
+    onMessage(listener) {
+      messageListeners.push(listener)
+      return () => {}
+    },
+    async connect() {
+      connected = true
+      statusListeners.forEach((listener) => listener({ kind: 'connected' }))
+      emit({
+        type: 'HEARTBEAT',
+        autopilot: 3,
+        vehicleType: 2,
+        baseMode: 0,
+        customMode: 0,
+        systemStatus: 4,
+        mavlinkVersion: 3
+      })
+    },
+    async disconnect() {
+      connected = false
+      statusListeners.forEach((listener) => listener({ kind: 'disconnected', reason: 'test disconnect' }))
+    },
+    destroy() {},
+    async send(message) {
+      if (message.type === 'PARAM_REQUEST_LIST') {
+        Object.entries(parameters).forEach(([paramId, paramValue], index, entries) => {
+          emit({
+            type: 'PARAM_VALUE',
+            paramId,
+            paramValue,
+            paramType: 9,
+            paramCount: entries.length,
+            paramIndex: index
+          })
+        })
+        return
+      }
+
+      if (message.type === 'COMMAND_LONG' && message.command === MAV_CMD.PREFLIGHT_CALIBRATION) {
+        emit({
+          type: 'COMMAND_ACK',
+          command: MAV_CMD.PREFLIGHT_CALIBRATION,
+          result: MAV_RESULT.ACCEPTED,
+          progress: 0,
+          resultParam2: 0,
+          targetSystem: 255,
+          targetComponent: 190
+        })
+        return
+      }
+
+      if (message.type === 'COMMAND_ACK' && message.command === 0 && message.result === MAV_RESULT.TEMPORARILY_REJECTED) {
+        setTimeout(() => {
+          emit({
+            type: 'COMMAND_LONG',
+            command: MAV_CMD.ACCELCAL_VEHICLE_POS,
+            targetSystem: 0,
+            targetComponent: 0,
+            confirmation: 0,
+            params: [16777216, 0, 0, 0, 0, 0, 0]
+          })
+        }, 10)
+      }
+    }
+  }
+}
+
+function createAccelerometerPromptlessHandshakeSession() {
+  const statusListeners = []
+  const messageListeners = []
+  const parameters = {
+    FRAME_CLASS: 1,
+    FRAME_TYPE: 1,
+    AHRS_ORIENTATION: 0,
+    FLTMODE1: 0
+  }
+  let connected = false
+
+  const emit = (message) => {
+    messageListeners.forEach((listener) =>
+      listener({
+        header: {
+          systemId: 1,
+          componentId: 1,
+          sequence: 0
+        },
+        message,
+        timestampMs: Date.now()
+      })
+    )
+  }
+
+  return {
+    getTransportStatus() {
+      return connected ? { kind: 'connected' } : { kind: 'disconnected' }
+    },
+    onStatus(listener) {
+      statusListeners.push(listener)
+      return () => {}
+    },
+    onMessage(listener) {
+      messageListeners.push(listener)
+      return () => {}
+    },
+    async connect() {
+      connected = true
+      statusListeners.forEach((listener) => listener({ kind: 'connected' }))
+      emit({
+        type: 'HEARTBEAT',
+        autopilot: 3,
+        vehicleType: 2,
+        baseMode: 0,
+        customMode: 0,
+        systemStatus: 4,
+        mavlinkVersion: 3
+      })
+    },
+    async disconnect() {
+      connected = false
+      statusListeners.forEach((listener) => listener({ kind: 'disconnected', reason: 'test disconnect' }))
+    },
+    destroy() {},
+    async send(message) {
+      if (message.type === 'PARAM_REQUEST_LIST') {
+        Object.entries(parameters).forEach(([paramId, paramValue], index, entries) => {
+          emit({
+            type: 'PARAM_VALUE',
+            paramId,
+            paramValue,
+            paramType: 9,
+            paramCount: entries.length,
+            paramIndex: index
+          })
+        })
+        return
+      }
+
+      if (message.type === 'COMMAND_LONG' && message.command === MAV_CMD.PREFLIGHT_CALIBRATION) {
+        emit({
+          type: 'COMMAND_ACK',
+          command: MAV_CMD.PREFLIGHT_CALIBRATION,
+          result: MAV_RESULT.ACCEPTED,
+          progress: 0,
+          resultParam2: 0,
+          targetSystem: 255,
+          targetComponent: 190
         })
       }
     }

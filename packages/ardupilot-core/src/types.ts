@@ -82,6 +82,7 @@ export interface GuidedActionState {
   summary: string
   instructions: string[]
   statusTexts: string[]
+  ctaLabel?: string
   startedAtMs?: number
   updatedAtMs?: number
   completedAtMs?: number

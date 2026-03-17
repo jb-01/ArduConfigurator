@@ -90,6 +90,7 @@ import { MockTransport, WebSerialTransport, WebSocketTransport } from '@arduconf
 import { Panel, StatusBadge, buttonStyle } from '@arduconfig/ui-kit'
 
 import { getDesktopBridge } from './desktop-bridge'
+import { AccelerometerPoseGuide, type AccelerometerPoseId } from './accelerometer-pose-guide'
 import { FlightDeckPreview } from './flight-deck-preview'
 import { LiveGpsMapCard } from './live-gps-map'
 import { RcChannelBars } from './rc-channel-bars'
@@ -339,6 +340,11 @@ interface SetupFlowActionDescriptor {
   kind:
     | 'guided'
     | 'scroll'
+    | 'orientation-exercise'
+    | 'motor-verification-start'
+    | 'motor-test-current'
+    | 'motor-verification-confirm'
+    | 'motor-verification-reset'
     | 'mode-switch-exercise'
     | 'rc-range-exercise'
     | 'rc-mapping-exercise'
@@ -349,6 +355,7 @@ interface SetupFlowActionDescriptor {
   disabled?: boolean
   actionId?: keyof typeof actionLabels
   panelId?: string
+  targetElementId?: string
   sectionId?: string
 }
 
@@ -619,6 +626,15 @@ function orientationStepInstruction(step: OrientationExerciseStepId | undefined)
   }
 }
 
+const OUTPUTS_ORIENTATION_TARGET_ID = 'outputs-orientation-check'
+const OUTPUTS_ORIENTATION_BUTTON_ID = 'outputs-orientation-start'
+const OUTPUTS_BENCH_TARGET_ID = 'outputs-bench-lab'
+const OUTPUTS_MOTOR_START_BUTTON_ID = 'outputs-motor-verification-start'
+const OUTPUTS_MOTOR_TEST_BUTTON_ID = 'outputs-motor-test-run'
+const OUTPUTS_MOTOR_CONFIRM_BUTTON_ID = 'outputs-motor-confirm'
+const SETUP_WIZARD_PRIMARY_ACTION_ID = 'setup-wizard-primary-action'
+const SETUP_WIZARD_NEXT_STEP_ID = 'setup-wizard-next-step'
+
 function orientationStepSatisfied(step: OrientationExerciseStepId, snapshot: ConfiguratorSnapshot): boolean {
   const rollDeg = snapshot.liveVerification.attitudeTelemetry.rollDeg
   const pitchDeg = snapshot.liveVerification.attitudeTelemetry.pitchDeg
@@ -769,6 +785,52 @@ function panelAnchorForSetupSection(sectionId: string): { panelId: string; panel
   }
 }
 
+function setupPanelActionForSection(
+  sectionId: string,
+  panel: { panelId: string; panelLabel: string }
+): SetupFlowActionDescriptor {
+  switch (sectionId) {
+    case 'airframe':
+      return {
+        kind: 'scroll',
+        label: 'Open Start Orientation Check',
+        panelId: panel.panelId,
+        targetElementId: OUTPUTS_ORIENTATION_BUTTON_ID
+      }
+    case 'outputs':
+      return {
+        kind: 'scroll',
+        label: 'Open Start Motor Verification',
+        panelId: panel.panelId,
+        targetElementId: OUTPUTS_MOTOR_START_BUTTON_ID
+      }
+    case 'link':
+      return {
+        kind: 'scroll',
+        label: 'Open Vehicle Link',
+        panelId: panel.panelId
+      }
+    case 'radio':
+      return {
+        kind: 'scroll',
+        label: 'Open Receiver Workbench',
+        panelId: panel.panelId
+      }
+    case 'modes':
+      return {
+        kind: 'scroll',
+        label: 'Open Mode Switch Check',
+        panelId: panel.panelId
+      }
+    default:
+      return {
+        kind: 'scroll',
+        label: `Open ${panel.panelLabel}`,
+        panelId: panel.panelId
+      }
+  }
+}
+
 function appViewForPanel(panelId: string): AppViewId {
   switch (panelId) {
     case 'setup-panel-link':
@@ -912,12 +974,16 @@ function canRunGuidedAction(snapshot: ConfiguratorSnapshot, actionId: keyof type
   }
 
   const currentAction = snapshot.guidedActions[actionId]
+  const canContinueCurrentAction =
+    actionId === 'calibrate-accelerometer' &&
+    (currentAction.status === 'requested' || currentAction.status === 'running') &&
+    currentAction.ctaLabel !== undefined
   const hasBlockingAction = Object.entries(snapshot.guidedActions).some(
     ([candidateActionId, state]) =>
       candidateActionId !== actionId && (state.status === 'requested' || state.status === 'running')
   )
 
-  if (hasBlockingAction || currentAction.status === 'requested' || currentAction.status === 'running') {
+  if (hasBlockingAction || ((currentAction.status === 'requested' || currentAction.status === 'running') && !canContinueCurrentAction)) {
     return false
   }
 
@@ -945,6 +1011,9 @@ function guidedActionButtonLabel(
   switch (state.status) {
     case 'requested':
     case 'running':
+      if (state.ctaLabel) {
+        return state.ctaLabel
+      }
       return actionId === 'request-parameters' ? 'Syncing…' : 'In Progress…'
     case 'succeeded':
       return actionId === 'request-parameters' ? 'Re-sync Parameters' : 'Run Again'
@@ -953,6 +1022,29 @@ function guidedActionButtonLabel(
     default:
       return actionLabels[actionId]
   }
+}
+
+function accelerometerPoseFromAction(snapshot: ConfiguratorSnapshot): AccelerometerPoseId {
+  const action = snapshot.guidedActions['calibrate-accelerometer']
+  const prompt = `${action.ctaLabel ?? ''} ${action.summary}`.toLowerCase()
+
+  if (prompt.includes('left')) {
+    return 'left'
+  }
+  if (prompt.includes('right')) {
+    return 'right'
+  }
+  if (prompt.includes('nose down')) {
+    return 'nose-down'
+  }
+  if (prompt.includes('nose up')) {
+    return 'nose-up'
+  }
+  if (prompt.includes('back')) {
+    return 'back'
+  }
+
+  return 'level'
 }
 
 function connectButtonLabel(snapshot: ConfiguratorSnapshot, parameterFollowUp: ParameterFollowUp | undefined): string {
@@ -1688,6 +1780,7 @@ export function App() {
   const [presetApplyAcknowledged, setPresetApplyAcknowledged] = useState(false)
   const [selectedSetupSectionId, setSelectedSetupSectionId] = useState<string>()
   const [setupMode, setSetupMode] = useState<SetupMode>('overview')
+  const [pendingSetupWizardFocusId, setPendingSetupWizardFocusId] = useState<string>()
   const [setupConfirmations, setSetupConfirmations] = useState<Record<string, SetupConfirmationRecord>>({})
   const parameterBackupInputRef = useRef<HTMLInputElement>(null)
   const snapshotImportInputRef = useRef<HTMLInputElement>(null)
@@ -2636,8 +2729,27 @@ export function App() {
     }
   }
 
-  function scrollToPanel(panelId: string): void {
+  function scrollToPanel(panelId: string, targetElementId?: string): void {
     const targetViewId = appViewForPanel(panelId)
+    const scrollTargetId = targetElementId ?? panelId
+    const performScroll = () => {
+      const target = document.getElementById(scrollTargetId)
+      if (!target) {
+        return
+      }
+
+      const headerOffset = 112
+      const targetTop = Math.max(0, window.scrollY + target.getBoundingClientRect().top - headerOffset)
+      window.scrollTo({
+        top: targetTop,
+        behavior: 'smooth'
+      })
+      window.setTimeout(() => {
+        if (target instanceof HTMLElement) {
+          target.focus({ preventScroll: true })
+        }
+      }, 240)
+    }
     if (panelId === 'setup-panel-guided') {
       setSetupMode('wizard')
     } else if (panelId === 'setup-panel-link') {
@@ -2647,20 +2759,62 @@ export function App() {
       setActiveViewId(targetViewId)
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-          document.getElementById(panelId)?.scrollIntoView({
-            behavior: 'smooth',
-            block: 'start'
-          })
+          performScroll()
         })
       })
       return
     }
 
-    document.getElementById(panelId)?.scrollIntoView({
-      behavior: 'smooth',
-      block: 'start'
+    performScroll()
+  }
+
+  function openSetupWizard(sectionId?: string, focusTargetId?: string): void {
+    if (sectionId) {
+      setSelectedSetupSectionId(sectionId)
+    } else if (recommendedSetupSection) {
+      setSelectedSetupSectionId(recommendedSetupSection.id)
+    }
+    setPendingSetupWizardFocusId(focusTargetId)
+    setActiveViewId('setup')
+    setSetupMode('wizard')
+  }
+
+  function closeSetupWizard(): void {
+    setPendingSetupWizardFocusId(undefined)
+    setSetupMode('overview')
+  }
+
+  function focusOutputsTarget(targetElementId: string): void {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        scrollToPanel('setup-panel-outputs', targetElementId)
+      })
     })
   }
+
+  useEffect(() => {
+    if (activeViewId !== 'setup' || setupMode !== 'wizard' || !pendingSetupWizardFocusId) {
+      return
+    }
+
+    const focusId = pendingSetupWizardFocusId
+    const timer = window.setTimeout(() => {
+      window.scrollTo({
+        top: 0,
+        behavior: 'smooth'
+      })
+
+      window.setTimeout(() => {
+        const target = document.getElementById(focusId)
+        if (target instanceof HTMLElement) {
+          target.focus({ preventScroll: true })
+        }
+        setPendingSetupWizardFocusId(undefined)
+      }, 240)
+    }, 40)
+
+    return () => window.clearTimeout(timer)
+  }, [activeViewId, pendingSetupWizardFocusId, setupMode])
 
   function handleDiscardParameterDraft(paramId: string): void {
     setEditedValues((existing) => {
@@ -3311,20 +3465,63 @@ export function App() {
   }
 
   async function handleRunMotorTest(): Promise<void> {
-    if (!canRunMotorTest || motorTestOutput === undefined) {
+    let targetOutput = motorTestOutput
+    const canAutoStartVerification =
+      activeViewId === 'outputs' &&
+      snapshot.sessionProfile !== 'usb-bench' &&
+      canRunMotorVerification &&
+      outputMapping.motorOutputs.length > 0
+
+    if (motorVerification.status === 'running' && motorVerification.currentOutputChannel !== undefined) {
+      targetOutput = motorVerification.currentOutputChannel
+    } else if (canAutoStartVerification) {
+      const preferredOutput =
+        targetOutput !== undefined && outputMapping.motorOutputs.some((output) => output.channelNumber === targetOutput)
+          ? targetOutput
+          : outputMapping.motorOutputs[0]?.channelNumber
+
+      if (preferredOutput !== undefined) {
+        handleStartMotorVerification(preferredOutput)
+        targetOutput = preferredOutput
+      }
+    }
+
+    if (targetOutput === undefined) {
+      return
+    }
+
+    const effectiveRequest: Partial<MotorTestRequest> = {
+      outputChannel: targetOutput,
+      throttlePercent: motorTestThrottlePercent,
+      durationSeconds: motorTestDurationSeconds
+    }
+    const effectiveEligibility = evaluateMotorTestEligibility(snapshot, effectiveRequest)
+    const effectiveGuardReasons = [
+      ...effectiveEligibility.reasons,
+      ...(propsRemovedAcknowledged ? [] : ['Confirm that all propellers are removed before enabling a motor test.']),
+      ...(testAreaAcknowledged ? [] : ['Confirm the vehicle is restrained and the test area is clear.'])
+    ]
+
+    if (effectiveGuardReasons.length > 0) {
+      setMotorTestOutput(targetOutput)
       return
     }
 
     setBusyAction('motor-test')
     try {
+      setMotorTestOutput(targetOutput)
       await runtime.runMotorTest({
-        outputChannel: motorTestOutput,
+        outputChannel: targetOutput,
         throttlePercent: motorTestThrottlePercent,
         durationSeconds: motorTestDurationSeconds
       })
     } finally {
       setBusyAction(undefined)
     }
+  }
+
+  async function handleRunCurrentMotorVerificationTest(): Promise<void> {
+    await handleRunMotorTest()
   }
 
   function handleStartModeSwitchExercise(): void {
@@ -3547,13 +3744,22 @@ export function App() {
     })
   }
 
-  function handleStartMotorVerification(): void {
+  function handleStartMotorVerification(preferredOutputChannel?: number): void {
     if (!canRunMotorVerification) {
       return
     }
 
-    const targetOutputs = outputMapping.motorOutputs.map((output) => output.channelNumber)
-    const firstOutput = outputMapping.motorOutputs[0]
+    const prioritizedOutputs = outputMapping.motorOutputs.slice()
+    if (preferredOutputChannel !== undefined) {
+      const preferredIndex = prioritizedOutputs.findIndex((output) => output.channelNumber === preferredOutputChannel)
+      if (preferredIndex > 0) {
+        const [preferredOutput] = prioritizedOutputs.splice(preferredIndex, 1)
+        prioritizedOutputs.unshift(preferredOutput)
+      }
+    }
+
+    const targetOutputs = prioritizedOutputs.map((output) => output.channelNumber)
+    const firstOutput = prioritizedOutputs[0]
     setMotorVerification({
       status: 'running',
       targetOutputs,
@@ -3564,6 +3770,9 @@ export function App() {
     })
     setMotorTestOutput(firstOutput?.channelNumber)
     clearSetupSectionConfirmation('outputs')
+    if (activeViewId === 'outputs') {
+      focusOutputsTarget(OUTPUTS_MOTOR_TEST_BUTTON_ID)
+    }
   }
 
   function handleResetMotorVerification(): void {
@@ -3579,7 +3788,11 @@ export function App() {
       const verifiedOutputs = current.verifiedOutputs.includes(current.currentOutputChannel)
         ? current.verifiedOutputs
         : [...current.verifiedOutputs, current.currentOutputChannel]
-      const nextOutput = outputMapping.motorOutputs.find((output) => !verifiedOutputs.includes(output.channelNumber))
+      const nextOutputChannel = current.targetOutputs.find((channelNumber) => !verifiedOutputs.includes(channelNumber))
+      const nextOutput =
+        nextOutputChannel !== undefined
+          ? outputMapping.motorOutputs.find((output) => output.channelNumber === nextOutputChannel)
+          : undefined
 
       setMotorTestOutput(nextOutput?.channelNumber)
 
@@ -3776,6 +3989,38 @@ export function App() {
     return 'Use guarded single-output motor tests to verify motor order and direction before the first props-on flight.'
   })()
 
+  const currentMotorVerificationOutput =
+    motorVerification.currentOutputChannel !== undefined
+      ? outputMapping.motorOutputs.find((output) => output.channelNumber === motorVerification.currentOutputChannel)
+      : undefined
+  const currentMotorVerificationLabel = currentMotorVerificationOutput
+    ? `OUT${currentMotorVerificationOutput.channelNumber}${
+        currentMotorVerificationOutput.motorNumber !== undefined ? ` / M${currentMotorVerificationOutput.motorNumber}` : ''
+      }`
+    : undefined
+  const guidedMotorTestRequest: Partial<MotorTestRequest> = {
+    outputChannel: motorVerification.currentOutputChannel,
+    throttlePercent: motorTestThrottlePercent,
+    durationSeconds: motorTestDurationSeconds
+  }
+  const guidedMotorTestEligibility = evaluateMotorTestEligibility(snapshot, guidedMotorTestRequest)
+  const guidedMotorTestGuardReasons = [
+    ...guidedMotorTestEligibility.reasons,
+    ...(propsRemovedAcknowledged ? [] : ['Confirm that all propellers are removed before enabling a motor test.']),
+    ...(testAreaAcknowledged ? [] : ['Confirm the vehicle is restrained and the test area is clear.'])
+  ]
+  const canRunGuidedMotorTest =
+    motorVerification.status === 'running' &&
+    motorVerification.currentOutputChannel !== undefined &&
+    guidedMotorTestGuardReasons.length === 0 &&
+    busyAction === undefined &&
+    snapshot.motorTest.status !== 'requested' &&
+    snapshot.motorTest.status !== 'running'
+  const currentMotorTestSucceeded =
+    motorVerification.status === 'running' &&
+    snapshot.motorTest.status === 'succeeded' &&
+    snapshot.motorTest.selectedOutputChannel === motorVerification.currentOutputChannel
+
   const escReviewSummary = (() => {
     if (escSetup.calibrationPath === 'analog-calibration') {
       return 'This output protocol still needs the offline ESC calibration review before first flight.'
@@ -3946,13 +4191,7 @@ export function App() {
 
     const baseSections = snapshot.setupSections.map((section) => {
       const panel = panelAnchorForSetupSection(section.id)
-      const actions: SetupFlowActionDescriptor[] = [
-        {
-          kind: 'scroll',
-          label: `Open ${panel.panelLabel}`,
-          panelId: panel.panelId
-        }
-      ]
+      const actions: SetupFlowActionDescriptor[] = [setupPanelActionForSection(section.id, panel)]
       let summary = section.description
       let detail = section.notes[0] ?? `Use the ${panel.panelLabel} panel to continue this part of setup.`
       let evidence: string[] = []
@@ -4038,16 +4277,26 @@ export function App() {
             `Review: ${airframeConfirmation ? `confirmed at ${formatConfirmationTime(airframeConfirmation.confirmedAtMs)}` : 'pending operator confirmation'}`
           ]
           actions.unshift({
+            kind: 'orientation-exercise',
+            label:
+              orientationExercise.status === 'passed'
+                ? 'Run Orientation Check Again'
+                : orientationExercise.status === 'failed'
+                  ? 'Retry Orientation Check'
+                  : orientationExercise.status === 'running'
+                    ? 'Orientation Check Running'
+                    : 'Run Orientation Check',
+            tone: 'primary',
+            disabled:
+              orientationExercise.status === 'running' ||
+              (!canRunOrientationExercise && orientationExercise.status !== 'failed' && orientationExercise.status !== 'passed')
+          })
+          actions.splice(1, 0, {
             kind: airframeConfirmation ? 'clear-confirmation' : 'confirm-step',
             label: airframeConfirmation ? 'Clear Review Confirmation' : 'Confirm Airframe Review',
-            tone: 'primary',
+            tone: 'secondary',
             sectionId: 'airframe',
             disabled: airframe.frameClassValue === undefined || (!airframe.frameTypeIgnored && airframe.frameTypeValue === undefined)
-          })
-          actions.unshift({
-            kind: 'scroll',
-            label: orientationExercise.status === 'passed' ? 'Review Orientation Check' : 'Run Orientation Check',
-            panelId: panel.panelId
           })
           break
         case 'outputs':
@@ -4097,13 +4346,28 @@ export function App() {
           actions.unshift({
             kind: outputsConfirmation ? 'clear-confirmation' : 'confirm-step',
             label: outputsConfirmation ? 'Clear Output Review' : 'Confirm Output Review',
-            tone: 'primary',
+            tone: 'secondary',
             sectionId: 'outputs',
             disabled:
               outputMapping.motorOutputs.length === 0 ||
               outputMapping.notes.some((note) => note.startsWith('Missing motor assignments:')) ||
               (airframe.expectedMotorCount !== undefined && outputMapping.motorOutputs.length !== airframe.expectedMotorCount)
           })
+          actions[actions.length - 1] = {
+            kind: 'scroll',
+            label:
+              currentMotorTestSucceeded
+                ? 'Open Confirm Motor Direction'
+                : motorVerification.status === 'running'
+                  ? 'Open Run Motor Test'
+                  : 'Open Start Motor Verification',
+            panelId: panel.panelId,
+            targetElementId: currentMotorTestSucceeded
+              ? OUTPUTS_MOTOR_CONFIRM_BUTTON_ID
+              : motorVerification.status === 'running'
+                ? OUTPUTS_MOTOR_TEST_BUTTON_ID
+                : OUTPUTS_MOTOR_START_BUTTON_ID
+          }
           actions.splice(1, 0, {
             kind: escRangeConfirmation ? 'clear-confirmation' : 'confirm-step',
             label:
@@ -4116,16 +4380,38 @@ export function App() {
             sectionId: 'esc-range',
             disabled: outputMapping.motorOutputs.length === 0
           })
-          actions.unshift({
-            kind: 'scroll',
-            label:
-              motorVerification.status === 'passed'
-                ? 'Review Motor Verification'
-                : snapshot.sessionProfile === 'usb-bench'
-                  ? 'Review Motor Verification Requirements'
-                  : 'Run Motor Verification',
-            panelId: panel.panelId
-          })
+          if (snapshot.sessionProfile === 'usb-bench') {
+            actions.unshift({
+              kind: 'scroll',
+              label: 'Review Motor Verification Requirements',
+              tone: 'primary',
+              panelId: panel.panelId,
+              targetElementId: OUTPUTS_BENCH_TARGET_ID
+            })
+          } else if (motorVerification.status === 'running') {
+            if (currentMotorTestSucceeded) {
+              actions.unshift({
+                kind: 'motor-verification-confirm',
+                label: currentMotorVerificationLabel ? `Confirm ${currentMotorVerificationLabel}` : 'Confirm Current Motor',
+                tone: 'primary',
+                disabled: false
+              })
+            } else {
+              actions.unshift({
+                kind: 'motor-test-current',
+                label: currentMotorVerificationLabel ? `Spin ${currentMotorVerificationLabel}` : 'Run Targeted Motor Test',
+                tone: 'primary',
+                disabled: !canRunGuidedMotorTest
+              })
+            }
+          } else {
+            actions.unshift({
+              kind: 'motor-verification-start',
+              label: motorVerification.status === 'passed' ? 'Run Motor Verification Again' : 'Start Motor Verification',
+              tone: 'primary',
+              disabled: !canRunMotorVerification
+            })
+          }
           break
         case 'accelerometer': {
           const actionState = snapshot.guidedActions['calibrate-accelerometer']
@@ -4541,19 +4827,69 @@ export function App() {
   const completedSetupSectionCount = setupFlowSections.filter((section) => section.status === 'complete').length
   const setupFlowProgress = setupFlowSections.length === 0 ? 0 : (completedSetupSectionCount / setupFlowSections.length) * 100
   const guidedSetupComplete = setupFlowSections.length > 0 && completedSetupSectionCount === setupFlowSections.length
+  const guidedSetupTaskAction =
+    selectedSetupSection?.actions.find((action) =>
+      ['orientation-exercise', 'motor-verification-start', 'motor-test-current', 'motor-verification-confirm', 'motor-verification-reset'].includes(action.kind)
+    )
+  const guidedSetupTaskStillRequired = (() => {
+    if (!guidedSetupTaskAction) {
+      return false
+    }
+
+    switch (guidedSetupTaskAction.kind) {
+      case 'orientation-exercise':
+        return orientationExercise.status !== 'passed'
+      case 'motor-verification-start':
+      case 'motor-test-current':
+      case 'motor-verification-confirm':
+      case 'motor-verification-reset':
+        return snapshot.sessionProfile !== 'usb-bench' && motorVerification.status !== 'passed'
+      default:
+        return false
+    }
+  })()
+  const continueButtonTargeted =
+    selectedSetupSection?.status === 'complete' &&
+    nextSetupSection !== undefined
   const guidedSetupPrimaryAction =
-    selectedSetupSection?.actions.find((action) => action.tone === 'primary' && action.kind !== 'scroll') ??
-    selectedSetupSection?.actions.find((action) => action.kind !== 'scroll') ??
-    selectedSetupSection?.actions[0]
+    continueButtonTargeted
+      ? undefined
+      : guidedSetupTaskStillRequired
+        ? guidedSetupTaskAction
+        : selectedSetupSection?.actions.find(
+            (action) =>
+              action !== guidedSetupTaskAction &&
+              action.tone === 'primary' &&
+              action.kind !== 'scroll' &&
+              action.kind !== 'clear-confirmation'
+          ) ??
+          selectedSetupSection?.actions.find(
+            (action) =>
+              action !== guidedSetupTaskAction && action.kind === 'confirm-step' && action.disabled !== true
+          ) ??
+          selectedSetupSection?.actions.find(
+            (action) =>
+              action !== guidedSetupTaskAction && action.kind !== 'scroll' && action.kind !== 'clear-confirmation'
+          ) ??
+          selectedSetupSection?.actions[0]
   const guidedSetupContextAction =
     selectedSetupSection?.actions.find((action) => action.kind === 'scroll' && action.panelId !== 'setup-panel-guided')
   const guidedSetupSupportActions =
     selectedSetupSection?.actions.filter(
       (action) =>
+        action !== guidedSetupTaskAction &&
         action !== guidedSetupPrimaryAction &&
         action !== guidedSetupContextAction &&
         !(action.kind === 'scroll' && action.panelId === 'setup-panel-guided')
     ) ?? []
+  const guidedSetupContextHint =
+    selectedSetupSection?.id === 'airframe'
+      ? 'Opening the board-orientation page does not complete this step. The orientation check must pass and the airframe review must still be confirmed here.'
+      : selectedSetupSection?.id === 'outputs'
+        ? 'Opening the motor-verification bench does not complete this step. Motor order verification plus the output and ESC reviews still need to be completed.'
+        : undefined
+  const orientationBenchFocusActive =
+    activeViewId === 'outputs' && setupMode === 'wizard' && selectedSetupSection?.id === 'airframe'
   const isExpertMode = productMode === 'expert'
   const appViews = useMemo<AppViewDescriptor[]>(
     () =>
@@ -4944,18 +5280,71 @@ export function App() {
     }
   }, [recommendedSetupSection, selectedSetupSectionCandidate])
 
-  function openSetupWizard(sectionId?: string): void {
-    if (sectionId) {
-      setSelectedSetupSectionId(sectionId)
-    } else if (recommendedSetupSection) {
-      setSelectedSetupSectionId(recommendedSetupSection.id)
-    }
-    setSetupMode('wizard')
-  }
+  // Auto-return to guided setup wizard when an exercise completes while on another page
+  const exerciseReturnRef = useRef<{
+    rcRange: string
+    rcMapping: string
+    modeSwitchEx: string
+    orientation: string
+    motorVerification: string
+  }>({
+    rcRange: rcRangeExercise.status,
+    rcMapping: rcMappingSession.status,
+    modeSwitchEx: modeSwitchExercise.status,
+    orientation: orientationExercise.status,
+    motorVerification: motorVerification.status
+  })
+  useEffect(() => {
+    const prev = exerciseReturnRef.current
+    const shouldReturnFromRc =
+      (prev.rcRange === 'running' && (rcRangeExercise.status === 'passed' || rcRangeExercise.status === 'failed')) ||
+      (prev.rcMapping === 'running' && (rcMappingSession.status === 'ready' || rcMappingSession.status === 'failed')) ||
+      (prev.modeSwitchEx === 'running' && (modeSwitchExercise.status === 'passed' || modeSwitchExercise.status === 'failed'))
+    const shouldReturnFromOrientation =
+      prev.orientation === 'running' && (orientationExercise.status === 'passed' || orientationExercise.status === 'failed')
+    const shouldReturnFromMotorVerification =
+      prev.motorVerification === 'running' && (motorVerification.status === 'passed' || motorVerification.status === 'failed')
 
-  function closeSetupWizard(): void {
-    setSetupMode('overview')
-  }
+    exerciseReturnRef.current = {
+      rcRange: rcRangeExercise.status,
+      rcMapping: rcMappingSession.status,
+      modeSwitchEx: modeSwitchExercise.status,
+      orientation: orientationExercise.status,
+      motorVerification: motorVerification.status
+    }
+
+    if (setupMode !== 'wizard' || activeViewId === 'setup') {
+      return
+    }
+
+    if (shouldReturnFromOrientation) {
+      openSetupWizard(
+        'airframe',
+        orientationExercise.status === 'passed' ? SETUP_WIZARD_PRIMARY_ACTION_ID : 'wizard-orientation-primary'
+      )
+      return
+    }
+
+    if (shouldReturnFromMotorVerification) {
+      openSetupWizard(
+        'outputs',
+        motorVerification.status === 'passed' ? SETUP_WIZARD_PRIMARY_ACTION_ID : 'wizard-motor-primary'
+      )
+      return
+    }
+
+    if (shouldReturnFromRc) {
+      openSetupWizard(undefined, SETUP_WIZARD_PRIMARY_ACTION_ID)
+    }
+  }, [
+    rcRangeExercise.status,
+    rcMappingSession.status,
+    modeSwitchExercise.status,
+    orientationExercise.status,
+    motorVerification.status,
+    setupMode,
+    activeViewId
+  ])
 
   function moveSetupWizard(offset: -1 | 1): void {
     if (!selectedSetupSection) {
@@ -5026,6 +5415,24 @@ export function App() {
   }, [presetDefinitions, selectedPresetId])
 
   useEffect(() => {
+    if (
+      motorVerification.status === 'running' &&
+      motorVerification.currentOutputChannel !== undefined &&
+      motorTestOutput !== motorVerification.currentOutputChannel
+    ) {
+      setMotorTestOutput(motorVerification.currentOutputChannel)
+    }
+  }, [motorVerification.status, motorVerification.currentOutputChannel, motorTestOutput])
+
+  useEffect(() => {
+    if (activeViewId !== 'outputs' || !currentMotorTestSucceeded) {
+      return
+    }
+
+    focusOutputsTarget(OUTPUTS_MOTOR_CONFIRM_BUTTON_ID)
+  }, [activeViewId, currentMotorTestSucceeded])
+
+  useEffect(() => {
     setSnapshotRestoreAcknowledged(false)
   }, [selectedSnapshotDiffSignature])
 
@@ -5053,17 +5460,53 @@ export function App() {
           void handleGuidedAction(action.actionId)
         }
         return
+      case 'orientation-exercise':
+        if (orientationExercise.status === 'failed' || orientationExercise.status === 'passed') {
+          handleResetOrientationExercise()
+        }
+        handleStartOrientationExercise()
+        return
+      case 'motor-verification-start':
+        if (motorVerification.status === 'failed' || motorVerification.status === 'passed') {
+          handleResetMotorVerification()
+        }
+        handleStartMotorVerification()
+        return
+      case 'motor-test-current':
+        void handleRunCurrentMotorVerificationTest()
+        return
+      case 'motor-verification-confirm':
+        handleConfirmMotorVerification()
+        return
+      case 'motor-verification-reset':
+        handleResetMotorVerification()
+        return
       case 'mode-switch-exercise':
         handleStartModeSwitchExercise()
-        scrollToPanel('setup-panel-rc')
+        setActiveViewId('receiver')
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            document.getElementById('setup-panel-rc')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+          })
+        })
         return
       case 'rc-range-exercise':
         handleStartRcRangeExercise()
-        scrollToPanel('setup-panel-rc')
+        setActiveViewId('receiver')
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            document.getElementById('setup-panel-rc')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+          })
+        })
         return
       case 'rc-mapping-exercise':
         handleStartRcMappingExercise()
-        scrollToPanel('setup-panel-rc')
+        setActiveViewId('receiver')
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            document.getElementById('setup-panel-rc')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+          })
+        })
         return
       case 'confirm-step':
         if (action.sectionId) {
@@ -5075,17 +5518,19 @@ export function App() {
           clearSetupSectionConfirmation(action.sectionId)
         }
         return
-      case 'scroll':
-        if (action.panelId) {
-          scrollToPanel(action.panelId)
-        }
+      case 'scroll': {
+        if (!action.panelId) return
+
+        scrollToPanel(action.panelId, action.targetElementId)
         return
+      }
       default:
         return
     }
   }
 
   function returnToMissionControl(): void {
+    setPendingSetupWizardFocusId(undefined)
     setActiveViewId('setup')
     setSetupMode('overview')
   }
@@ -5454,7 +5899,8 @@ export function App() {
                   </button>
                 ) : (
                   <button
-                    style={buttonStyle('primary')}
+                    className="setup-launch-button"
+                    style={buttonStyle('hero')}
                     onClick={() => openSetupWizard()}
                     disabled={!recommendedSetupSection}
                     data-testid="setup-start-guided-button"
@@ -5563,11 +6009,12 @@ export function App() {
                               : 'Start guided setup to begin.'}
                         </p>
                         <button
-                          style={buttonStyle('primary')}
+                          className="setup-launch-button"
+                          style={buttonStyle('hero')}
                           onClick={() => openSetupWizard()}
                           disabled={!recommendedSetupSection}
                         >
-                          {guidedSetupComplete ? 'Review Setup' : completedSetupSectionCount > 0 ? 'Resume Setup' : 'Start Setup'}
+                          {guidedSetupComplete ? 'Review Setup' : completedSetupSectionCount > 0 ? 'Resume Setup' : 'Start Guided Setup'}
                         </button>
                       </div>
                     </div>
@@ -5616,6 +6063,7 @@ export function App() {
                       >
                         <small>Step {index + 1}</small>
                         <span>{section.title}</span>
+                        {section.sequenceState === 'current' ? <em className="setup-wizard-step__cue">Do this now →</em> : null}
                       </button>
                     ))}
                   </div>
@@ -5631,11 +6079,370 @@ export function App() {
 
                   <div className="setup-wizard__body">
                     <div className="setup-wizard__main">
+                      {selectedSetupSection.id === 'airframe' ? (
+                        <div
+                          className={`setup-wizard__task-card setup-wizard__task-card--orientation setup-wizard__task-card--${
+                            orientationExercise.status === 'passed'
+                              ? 'success'
+                              : orientationExercise.status === 'failed'
+                                ? 'danger'
+                                : orientationExercise.status === 'running'
+                                  ? 'warning'
+                                  : 'neutral'
+                          }`}
+                          data-testid="wizard-orientation-task"
+                        >
+                          <div className="setup-wizard__task-header">
+                            <div>
+                              <strong>Orientation Check</strong>
+                              <p>{orientationExerciseSummary}</p>
+                            </div>
+                            <StatusBadge tone={toneForModeSwitchExercise(orientationExercise.status)}>
+                              {orientationExercise.status}
+                            </StatusBadge>
+                          </div>
+
+                          <div className="setup-wizard__task-visual">
+                            <AttitudePreview
+                              snapshot={snapshot}
+                              compact
+                              frameClassLabel={airframe.frameClassLabel}
+                              frameTypeLabel={airframe.frameTypeLabel}
+                            />
+                          </div>
+
+                          <div className="setup-wizard__task-copy">
+                            <div className="config-pills">
+                              {ORIENTATION_EXERCISE_ORDER.map((step) => (
+                                <span
+                                  key={step}
+                                  className={
+                                    orientationExercise.completedSteps.includes(step)
+                                      ? 'is-complete'
+                                      : orientationExercise.currentTargetStep === step
+                                        ? 'is-target'
+                                        : undefined
+                                  }
+                                >
+                                  {orientationStepLabel(step)}
+                                </span>
+                              ))}
+                            </div>
+
+                            <ol className="switch-exercise-instructions">
+                              {orientationExerciseInstructions.map((instruction) => (
+                                <li key={instruction}>{instruction}</li>
+                              ))}
+                            </ol>
+                          </div>
+
+                          <div className="switch-exercise-progress" aria-hidden="true">
+                            <div
+                              className="switch-exercise-progress__fill"
+                              style={{
+                                width: `${
+                                  orientationExercise.targetSteps.length > 0
+                                    ? (orientationExercise.completedSteps.length / orientationExercise.targetSteps.length) * 100
+                                    : 0
+                                }%`
+                              }}
+                            />
+                          </div>
+
+                          <div className="setup-wizard__task-actions">
+                            <button
+                              className="setup-wizard__primary-button"
+                              data-testid="wizard-orientation-primary"
+                              style={buttonStyle(
+                                orientationExercise.status === 'running' ||
+                                  (!canRunOrientationExercise &&
+                                    orientationExercise.status !== 'failed' &&
+                                    orientationExercise.status !== 'passed')
+                                  ? 'secondary'
+                                  : 'hero'
+                              )}
+                              onClick={() =>
+                                handleSetupFlowAction(
+                                  guidedSetupTaskAction?.kind === 'orientation-exercise'
+                                    ? guidedSetupTaskAction
+                                    : { kind: 'orientation-exercise', label: 'Run Orientation Check' }
+                                )
+                              }
+                              disabled={
+                                orientationExercise.status === 'running' ||
+                                (!canRunOrientationExercise &&
+                                  orientationExercise.status !== 'failed' &&
+                                  orientationExercise.status !== 'passed')
+                              }
+                            >
+                              {orientationExercise.status === 'passed'
+                                ? 'Run Orientation Check Again'
+                                : orientationExercise.status === 'failed'
+                                  ? 'Retry Orientation Check'
+                                  : orientationExercise.status === 'running'
+                                    ? 'Orientation Check Running'
+                                    : 'Run Orientation Check'}
+                            </button>
+                            <div className="setup-wizard__secondary-actions">
+                              <button
+                                style={buttonStyle()}
+                                onClick={handleResetOrientationExercise}
+                                disabled={orientationExercise.status === 'idle'}
+                              >
+                                Reset Check
+                              </button>
+                              <button
+                                style={buttonStyle('secondary')}
+                                onClick={handleFailOrientationExercise}
+                                disabled={orientationExercise.status !== 'running'}
+                              >
+                                Mark Failed
+                              </button>
+                              <button
+                                style={buttonStyle()}
+                                onClick={() => scrollToPanel(selectedSetupSection.panelId, OUTPUTS_ORIENTATION_BUTTON_ID)}
+                              >
+                                Open Start Orientation Check
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ) : null}
+
+                      {selectedSetupSection.id === 'outputs' ? (
+                        <div
+                          className={`setup-wizard__task-card setup-wizard__task-card--motor setup-wizard__task-card--${
+                            motorVerification.status === 'passed'
+                              ? 'success'
+                              : motorVerification.status === 'failed'
+                                ? 'danger'
+                                : motorVerification.status === 'running'
+                                  ? 'warning'
+                                  : 'neutral'
+                          }`}
+                          data-testid="wizard-motor-task"
+                        >
+                          <div className="setup-wizard__task-header">
+                            <div>
+                              <strong>Motor Verification</strong>
+                              <p>{motorVerificationSummary}</p>
+                            </div>
+                            <StatusBadge tone={toneForModeSwitchExercise(motorVerification.status)}>
+                              {motorVerification.status}
+                            </StatusBadge>
+                          </div>
+
+                          <div className="setup-wizard__task-copy">
+                            <div className="config-pills">
+                              {outputMapping.motorOutputs.map((output) => {
+                                const verified = motorVerification.verifiedOutputs.includes(output.channelNumber)
+                                const targeted = motorVerification.currentOutputChannel === output.channelNumber
+                                return (
+                                  <span
+                                    key={output.paramId}
+                                    className={verified ? 'is-complete' : targeted ? 'is-target' : undefined}
+                                  >
+                                    OUT{output.channelNumber}
+                                    {output.motorNumber !== undefined ? ` / M${output.motorNumber}` : ''}
+                                  </span>
+                                )
+                              })}
+                            </div>
+
+                            {snapshot.sessionProfile === 'usb-bench' ? (
+                              <p className="setup-wizard__task-note">
+                                Motor order verification is deferred in USB bench mode. Use full power when you are ready to run controlled output checks.
+                              </p>
+                            ) : motorVerification.status === 'running' ? (
+                              <>
+                                <div className="setup-wizard__task-focus">
+                                  <span>Current target</span>
+                                  <strong>{currentMotorVerificationLabel ?? 'Select an output'}</strong>
+                                  <small>
+                                    {currentMotorTestSucceeded
+                                      ? 'Motor spin confirmed. If the correct motor spun in the correct direction, confirm it below.'
+                                      : 'Run the guarded motor test for the current target, then confirm the correct motor and direction.'}
+                                  </small>
+                                </div>
+
+                                <div className="setup-wizard__task-fields">
+                                  <label className="scoped-editor-field scoped-editor-field--compact">
+                                    <span>Throttle %</span>
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      max={MAX_MOTOR_TEST_THROTTLE_PERCENT}
+                                      step={1}
+                                      value={motorTestThrottlePercent}
+                                      onChange={(event) => setMotorTestThrottlePercent(Number(event.target.value))}
+                                      disabled={busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
+                                    />
+                                  </label>
+                                  <label className="scoped-editor-field scoped-editor-field--compact">
+                                    <span>Duration (s)</span>
+                                    <input
+                                      type="number"
+                                      min={0.1}
+                                      max={MAX_MOTOR_TEST_DURATION_SECONDS}
+                                      step={0.1}
+                                      value={motorTestDurationSeconds}
+                                      onChange={(event) => setMotorTestDurationSeconds(Number(event.target.value))}
+                                      disabled={busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
+                                    />
+                                  </label>
+                                </div>
+
+                                <div className="motor-test-acknowledgments setup-wizard__task-acknowledgments">
+                                  <label>
+                                    <input
+                                      type="checkbox"
+                                      checked={propsRemovedAcknowledged}
+                                      onChange={(event) => setPropsRemovedAcknowledged(event.target.checked)}
+                                      disabled={busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
+                                    />
+                                    <span>All propellers are removed.</span>
+                                  </label>
+                                  <label>
+                                    <input
+                                      type="checkbox"
+                                      checked={testAreaAcknowledged}
+                                      onChange={(event) => setTestAreaAcknowledged(event.target.checked)}
+                                      disabled={busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
+                                    />
+                                    <span>The vehicle is restrained and the area is clear.</span>
+                                  </label>
+                                </div>
+
+                                <ul className="output-note-list">
+                                  {guidedMotorTestGuardReasons.length > 0
+                                    ? guidedMotorTestGuardReasons.map((reason) => <li key={reason}>{reason}</li>)
+                                    : snapshot.motorTest.instructions.map((instruction) => <li key={instruction}>{instruction}</li>)}
+                                </ul>
+                              </>
+                            ) : (
+                              <p className="setup-wizard__task-note">
+                                Start the guided motor verification and the wizard will walk output-by-output through controlled bench testing.
+                              </p>
+                            )}
+                          </div>
+
+                          <div className="switch-exercise-progress" aria-hidden="true">
+                            <div
+                              className="switch-exercise-progress__fill"
+                              style={{
+                                width: `${
+                                  motorVerification.targetOutputs.length > 0
+                                    ? (motorVerification.verifiedOutputs.length / motorVerification.targetOutputs.length) * 100
+                                    : 0
+                                }%`
+                              }}
+                            />
+                          </div>
+
+                          <div className="setup-wizard__task-actions">
+                            <button
+                              data-testid="wizard-motor-primary"
+                              className={`setup-wizard__primary-button${currentMotorTestSucceeded ? ' guided-action-pulse' : ''}`}
+                              style={buttonStyle(
+                                snapshot.sessionProfile === 'usb-bench'
+                                  ? 'hero'
+                                  : motorVerification.status === 'running'
+                                    ? currentMotorTestSucceeded
+                                      ? 'hero'
+                                      : canRunGuidedMotorTest
+                                        ? 'hero'
+                                        : 'secondary'
+                                    : canRunMotorVerification
+                                      ? 'hero'
+                                      : 'secondary'
+                              )}
+                              onClick={() => {
+                                if (snapshot.sessionProfile === 'usb-bench') {
+                                  scrollToPanel(selectedSetupSection.panelId, OUTPUTS_BENCH_TARGET_ID)
+                                  return
+                                }
+                                if (motorVerification.status === 'running') {
+                                  if (currentMotorTestSucceeded) {
+                                    handleConfirmMotorVerification()
+                                    return
+                                  }
+                                  void handleRunCurrentMotorVerificationTest()
+                                  return
+                                }
+                                handleStartMotorVerification()
+                              }}
+                              disabled={
+                                snapshot.sessionProfile === 'usb-bench'
+                                  ? false
+                                  : motorVerification.status === 'running'
+                                    ? currentMotorTestSucceeded
+                                      ? false
+                                      : !canRunGuidedMotorTest
+                                    : !canRunMotorVerification
+                              }
+                            >
+                              {snapshot.sessionProfile === 'usb-bench'
+                                ? 'Open Motor Verification Bench'
+                                : motorVerification.status === 'running'
+                                  ? currentMotorTestSucceeded
+                                    ? `Confirm ${currentMotorVerificationLabel ?? 'Current Motor'}`
+                                    : busyAction === 'motor-test'
+                                      ? 'Running Targeted Motor Test…'
+                                      : `Run Motor Test for ${currentMotorVerificationLabel ?? 'Current Output'}`
+                                  : motorVerification.status === 'passed'
+                                    ? 'Run Motor Verification Again'
+                                    : motorVerification.status === 'failed'
+                                      ? 'Retry Motor Verification'
+                                      : 'Start Motor Verification'}
+                            </button>
+                            <div className="setup-wizard__secondary-actions">
+                              <button
+                                style={buttonStyle()}
+                                onClick={handleResetMotorVerification}
+                                disabled={motorVerification.status === 'idle'}
+                              >
+                                Reset Verification
+                              </button>
+                              <button
+                                style={buttonStyle('secondary')}
+                                onClick={handleFailMotorVerification}
+                                disabled={motorVerification.status !== 'running'}
+                              >
+                                Mark Failed
+                              </button>
+                              <button
+                                style={buttonStyle()}
+                                onClick={() =>
+                                  scrollToPanel(
+                                    selectedSetupSection.panelId,
+                                    snapshot.sessionProfile === 'usb-bench'
+                                      ? OUTPUTS_BENCH_TARGET_ID
+                                      : currentMotorTestSucceeded
+                                        ? OUTPUTS_MOTOR_CONFIRM_BUTTON_ID
+                                        : OUTPUTS_MOTOR_TEST_BUTTON_ID
+                                  )
+                                }
+                              >
+                                {snapshot.sessionProfile === 'usb-bench'
+                                  ? 'Open Motor Verification Requirements'
+                                  : currentMotorTestSucceeded
+                                    ? 'Open Confirm Motor Direction'
+                                    : 'Open Run Motor Test'}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ) : null}
+
                       <div className="setup-wizard__detail">
                         <div>
                           <h4>What to do</h4>
                           <p>{selectedSetupSection.detail}</p>
                         </div>
+
+                        {selectedSetupSection.id === 'accelerometer' ? (
+                          <AccelerometerPoseGuide currentPose={accelerometerPoseFromAction(snapshot)} />
+                        ) : null}
 
                         <div className="setup-flow__criteria">
                           <strong>Completion Criteria</strong>
@@ -5682,27 +6489,44 @@ export function App() {
                       <div className="setup-wizard__action-card">
                         <strong>Next Action</strong>
                         <p>
-                          {guidedSetupPrimaryAction
+                          {continueButtonTargeted && nextSetupSection
+                            ? `Continue to ${nextSetupSection.title}`
+                            : guidedSetupPrimaryAction
                             ? guidedSetupPrimaryAction.label
                             : 'Complete the current criteria or use the workspace navigation for more context.'}
                         </p>
                         {guidedSetupPrimaryAction ? (
-                          <button
-                            style={buttonStyle(guidedSetupPrimaryAction.tone ?? 'primary')}
-                            onClick={() => handleSetupFlowAction(guidedSetupPrimaryAction)}
-                            disabled={guidedSetupPrimaryAction.disabled}
-                          >
-                            {guidedSetupPrimaryAction.label}
-                          </button>
+                          <>
+                            <div className="setup-wizard__action-pointer" aria-hidden="true">
+                              <span>→</span>
+                              <strong>Do this now</strong>
+                            </div>
+                            <button
+                              id={SETUP_WIZARD_PRIMARY_ACTION_ID}
+                              className={`setup-wizard__primary-button${
+                                guidedSetupPrimaryAction.disabled ? '' : ' setup-wizard__primary-button--target'
+                              }`}
+                              data-testid="setup-wizard-primary-action"
+                              style={buttonStyle(guidedSetupPrimaryAction.disabled ? 'secondary' : 'hero')}
+                              onClick={() => handleSetupFlowAction(guidedSetupPrimaryAction)}
+                              disabled={guidedSetupPrimaryAction.disabled}
+                            >
+                              <span aria-hidden="true">→</span>
+                              <span>{guidedSetupPrimaryAction.label}</span>
+                            </button>
+                          </>
                         ) : null}
                         {guidedSetupContextAction ? (
-                          <button
-                            style={buttonStyle(guidedSetupContextAction.tone ?? 'secondary')}
-                            onClick={() => handleSetupFlowAction(guidedSetupContextAction)}
-                            disabled={guidedSetupContextAction.disabled}
-                          >
-                            {guidedSetupContextAction.label}
-                          </button>
+                          <>
+                            <button
+                              style={buttonStyle(guidedSetupContextAction.tone ?? 'primary')}
+                              onClick={() => handleSetupFlowAction(guidedSetupContextAction)}
+                              disabled={guidedSetupContextAction.disabled}
+                            >
+                              {guidedSetupContextAction.label}
+                            </button>
+                            {guidedSetupContextHint ? <p className="setup-wizard__context-hint">{guidedSetupContextHint}</p> : null}
+                          </>
                         ) : null}
                         {guidedSetupSupportActions.length > 0 ? (
                           <div className="setup-wizard__support-actions">
@@ -5724,13 +6548,27 @@ export function App() {
                         <button style={buttonStyle()} onClick={() => moveSetupWizard(-1)} disabled={!previousSetupSection}>
                           Previous Step
                         </button>
-                        <button
-                          style={buttonStyle('primary')}
-                          onClick={() => moveSetupWizard(1)}
-                          disabled={!nextSetupSection || selectedSetupSection.status !== 'complete'}
-                        >
-                          {nextSetupSection ? `Continue to ${nextSetupSection.title}` : 'No More Steps'}
-                        </button>
+                        <div className="setup-wizard__continue-slot">
+                          {continueButtonTargeted && nextSetupSection ? (
+                            <div className="setup-wizard__action-pointer" aria-hidden="true">
+                              <span>→</span>
+                              <strong>Do this now</strong>
+                            </div>
+                          ) : null}
+                          <button
+                            id={SETUP_WIZARD_NEXT_STEP_ID}
+                            className={`setup-wizard__continue-button${continueButtonTargeted ? ' setup-wizard__continue-button--target' : ''}`}
+                            data-testid="setup-wizard-next-step"
+                            style={{
+                              ...buttonStyle(nextSetupSection && selectedSetupSection.status === 'complete' ? 'hero' : 'secondary'),
+                              width: '100%'
+                            }}
+                            onClick={() => moveSetupWizard(1)}
+                            disabled={!nextSetupSection || selectedSetupSection.status !== 'complete'}
+                          >
+                            {nextSetupSection ? `Continue to ${nextSetupSection.title}` : 'Setup Complete'}
+                          </button>
+                        </div>
                       </div>
                     </aside>
                   </div>
@@ -7594,13 +8432,66 @@ export function App() {
             </article>
           </div>
 
-          <div className="orientation-card">
+          <div className={`orientation-card${orientationBenchFocusActive ? ' orientation-card--guided-focus' : ''}`} id={OUTPUTS_ORIENTATION_TARGET_ID}>
             <div className="switch-exercise-card__header">
               <div>
                 <strong>Board orientation</strong>
                 <p>{orientationExerciseSummary}</p>
               </div>
               <StatusBadge tone={toneForModeSwitchExercise(orientationExercise.status)}>{orientationExercise.status}</StatusBadge>
+            </div>
+
+            <div className="orientation-card__focus">
+              <div className="orientation-card__focus-copy">
+                <span>{orientationBenchFocusActive ? 'Guided setup task' : 'Orientation task'}</span>
+                <strong>
+                  {orientationExercise.status === 'passed'
+                    ? 'Orientation check passed'
+                    : orientationExercise.status === 'failed'
+                      ? 'Orientation check needs another pass'
+                      : orientationExercise.status === 'running'
+                        ? 'Complete the live orientation check'
+                        : 'Start the board orientation check here'}
+                </strong>
+                <p>
+                  {orientationBenchFocusActive
+                    ? 'Run this highlighted check here. When it finishes, Guided Setup will return automatically so you can continue the flow.'
+                    : 'Verify that the live attitude stream matches level, forward pitch, and right roll before confirming the airframe setup.'}
+                </p>
+                {orientationExercise.status === 'running' ? (
+                  <div className="orientation-card__focus-instruction">
+                    <small>Do this now</small>
+                    <strong>{orientationStepLabel(orientationExercise.currentTargetStep ?? 'level')}</strong>
+                    <p>{orientationStepInstruction(orientationExercise.currentTargetStep)}</p>
+                  </div>
+                ) : orientationExercise.status === 'failed' ? (
+                  <div className="orientation-card__focus-instruction orientation-card__focus-instruction--warning">
+                    <small>Try again</small>
+                    <strong>Re-run the live orientation check</strong>
+                    <p>Check AHRS_ORIENTATION and board mounting, then retry until the level, forward pitch, and right-roll checks all pass.</p>
+                  </div>
+                ) : null}
+              </div>
+
+              <button
+                id={OUTPUTS_ORIENTATION_BUTTON_ID}
+                className={`orientation-card__primary-button${
+                  orientationBenchFocusActive || orientationExercise.status === 'failed' ? ' guided-action-pulse' : ''
+                }`}
+                style={buttonStyle(
+                  !canRunOrientationExercise || orientationExercise.status === 'running' ? 'secondary' : 'hero'
+                )}
+                onClick={handleStartOrientationExercise}
+                disabled={!canRunOrientationExercise || orientationExercise.status === 'running'}
+              >
+                {orientationExercise.status === 'passed'
+                  ? 'Run Orientation Check Again'
+                  : orientationExercise.status === 'failed'
+                    ? 'Retry Orientation Check'
+                    : orientationExercise.status === 'running'
+                      ? 'Orientation Check Running'
+                      : 'Start Orientation Check'}
+              </button>
             </div>
 
             <AttitudePreview
@@ -7643,14 +8534,7 @@ export function App() {
               ))}
             </ol>
 
-            <div className="switch-exercise-controls">
-              <button
-                style={buttonStyle('primary')}
-                onClick={handleStartOrientationExercise}
-                disabled={!canRunOrientationExercise || orientationExercise.status === 'running'}
-              >
-                {orientationExercise.status === 'passed' ? 'Run Again' : 'Start Orientation Check'}
-              </button>
+            <div className="switch-exercise-controls orientation-card__secondary-actions">
               <button
                 style={buttonStyle()}
                 onClick={handleResetOrientationExercise}
@@ -8052,7 +8936,7 @@ export function App() {
             </div>
           </div>
 
-          <div className="outputs-lab-grid">
+          <div className="outputs-lab-grid" id={OUTPUTS_BENCH_TARGET_ID}>
           <MotorTestSliders
             motorCount={outputMapping.motorOutputs.length || 4}
             selectedOutput={motorTestOutput}
@@ -8156,6 +9040,12 @@ export function App() {
 
             <div className="switch-exercise-controls">
               <button
+                id={OUTPUTS_MOTOR_TEST_BUTTON_ID}
+                className={
+                  motorVerification.status === 'running' && !currentMotorTestSucceeded && canRunMotorTest
+                    ? 'guided-action-pulse'
+                    : undefined
+                }
                 style={buttonStyle('secondary')}
                 onClick={() => void handleRunMotorTest()}
                 disabled={!canRunMotorTest || busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
@@ -8195,8 +9085,9 @@ export function App() {
 
             <div className="switch-exercise-controls">
               <button
+                id={OUTPUTS_MOTOR_START_BUTTON_ID}
                 style={buttonStyle('primary')}
-                onClick={handleStartMotorVerification}
+                onClick={() => handleStartMotorVerification()}
                 disabled={!canRunMotorVerification || motorVerification.status === 'running'}
               >
                 {motorVerification.status === 'passed' ? 'Run Again' : 'Start Verification'}
@@ -8209,6 +9100,8 @@ export function App() {
                 Target Current Output
               </button>
               <button
+                id={OUTPUTS_MOTOR_CONFIRM_BUTTON_ID}
+                className={currentMotorTestSucceeded ? 'guided-action-pulse' : undefined}
                 style={buttonStyle('secondary')}
                 onClick={handleConfirmMotorVerification}
                 disabled={

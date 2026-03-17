@@ -369,6 +369,17 @@ export function createArduCopterMockScenario(): MockScenario {
             )
           } else if (isAccelerometerCalibration(outbound.message)) {
             responses.push(
+              codec.encode(
+                envelope(101, {
+                  type: 'COMMAND_ACK',
+                  command: MAV_CMD.PREFLIGHT_CALIBRATION,
+                  result: MAV_RESULT.ACCEPTED,
+                  progress: 0,
+                  resultParam2: 0,
+                  targetSystem: outbound.header.systemId,
+                  targetComponent: outbound.header.componentId
+                })
+              ),
               ...[
                 'Accelerometer calibration started.',
                 'Place vehicle level and keep it still.',
@@ -392,6 +403,17 @@ export function createArduCopterMockScenario(): MockScenario {
             )
           } else if (isCompassCalibration(outbound.message)) {
             responses.push(
+              codec.encode(
+                envelope(201, {
+                  type: 'COMMAND_ACK',
+                  command: MAV_CMD.PREFLIGHT_CALIBRATION,
+                  result: MAV_RESULT.ACCEPTED,
+                  progress: 0,
+                  resultParam2: 0,
+                  targetSystem: outbound.header.systemId,
+                  targetComponent: outbound.header.componentId
+                })
+              ),
               ...[
                 'Compass calibration started.',
                 'Rotate the vehicle through roll, pitch, and yaw.',

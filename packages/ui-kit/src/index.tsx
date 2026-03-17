@@ -88,7 +88,21 @@ export function KeyValueRow({ label, value }: { label: string; value: ReactNode 
   )
 }
 
-export function buttonStyle(kind: 'primary' | 'secondary' = 'secondary'): CSSProperties {
+export function buttonStyle(kind: 'primary' | 'secondary' | 'hero' = 'secondary'): CSSProperties {
+  if (kind === 'hero') {
+    return {
+      border: '1px solid rgba(218, 178, 84, 0.6)',
+      background: 'linear-gradient(180deg, rgba(218, 178, 84, 0.18), rgba(218, 178, 84, 0.10))',
+      color: '#f0d56e',
+      padding: '12px 20px',
+      borderRadius: 6,
+      fontWeight: 700,
+      fontSize: 14,
+      letterSpacing: 0.01,
+      cursor: 'pointer',
+      boxShadow: '0 0 12px rgba(218, 178, 84, 0.08)'
+    }
+  }
   return {
     border: `1px solid ${kind === 'primary' ? 'rgba(218, 178, 84, 0.5)' : palette.borderStrong}`,
     background: kind === 'primary' ? 'rgba(218, 178, 84, 0.12)' : 'rgba(255, 255, 255, 0.05)',

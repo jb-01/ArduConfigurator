@@ -50,6 +50,7 @@ Responsibilities:
 - heartbeat-driven vehicle identity
 - parameter sync/write/readback
 - guided actions
+- sensor-calibration state machines
 - live verification state
 - pre-arm issue state
 - snapshots/backups
@@ -130,6 +131,7 @@ Browser and desktop validation against real hardware for the workflows that matt
 - connection/sync
 - configuration writes
 - setup flows
+- calibration flows
 - snapshots/presets
 - guarded motor test
 

@@ -69,6 +69,7 @@ interface ParameterSyncWaiter {
 
 interface CommandAckWaiter {
   command: number
+  rejectOnFailure: boolean
   resolve: (message: CommandAckMessage) => void
   reject: (error: Error) => void
   timer: ReturnType<typeof setTimeout>
@@ -88,6 +89,11 @@ interface WaiterHandle<T> {
   cancel: (error: Error) => void
 }
 
+interface AccelerometerCalibrationProgressState {
+  stepIndex: number
+  waitingForCompletion: boolean
+}
+
 export interface WaitForVehicleOptions {
   timeoutMs?: number
 }
@@ -100,13 +106,21 @@ export interface WaitForParameterSyncOptions {
 
 export interface ArduPilotConfiguratorRuntimeOptions {
   sessionProfile?: SessionProfile
+  accelerometerInitialWarmupMs?: number
+  accelerometerStepAdvanceMs?: number
+  accelerometerCompletionFallbackMs?: number
 }
 
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 5000
 const DEFAULT_PARAMETER_SYNC_TIMEOUT_MS = 20000
+const PARAMETER_SYNC_STALL_RETRY_MS = 1500
+const MAX_PARAMETER_SYNC_RETRIES = 3
 const DEFAULT_COMMAND_ACK_TIMEOUT_MS = 3000
 const DEFAULT_PARAMETER_WRITE_TIMEOUT_MS = 3000
 const DEFAULT_PARAMETER_WRITE_TOLERANCE = 0.0001
+const DEFAULT_ACCELEROMETER_INITIAL_WARMUP_MS = 6000
+const DEFAULT_ACCELEROMETER_STEP_ADVANCE_MS = 1500
+const DEFAULT_ACCELEROMETER_COMPLETION_FALLBACK_MS = 4000
 const PRE_ARM_ISSUE_TTL_MS = 15000
 const MAX_GUIDED_ACTION_STATUS_TEXTS = 5
 const MOTOR_TEST_COMPLETION_BUFFER_MS = 250
@@ -138,6 +152,64 @@ const ARDUCOPTER_MAV_TYPES = new Set<number>([
   MAV_TYPE.OCTOROTOR,
   MAV_TYPE.TRICOPTER
 ])
+const ACCELCAL_SUCCESS_VALUE = 16777215
+const ACCELCAL_FAILED_VALUE = 16777216
+const ACCELEROMETER_CALIBRATION_STEPS = [
+  {
+    commandValue: 1,
+    summary: 'Place the vehicle level and keep it still.',
+    instructions: [
+      'Set the frame level on a stable surface.',
+      'When the frame is motionless, press Confirm Level Position.'
+    ],
+    ctaLabel: 'Confirm Level Position'
+  },
+  {
+    commandValue: 2,
+    summary: 'Place the vehicle on its left side and keep it still.',
+    instructions: [
+      'Move the frame onto its left side.',
+      'When the frame is motionless, press Confirm Left Side Position.'
+    ],
+    ctaLabel: 'Confirm Left Side Position'
+  },
+  {
+    commandValue: 3,
+    summary: 'Place the vehicle on its right side and keep it still.',
+    instructions: [
+      'Move the frame onto its right side.',
+      'When the frame is motionless, press Confirm Right Side Position.'
+    ],
+    ctaLabel: 'Confirm Right Side Position'
+  },
+  {
+    commandValue: 4,
+    summary: 'Place the vehicle nose down and keep it still.',
+    instructions: [
+      'Tilt the frame nose-down.',
+      'When the frame is motionless, press Confirm Nose Down Position.'
+    ],
+    ctaLabel: 'Confirm Nose Down Position'
+  },
+  {
+    commandValue: 5,
+    summary: 'Place the vehicle nose up and keep it still.',
+    instructions: [
+      'Tilt the frame nose-up.',
+      'When the frame is motionless, press Confirm Nose Up Position.'
+    ],
+    ctaLabel: 'Confirm Nose Up Position'
+  },
+  {
+    commandValue: 6,
+    summary: 'Place the vehicle on its back and keep it still.',
+    instructions: [
+      'Flip the frame onto its back.',
+      'When the frame is motionless, press Confirm Back Position.'
+    ],
+    ctaLabel: 'Confirm Back Position'
+  }
+] as const
 
 export class ParameterBatchWriteError extends Error {
   constructor(
@@ -160,6 +232,9 @@ export class ArduPilotConfiguratorRuntime {
   private readonly parameters = new Map<string, ParameterState>()
   private readonly preArmIssues = new Map<string, PreArmIssueState>()
   private readonly statusTexts: StatusTextEntry[] = []
+  private readonly accelerometerInitialWarmupMs: number
+  private readonly accelerometerStepAdvanceMs: number
+  private readonly accelerometerCompletionFallbackMs: number
 
   private connection: TransportStatus
   private sessionProfile: SessionProfile
@@ -170,8 +245,13 @@ export class ArduPilotConfiguratorRuntime {
   private liveVerification = createIdleLiveVerification()
   private totalParameters = 0
   private liveTelemetryRequestsIssued = false
+  private accelerometerCalibration?: AccelerometerCalibrationProgressState
+  private accelerometerPromptFallbackTimer?: ReturnType<typeof setTimeout>
+  private accelerometerAdvanceTimer?: ReturnType<typeof setTimeout>
   private motorTestTimer?: ReturnType<typeof setTimeout>
   private preArmExpiryTimer?: ReturnType<typeof setTimeout>
+  private parameterSyncRetryTimer?: ReturnType<typeof setTimeout>
+  private parameterSyncRetryCount = 0
 
   constructor(
     private readonly session: MavlinkSession,
@@ -180,6 +260,10 @@ export class ArduPilotConfiguratorRuntime {
   ) {
     this.connection = this.session.getTransportStatus()
     this.sessionProfile = options.sessionProfile ?? 'full-power'
+    this.accelerometerInitialWarmupMs = options.accelerometerInitialWarmupMs ?? DEFAULT_ACCELEROMETER_INITIAL_WARMUP_MS
+    this.accelerometerStepAdvanceMs = options.accelerometerStepAdvanceMs ?? DEFAULT_ACCELEROMETER_STEP_ADVANCE_MS
+    this.accelerometerCompletionFallbackMs =
+      options.accelerometerCompletionFallbackMs ?? DEFAULT_ACCELEROMETER_COMPLETION_FALLBACK_MS
     this.subscriptions = [
       this.session.onStatus((status: TransportStatus) => {
         this.connection = status
@@ -318,6 +402,8 @@ export class ArduPilotConfiguratorRuntime {
       const vehicle = await this.waitForVehicle(options)
       this.parameters.clear()
       this.totalParameters = 0
+      this.parameterSyncRetryCount = 0
+      this.clearParameterSyncRetryTimer()
       this.parameterSync = {
         status: 'requesting',
         downloaded: 0,
@@ -340,11 +426,7 @@ export class ArduPilotConfiguratorRuntime {
       })
       this.emit()
 
-      await this.session.send({
-        type: 'PARAM_REQUEST_LIST',
-        targetSystem: vehicle.systemId,
-        targetComponent: vehicle.componentId
-      })
+      await this.requestParameterTable(vehicle.systemId, vehicle.componentId)
     } catch (error) {
       this.failGuidedAction('request-parameters', error)
       this.emit()
@@ -472,15 +554,7 @@ export class ArduPilotConfiguratorRuntime {
         await this.requestParameterList()
         return
       case 'calibrate-accelerometer':
-        await this.performCommandGuidedAction(
-          'calibrate-accelerometer',
-          'Accelerometer calibration command queued.',
-          'Accelerometer calibration command sent. Waiting for autopilot guidance.',
-          defaultInstructionsForAction('calibrate-accelerometer', this.sessionProfile),
-          async () => {
-            await this.sendCommand(MAV_CMD.PREFLIGHT_CALIBRATION, [0, 0, 0, 0, 1, 0, 0])
-          }
-        )
+        await this.runAccelerometerCalibrationAction()
         return
       case 'calibrate-compass':
         await this.performCommandGuidedAction(
@@ -580,6 +654,9 @@ export class ArduPilotConfiguratorRuntime {
     this.rejectParameterValueWaiters(new Error('Runtime destroyed before parameter verification was received.'))
     this.clearMotorTestTimer()
     this.clearPreArmExpiryTimer()
+    this.clearParameterSyncRetryTimer()
+    this.clearAccelerometerPromptFallbackTimer()
+    this.clearAccelerometerAdvanceTimer()
     this.rejectVehicleWaiters(new Error('Runtime destroyed before vehicle heartbeat was received.'))
     this.rejectParameterSyncWaiters(new Error('Runtime destroyed before parameter sync completed.'))
     this.session.destroy()
@@ -588,7 +665,7 @@ export class ArduPilotConfiguratorRuntime {
   private async sendCommand(
     command: number,
     params: number[],
-    options: { waitForAck?: boolean; ackTimeoutMs?: number } = {}
+    options: { waitForAck?: boolean; ackTimeoutMs?: number; rejectAckOnFailure?: boolean } = {}
   ): Promise<CommandAckMessage | void> {
     const message: CommandLongMessage = {
       type: 'COMMAND_LONG',
@@ -599,7 +676,9 @@ export class ArduPilotConfiguratorRuntime {
       params: params as CommandLongMessage['params']
     }
 
-    const ackWaiter = options.waitForAck ? this.waitForCommandAck(command, options.ackTimeoutMs) : undefined
+    const ackWaiter = options.waitForAck
+      ? this.waitForCommandAck(command, options.ackTimeoutMs, { rejectOnFailure: options.rejectAckOnFailure ?? true })
+      : undefined
     try {
       await this.session.send(message)
     } catch (error) {
@@ -658,6 +737,9 @@ export class ArduPilotConfiguratorRuntime {
         break
       case 'COMMAND_ACK':
         this.processCommandAck(envelope.message)
+        break
+      case 'COMMAND_LONG':
+        this.processCommandLong(envelope.message, envelope.header.systemId, envelope.header.componentId)
         break
       case 'STATUSTEXT':
         this.processStatusText(envelope.message)
@@ -723,6 +805,8 @@ export class ArduPilotConfiguratorRuntime {
     }
 
     if (isComplete) {
+      this.clearParameterSyncRetryTimer()
+      this.parameterSyncRetryCount = 0
       this.setGuidedAction('request-parameters', {
         ...this.guidedActions['request-parameters'],
         status: 'succeeded',
@@ -734,6 +818,8 @@ export class ArduPilotConfiguratorRuntime {
       this.resolveParameterSyncWaiters(this.getSnapshot().parameterStats)
       return
     }
+
+    this.scheduleParameterSyncRetry()
 
     if (this.parameterSync.status === 'streaming' || this.parameterSync.status === 'requesting') {
       this.setGuidedAction('request-parameters', {
@@ -827,6 +913,51 @@ export class ArduPilotConfiguratorRuntime {
     this.appendStatusEntry('warning', `Autopilot rejected live telemetry stream request (${mavResultLabel(message.result)}).`)
   }
 
+  private processCommandLong(message: CommandLongMessage, systemId: number, componentId: number): void {
+    if (message.command !== MAV_CMD.ACCELCAL_VEHICLE_POS) {
+      return
+    }
+
+    const current = this.guidedActions['calibrate-accelerometer']
+    if (
+      !this.vehicle ||
+      this.vehicle.systemId !== systemId ||
+      this.vehicle.componentId !== componentId ||
+      (current.status === 'idle' && !this.accelerometerCalibration)
+    ) {
+      return
+    }
+
+    const commandValue = Math.round(message.params[0] ?? 0)
+    if (commandValue === ACCELCAL_SUCCESS_VALUE) {
+      this.clearAccelerometerPromptFallbackTimer()
+      this.clearAccelerometerAdvanceTimer()
+      this.completeAccelerometerCalibration()
+      return
+    }
+
+    if (commandValue === ACCELCAL_FAILED_VALUE) {
+      this.clearAccelerometerPromptFallbackTimer()
+      this.clearAccelerometerAdvanceTimer()
+      this.failGuidedAction('calibrate-accelerometer', new Error('Accelerometer calibration failed.'))
+      this.accelerometerCalibration = undefined
+      return
+    }
+
+    const stepIndex = ACCELEROMETER_CALIBRATION_STEPS.findIndex((step) => step.commandValue === commandValue)
+    if (stepIndex < 0) {
+      return
+    }
+
+    this.clearAccelerometerPromptFallbackTimer()
+    this.clearAccelerometerAdvanceTimer()
+    this.accelerometerCalibration = {
+      stepIndex,
+      waitingForCompletion: false
+    }
+    this.setGuidedAction('calibrate-accelerometer', buildAccelerometerCalibrationGuidedAction(stepIndex, this.guidedActions['calibrate-accelerometer']))
+  }
+
   private buildSetupSections(): SetupSectionState[] {
     return this.metadata.setupSections.map((definition) => {
       const sectionParameters = definition.requiredParameters
@@ -888,15 +1019,20 @@ export class ArduPilotConfiguratorRuntime {
     this.vehicle = undefined
     this.parameters.clear()
     this.totalParameters = 0
+    this.parameterSyncRetryCount = 0
     this.parameterSync = createIdleParameterSync()
     this.guidedActions = createIdleGuidedActions()
     this.motorTest = createIdleMotorTestState()
     this.liveVerification = createIdleLiveVerification()
     this.liveTelemetryRequestsIssued = false
+    this.accelerometerCalibration = undefined
     this.preArmIssues.clear()
     this.statusTexts.splice(0)
     this.clearMotorTestTimer()
     this.clearPreArmExpiryTimer()
+    this.clearParameterSyncRetryTimer()
+    this.clearAccelerometerPromptFallbackTimer()
+    this.clearAccelerometerAdvanceTimer()
   }
 
   private resolveVehicleWaiters(vehicle: VehicleIdentity): void {
@@ -931,6 +1067,78 @@ export class ArduPilotConfiguratorRuntime {
     this.parameterSyncWaiters.clear()
   }
 
+  private async requestParameterTable(systemId: number, componentId: number): Promise<void> {
+    await this.session.send({
+      type: 'PARAM_REQUEST_LIST',
+      targetSystem: systemId,
+      targetComponent: componentId
+    })
+    this.scheduleParameterSyncRetry()
+  }
+
+  private scheduleParameterSyncRetry(): void {
+    this.clearParameterSyncRetryTimer()
+
+    if (
+      (this.parameterSync.status !== 'requesting' && this.parameterSync.status !== 'streaming') ||
+      this.parameterSyncRetryCount >= MAX_PARAMETER_SYNC_RETRIES
+    ) {
+      return
+    }
+
+    this.parameterSyncRetryTimer = setTimeout(() => {
+      void this.retryParameterSync()
+    }, PARAMETER_SYNC_STALL_RETRY_MS)
+  }
+
+  private clearParameterSyncRetryTimer(): void {
+    if (!this.parameterSyncRetryTimer) {
+      return
+    }
+
+    clearTimeout(this.parameterSyncRetryTimer)
+    this.parameterSyncRetryTimer = undefined
+  }
+
+  private async retryParameterSync(): Promise<void> {
+    this.parameterSyncRetryTimer = undefined
+
+    if (
+      !this.vehicle ||
+      (this.parameterSync.status !== 'requesting' && this.parameterSync.status !== 'streaming') ||
+      this.parameters.size >= this.totalParameters && this.totalParameters > 0 ||
+      this.parameterSyncRetryCount >= MAX_PARAMETER_SYNC_RETRIES
+    ) {
+      return
+    }
+
+    this.parameterSyncRetryCount += 1
+    const downloaded = this.parameters.size
+    const total = this.totalParameters
+    this.appendStatusEntry(
+      'warning',
+      `Parameter stream stalled at ${downloaded}/${total || 'unknown'}. Re-requesting the table (${this.parameterSyncRetryCount}/${MAX_PARAMETER_SYNC_RETRIES}).`
+    )
+    this.setGuidedAction('request-parameters', {
+      ...this.guidedActions['request-parameters'],
+      status: 'running',
+      summary: `Parameter stream stalled at ${downloaded}/${total || 'unknown'}. Re-requesting missing values.`,
+      instructions: ['Keep the link open while the configurator retries the parameter stream.'],
+      updatedAtMs: Date.now(),
+      completedAtMs: undefined
+    })
+    this.emit()
+
+    try {
+      await this.requestParameterTable(this.vehicle.systemId, this.vehicle.componentId)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown parameter retry error.'
+      this.appendStatusEntry('warning', `Failed to retry the parameter stream: ${message}`)
+      this.emit()
+      this.scheduleParameterSyncRetry()
+    }
+  }
+
   private rejectCommandAckWaiters(error: Error): void {
     this.commandAckWaiters.forEach((waiter) => {
       clearTimeout(waiter.timer)
@@ -939,12 +1147,17 @@ export class ArduPilotConfiguratorRuntime {
     this.commandAckWaiters.clear()
   }
 
-  private waitForCommandAck(command: number, timeoutMs = DEFAULT_COMMAND_ACK_TIMEOUT_MS): WaiterHandle<CommandAckMessage> {
+  private waitForCommandAck(
+    command: number,
+    timeoutMs = DEFAULT_COMMAND_ACK_TIMEOUT_MS,
+    options: { rejectOnFailure?: boolean } = {}
+  ): WaiterHandle<CommandAckMessage> {
     let cancel = (_error: Error) => {}
     const promise = new Promise<CommandAckMessage>((resolve, reject) => {
       let settled = false
       const waiter: CommandAckWaiter = {
         command,
+        rejectOnFailure: options.rejectOnFailure ?? true,
         resolve: (message) => {
           settled = true
           clearTimeout(timer)
@@ -1049,7 +1262,7 @@ export class ArduPilotConfiguratorRuntime {
     waiters.forEach((waiter) => {
       clearTimeout(waiter.timer)
       this.commandAckWaiters.delete(waiter)
-      if (message.result === MAV_RESULT.ACCEPTED || message.result === MAV_RESULT.IN_PROGRESS) {
+      if (message.result === MAV_RESULT.ACCEPTED || message.result === MAV_RESULT.IN_PROGRESS || !waiter.rejectOnFailure) {
         waiter.resolve(message)
         return
       }
@@ -1103,6 +1316,101 @@ export class ArduPilotConfiguratorRuntime {
       clearTimeout(this.motorTestTimer)
       this.motorTestTimer = undefined
     }
+  }
+
+  private clearAccelerometerPromptFallbackTimer(): void {
+    if (!this.accelerometerPromptFallbackTimer) {
+      return
+    }
+
+    clearTimeout(this.accelerometerPromptFallbackTimer)
+    this.accelerometerPromptFallbackTimer = undefined
+  }
+
+  private clearAccelerometerAdvanceTimer(): void {
+    if (!this.accelerometerAdvanceTimer) {
+      return
+    }
+
+    clearTimeout(this.accelerometerAdvanceTimer)
+    this.accelerometerAdvanceTimer = undefined
+  }
+
+  private scheduleAccelerometerPromptFallback(stepIndex: number): void {
+    this.clearAccelerometerPromptFallbackTimer()
+    this.accelerometerPromptFallbackTimer = setTimeout(() => {
+      const current = this.guidedActions['calibrate-accelerometer']
+      const state = this.accelerometerCalibration
+      if (!state || state.stepIndex !== stepIndex || current.status === 'failed' || current.status === 'succeeded') {
+        return
+      }
+
+      this.setGuidedAction(
+        'calibrate-accelerometer',
+        buildAccelerometerCalibrationGuidedAction(stepIndex, this.guidedActions['calibrate-accelerometer'])
+      )
+      this.emit()
+    }, this.accelerometerInitialWarmupMs)
+  }
+
+  private scheduleAccelerometerStepAdvance(stepIndex: number): void {
+    this.clearAccelerometerAdvanceTimer()
+    this.accelerometerAdvanceTimer = setTimeout(() => {
+      this.accelerometerAdvanceTimer = undefined
+      const current = this.guidedActions['calibrate-accelerometer']
+      const state = this.accelerometerCalibration
+      if (!state || state.stepIndex !== stepIndex || current.status === 'failed' || current.status === 'succeeded') {
+        return
+      }
+
+      if (stepIndex + 1 < ACCELEROMETER_CALIBRATION_STEPS.length) {
+        this.accelerometerCalibration = {
+          stepIndex: stepIndex + 1,
+          waitingForCompletion: false
+        }
+        this.setGuidedAction(
+          'calibrate-accelerometer',
+          buildAccelerometerCalibrationGuidedAction(stepIndex + 1, this.guidedActions['calibrate-accelerometer'])
+        )
+      } else {
+        this.accelerometerCalibration = {
+          stepIndex,
+          waitingForCompletion: true
+        }
+        this.setGuidedAction('calibrate-accelerometer', {
+          ...this.guidedActions['calibrate-accelerometer'],
+          status: 'running',
+          summary: 'Finalizing accelerometer calibration…',
+          instructions: ['Keep the vehicle still while ArduPilot stores the new accelerometer calibration.'],
+          ctaLabel: undefined,
+          updatedAtMs: Date.now(),
+          completedAtMs: undefined
+        })
+        this.scheduleAccelerometerCompletionFallback(stepIndex)
+      }
+      this.emit()
+    }, this.accelerometerStepAdvanceMs)
+  }
+
+  private scheduleAccelerometerCompletionFallback(stepIndex: number): void {
+    this.clearAccelerometerAdvanceTimer()
+    this.accelerometerAdvanceTimer = setTimeout(() => {
+      this.accelerometerAdvanceTimer = undefined
+      const current = this.guidedActions['calibrate-accelerometer']
+      const state = this.accelerometerCalibration
+      if (
+        !state ||
+        state.stepIndex !== stepIndex ||
+        !state.waitingForCompletion ||
+        current.status === 'failed' ||
+        current.status === 'succeeded'
+      ) {
+        return
+      }
+
+      this.completeAccelerometerCalibration()
+      this.emit()
+    }, this.accelerometerCompletionFallbackMs)
   }
 
   private scheduleMotorTestCompletion(): void {
@@ -1168,12 +1476,125 @@ export class ArduPilotConfiguratorRuntime {
     }
   }
 
+  private async runAccelerometerCalibrationAction(): Promise<void> {
+    const current = this.guidedActions['calibrate-accelerometer']
+    const calibrationState = this.accelerometerCalibration
+
+    if (calibrationState && (current.status === 'requested' || current.status === 'running')) {
+      await this.advanceAccelerometerCalibration(calibrationState.stepIndex)
+      return
+    }
+
+    const startedAtMs = Date.now()
+    this.setGuidedAction('calibrate-accelerometer', {
+      actionId: 'calibrate-accelerometer',
+      status: 'requested',
+      summary: 'Accelerometer calibration command queued.',
+      instructions: defaultInstructionsForAction('calibrate-accelerometer', this.sessionProfile),
+      statusTexts: [],
+      startedAtMs,
+      updatedAtMs: startedAtMs,
+      completedAtMs: undefined
+    })
+    this.emit()
+
+    try {
+      await this.sendCommand(MAV_CMD.PREFLIGHT_CALIBRATION, [0, 0, 0, 0, 1, 0, 0], {
+        waitForAck: true,
+        ackTimeoutMs: 3000
+      })
+      this.accelerometerCalibration = {
+        stepIndex: 0,
+        waitingForCompletion: false
+      }
+      this.setGuidedAction('calibrate-accelerometer', {
+        ...this.guidedActions['calibrate-accelerometer'],
+        status: 'running',
+        summary: 'Preparing accelerometer calibration…',
+        instructions: ['Keep the vehicle level and still while ArduPilot prepares the first posture sample.'],
+        ctaLabel: undefined,
+        updatedAtMs: Date.now(),
+        completedAtMs: undefined
+      })
+      this.scheduleAccelerometerPromptFallback(0)
+      this.emit()
+    } catch (error) {
+      this.clearAccelerometerPromptFallbackTimer()
+      this.clearAccelerometerAdvanceTimer()
+      this.accelerometerCalibration = undefined
+      this.failGuidedAction('calibrate-accelerometer', error)
+      this.emit()
+      throw error
+    }
+  }
+
+  private async advanceAccelerometerCalibration(stepIndex: number): Promise<void> {
+    const step = ACCELEROMETER_CALIBRATION_STEPS[stepIndex]
+    if (!step) {
+      throw new Error('Accelerometer calibration is already waiting for completion.')
+    }
+
+    const current = this.guidedActions['calibrate-accelerometer']
+    this.setGuidedAction('calibrate-accelerometer', {
+      ...current,
+      status: 'running',
+      summary: `Confirming ${step.ctaLabel.replace(/^Confirm /, '').replace(/ Position$/, '').toLowerCase()}...`,
+      instructions: [`Hold the frame still while ArduPilot records the ${step.ctaLabel.replace(/^Confirm /, '').replace(/ Position$/, '').toLowerCase()} posture.`],
+      ctaLabel: undefined,
+      updatedAtMs: Date.now(),
+      completedAtMs: undefined
+    })
+    this.emit()
+
+    try {
+      this.clearAccelerometerPromptFallbackTimer()
+      this.clearAccelerometerAdvanceTimer()
+      await this.session.send({
+        type: 'COMMAND_ACK',
+        command: 0,
+        result: MAV_RESULT.TEMPORARILY_REJECTED,
+        progress: 0,
+        resultParam2: 0,
+        targetSystem: this.vehicle?.systemId ?? 1,
+        targetComponent: this.vehicle?.componentId ?? 1
+      })
+      this.scheduleAccelerometerStepAdvance(stepIndex)
+      this.emit()
+    } catch (error) {
+      this.clearAccelerometerPromptFallbackTimer()
+      this.clearAccelerometerAdvanceTimer()
+      this.accelerometerCalibration = undefined
+      this.failGuidedAction('calibrate-accelerometer', error)
+      this.emit()
+      throw error
+    }
+  }
+
+  private completeAccelerometerCalibration(): void {
+    const current = this.guidedActions['calibrate-accelerometer']
+    const now = Date.now()
+    this.clearAccelerometerPromptFallbackTimer()
+    this.clearAccelerometerAdvanceTimer()
+    this.accelerometerCalibration = undefined
+    this.appendStatusEntry('info', 'Accelerometer calibration complete.')
+    this.setGuidedAction('calibrate-accelerometer', {
+      ...current,
+      status: 'succeeded',
+      summary: 'Accelerometer calibration complete.',
+      instructions: ['Review the updated setup state before moving on to compass or radio setup.'],
+      ctaLabel: undefined,
+      updatedAtMs: now,
+      completedAtMs: now
+    })
+  }
+
   private failGuidedAction(actionId: GuidedActionId, error: unknown): void {
     const message = error instanceof Error ? error.message : 'Unknown guided action error.'
     this.setGuidedAction(actionId, {
       ...this.guidedActions[actionId],
       status: 'failed',
       summary: message,
+      ctaLabel: undefined,
       updatedAtMs: Date.now(),
       completedAtMs: Date.now()
     })
@@ -1195,10 +1616,20 @@ export class ArduPilotConfiguratorRuntime {
         summary: match.summary,
         instructions: match.instructions ?? current.instructions,
         statusTexts: appendGuidedActionText(current.statusTexts, text),
+        ctaLabel: nextStatus === 'running' ? current.ctaLabel : undefined,
         startedAtMs: current.startedAtMs ?? now,
         updatedAtMs: now,
         completedAtMs: nextStatus === 'succeeded' || nextStatus === 'failed' ? now : undefined
       })
+
+      if (actionId === 'calibrate-accelerometer' && (nextStatus === 'succeeded' || nextStatus === 'failed')) {
+        this.accelerometerCalibration = undefined
+        this.clearAccelerometerPromptFallbackTimer()
+        this.clearAccelerometerAdvanceTimer()
+        if (nextStatus === 'succeeded') {
+          this.appendStatusEntry('info', 'Accelerometer calibration complete.')
+        }
+      }
     })
   }
 
@@ -1356,6 +1787,36 @@ function createIdleGuidedAction(actionId: GuidedActionId): GuidedActionState {
   }
 }
 
+function buildAccelerometerCalibrationGuidedAction(
+  stepIndex: number,
+  current: GuidedActionState
+): GuidedActionState {
+  const step = ACCELEROMETER_CALIBRATION_STEPS[stepIndex]
+  if (!step) {
+    return {
+      ...current,
+      status: 'running',
+      summary: 'Finalizing accelerometer calibration…',
+      instructions: ['Keep the vehicle still while ArduPilot stores the new accelerometer calibration.'],
+      ctaLabel: undefined,
+      updatedAtMs: Date.now(),
+      completedAtMs: undefined
+    }
+  }
+
+  const now = Date.now()
+  return {
+    ...current,
+    status: 'running',
+    summary: step.summary,
+    instructions: Array.from(step.instructions),
+    ctaLabel: step.ctaLabel,
+    updatedAtMs: now,
+    completedAtMs: undefined,
+    startedAtMs: current.startedAtMs ?? now
+  }
+}
+
 function cloneGuidedActions(guidedActions: Record<GuidedActionId, GuidedActionState>): Record<GuidedActionId, GuidedActionState> {
   return Object.fromEntries(
     GUIDED_ACTION_IDS.map((actionId) => [
@@ -1464,6 +1925,31 @@ function appendGuidedActionText(statusTexts: string[], text: string): string[] {
   return next.slice(0, MAX_GUIDED_ACTION_STATUS_TEXTS)
 }
 
+function includesAny(text: string, fragments: string[]): boolean {
+  return fragments.some((fragment) => text.includes(fragment))
+}
+
+function matchesGenericCalibrationSuccess(text: string): boolean {
+  return includesAny(text, [
+    'successful',
+    'succeeded',
+    'finished',
+    'done',
+    'complete',
+    'completed'
+  ])
+}
+
+function matchesGenericCalibrationFailure(text: string): boolean {
+  return includesAny(text, [
+    'failed',
+    'failure',
+    'cancelled',
+    'canceled',
+    'aborted'
+  ])
+}
+
 function normalizePreArmIssueText(text: string): string | undefined {
   const normalized = text.trim()
   const prefixedMatch = normalized.match(/^prearm[:\s-]*(.+)$/i)
@@ -1495,14 +1981,39 @@ function matchGuidedActionText(
   const actionIsActive = current.status === 'requested' || current.status === 'running'
 
   if (actionId === 'calibrate-accelerometer') {
-    if (normalized.includes('accelerometer calibration complete')) {
+    if (
+      normalized.includes('accelerometer calibration complete') ||
+      (actionIsActive &&
+        includesAny(normalized, [
+          'accel calibration successful',
+          'accelerometer calibration successful',
+          'accel cal successful',
+          'calibration successful',
+          'calibration complete',
+          'calibration completed'
+        ])) ||
+      (actionIsActive && matchesGenericCalibrationSuccess(normalized))
+    ) {
       return {
         status: 'succeeded',
         summary: 'Accelerometer calibration complete.',
         instructions: ['Review the updated setup state before moving on to compass or radio setup.']
       }
     }
-    if (normalized.includes('accelerometer calibration failed') || normalized.includes('accel cal failed')) {
+    if (
+      normalized.includes('accelerometer calibration failed') ||
+      normalized.includes('accel cal failed') ||
+      (actionIsActive &&
+        includesAny(normalized, [
+          'accelerometer calibration failed',
+          'accel calibration failed',
+          'accel cal failed',
+          'calibration failed',
+          'calibration cancelled',
+          'calibration canceled'
+        ])) ||
+      (actionIsActive && matchesGenericCalibrationFailure(normalized))
+    ) {
       return {
         status: 'failed',
         summary: 'Accelerometer calibration failed.',
@@ -1555,20 +2066,43 @@ function matchGuidedActionText(
       return {
         status: 'running',
         summary: text,
-        instructions: defaultInstructionsForAction(actionId, sessionProfile)
+        instructions: current.ctaLabel ? current.instructions : defaultInstructionsForAction(actionId, sessionProfile)
       }
     }
   }
 
   if (actionId === 'calibrate-compass') {
-    if (normalized.includes('compass calibration complete')) {
+    if (
+      normalized.includes('compass calibration complete') ||
+      (actionIsActive &&
+        includesAny(normalized, [
+          'compass calibration successful',
+          'mag calibration successful',
+          'calibration successful',
+          'calibration complete',
+          'calibration completed'
+        ])) ||
+      (actionIsActive && matchesGenericCalibrationSuccess(normalized))
+    ) {
       return {
         status: 'succeeded',
         summary: 'Compass calibration complete.',
         instructions: ['Review compass health before flight, especially if this was a USB-only bench session.']
       }
     }
-    if (normalized.includes('compass calibration failed') || normalized.includes('mag calibration failed')) {
+    if (
+      normalized.includes('compass calibration failed') ||
+      normalized.includes('mag calibration failed') ||
+      (actionIsActive &&
+        includesAny(normalized, [
+          'compass calibration failed',
+          'mag calibration failed',
+          'calibration failed',
+          'calibration cancelled',
+          'calibration canceled'
+        ])) ||
+      (actionIsActive && matchesGenericCalibrationFailure(normalized))
+    ) {
       return {
         status: 'failed',
         summary: 'Compass calibration failed.',
@@ -1690,6 +2224,8 @@ function mavCommandLabel(command: number): string {
       return 'SET_MESSAGE_INTERVAL'
     case MAV_CMD.DO_MOTOR_TEST:
       return 'DO_MOTOR_TEST'
+    case MAV_CMD.ACCELCAL_VEHICLE_POS:
+      return 'ACCELCAL_VEHICLE_POS'
     default:
       return `COMMAND(${command})`
   }

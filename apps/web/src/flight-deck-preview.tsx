@@ -474,7 +474,7 @@ export function FlightDeckPreview({
       current.rollVisual = approachLinear(current.rollVisual, target.rollVisual, interpolationFactor)
       current.headingDeg = approachWrappedDegrees(current.headingDeg, target.headingDeg, interpolationFactor)
 
-      state.modelWrapper.rotation.y = current.yawRad
+      state.modelWrapper.rotation.y = -current.yawRad
       if (state.model) {
         state.model.rotation.x = current.pitchRad
         state.model.rotation.z = -current.rollRad

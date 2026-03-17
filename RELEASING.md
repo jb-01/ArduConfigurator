@@ -20,12 +20,14 @@ Desktop packaging is not fully automated yet. Treat packaged desktop builds as p
    - `npm run test:e2e`
 3. Run `npm run test:sitl` when the change touches runtime/write-path behavior.
 4. Run a short live-FC pass for hardware-facing workflow changes.
+   For calibration-flow changes, explicitly verify the flow does not stall at the first pose or the final pose.
 5. Update public docs when contributor-facing or user-facing behavior changed:
    - `README.md`
    - `CONTRIBUTING.md`
    - `ARCHITECTURE.md`
    - `SUPPORT.md`
    - `SECURITY.md`
+   Keep attribution current when calibration visuals or other third-party assets change.
 6. Confirm no private planning material or local-only artifacts are staged.
 7. Write concise release notes that summarize:
    - the product/user-visible changes
