@@ -74,6 +74,12 @@ export interface RcMappingCandidate {
   livePwm: number
 }
 
+export interface CompassSetupAvailability {
+  gpsConfigured: boolean
+  enabledCompassCount: number
+  canSkipCalibration: boolean
+}
+
 const DEFAULT_MODE_CHANNEL = 5
 const DEFAULT_RC_AXIS_CHANNEL_MAP: Record<RcAxisId, number> = {
   roll: 1,
@@ -147,6 +153,23 @@ export function deriveModeSwitchEstimate(snapshot: ConfiguratorSnapshot): ModeSw
     estimatedSlot,
     configuredParamId,
     configuredValue
+  }
+}
+
+export function deriveCompassSetupAvailability(snapshot: ConfiguratorSnapshot): CompassSetupAvailability {
+  const gpsConfigured = [readRoundedParameter(snapshot, 'GPS_TYPE'), readRoundedParameter(snapshot, 'GPS_TYPE2')].some(
+    (value) => value !== undefined && value > 0
+  )
+  const enabledCompassCount = [
+    readRoundedParameter(snapshot, 'COMPASS_USE'),
+    readRoundedParameter(snapshot, 'COMPASS_USE2'),
+    readRoundedParameter(snapshot, 'COMPASS_USE3')
+  ].filter((value) => value !== undefined && value > 0).length
+
+  return {
+    gpsConfigured,
+    enabledCompassCount,
+    canSkipCalibration: enabledCompassCount === 0
   }
 }
 

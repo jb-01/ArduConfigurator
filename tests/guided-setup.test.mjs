@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   ArduPilotConfiguratorRuntime,
   createModeSwitchExerciseState,
+  deriveCompassSetupAvailability,
   deriveEscSetupSummary,
   deriveModeExerciseAssignments,
   deriveRcMapDraftValues,
@@ -93,6 +94,49 @@ test('deriveEscSetupSummary classifies digital motor protocols', () => {
 
   assert.equal(summary.calibrationPath, 'digital-protocol')
   assert.ok(summary.notes.some((note) => note.includes('Digital motor protocols')))
+})
+
+test('deriveCompassSetupAvailability allows skipping compass calibration for builds without an enabled compass', () => {
+  const noCompass = deriveCompassSetupAvailability(
+    createSnapshot({
+      GPS_TYPE: 9,
+      GPS_TYPE2: 0,
+      COMPASS_USE: 0,
+      COMPASS_USE2: 0,
+      COMPASS_USE3: 0
+    })
+  )
+
+  assert.equal(noCompass.gpsConfigured, true)
+  assert.equal(noCompass.enabledCompassCount, 0)
+  assert.equal(noCompass.canSkipCalibration, true)
+
+  const noGpsAndNoCompass = deriveCompassSetupAvailability(
+    createSnapshot({
+      GPS_TYPE: 0,
+      GPS_TYPE2: 0,
+      COMPASS_USE: 0,
+      COMPASS_USE2: 0,
+      COMPASS_USE3: 0
+    })
+  )
+
+  assert.equal(noGpsAndNoCompass.gpsConfigured, false)
+  assert.equal(noGpsAndNoCompass.enabledCompassCount, 0)
+  assert.equal(noGpsAndNoCompass.canSkipCalibration, true)
+
+  const withCompass = deriveCompassSetupAvailability(
+    createSnapshot({
+      GPS_TYPE: 9,
+      GPS_TYPE2: 0,
+      COMPASS_USE: 1,
+      COMPASS_USE2: 0,
+      COMPASS_USE3: 0
+    })
+  )
+
+  assert.equal(withCompass.canSkipCalibration, false)
+  assert.equal(withCompass.enabledCompassCount, 1)
 })
 
 test('mode-switch exercise targets distinct configured flight-mode positions, not every FLTMODEn slot', () => {

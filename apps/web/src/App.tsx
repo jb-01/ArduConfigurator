@@ -206,20 +206,6 @@ interface AppViewDescriptor {
   tone: StatusTone
 }
 
-interface WorkspaceNavSectionDefinition {
-  id: 'flight' | 'bench' | 'change' | 'expert'
-  label: string
-  description: string
-  viewIds: AppViewId[]
-}
-
-interface WorkspaceNavSection {
-  id: WorkspaceNavSectionDefinition['id']
-  label: string
-  description: string
-  views: AppViewDescriptor[]
-}
-
 interface RcChannelDisplay {
   channelNumber: number
   role: string
@@ -515,75 +501,45 @@ function viewMonogram(viewId: AppViewId): string {
   }
 }
 
-const WORKSPACE_NAV_SECTIONS: WorkspaceNavSectionDefinition[] = [
-  {
-    id: 'flight',
-    label: 'Flight Deck',
-    description: 'Connect, inspect, and keep the aircraft state legible.',
-    viewIds: ['setup']
-  },
-  {
-    id: 'bench',
-    label: 'Bench Setup',
-    description: 'Wire, verify, and harden the aircraft before flight.',
-    viewIds: ['ports', 'vtx', 'osd', 'receiver', 'outputs', 'power']
-  },
-  {
-    id: 'change',
-    label: 'Change Control',
-    description: 'Manage baselines, presets, and deliberate configuration changes.',
-    viewIds: ['snapshots', 'presets', 'tuning']
-  },
-  {
-    id: 'expert',
-    label: 'Engineering',
-    description: 'Direct parameter access and deep inspection.',
-    viewIds: ['parameters']
-  }
-]
-
 function missionTitleForView(viewId: AppViewId): string {
   switch (viewId) {
     case 'setup':
-      return 'Flight Deck'
+      return 'Setup'
     case 'ports':
-      return 'Ports & Peripheral Routing'
+      return 'Ports'
     case 'vtx':
       return 'Video Transmitter'
     case 'osd':
       return 'On-Screen Display'
     case 'receiver':
-      return 'Receiver Workbench'
+      return 'Receiver'
     case 'outputs':
-      return 'Outputs & Bench Lab'
+      return 'Outputs'
     case 'power':
-      return 'Power & Safety'
+      return 'Power'
     case 'snapshots':
-      return 'Snapshots & Restore'
+      return 'Snapshots'
     case 'tuning':
-      return 'Flight Feel'
+      return 'Tuning'
     case 'presets':
-      return 'Guided Presets'
+      return 'Presets'
     case 'parameters':
-      return 'Expert Parameters'
+      return 'Parameters'
     default:
       return 'Configurator'
   }
 }
 
-function missionSectionLabelForView(viewId: AppViewId): string {
-  const section = WORKSPACE_NAV_SECTIONS.find((candidate) => candidate.viewIds.includes(viewId))
-  return section?.label ?? 'Configurator'
-}
-
 function AttitudePreview({
   snapshot,
   compact = false,
+  showReadouts = true,
   frameClassLabel,
   frameTypeLabel
 }: {
   snapshot: ConfiguratorSnapshot
   compact?: boolean
+  showReadouts?: boolean
   frameClassLabel?: string
   frameTypeLabel?: string
 }) {
@@ -597,6 +553,7 @@ function AttitudePreview({
       frameClassLabel={frameClassLabel}
       frameTypeLabel={frameTypeLabel}
       compact={compact}
+      showReadouts={showReadouts}
       testId={compact ? undefined : 'setup-craft-preview'}
     />
   )
@@ -1042,6 +999,32 @@ function formatBatteryTelemetry(snapshot: ConfiguratorSnapshot): string {
   return `${batteryTelemetry.voltageV ?? 'unknown'} V${remaining}`
 }
 
+function normalizeHeadingDegrees(value: number | undefined): number | undefined {
+  if (value === undefined || Number.isNaN(value)) {
+    return undefined
+  }
+
+  const normalized = value % 360
+  return normalized >= 0 ? normalized : normalized + 360
+}
+
+function formatDegreeTelemetry(value: number | undefined): string {
+  return value === undefined || Number.isNaN(value) ? 'Waiting' : `${value.toFixed(1)}°`
+}
+
+function formatHeadingTelemetry(value: number | undefined): string {
+  const normalized = normalizeHeadingDegrees(value)
+  return normalized === undefined ? 'Waiting' : `${Math.round(normalized)}°`
+}
+
+function formatCoordinateTelemetry(value: number | undefined, positiveLabel: string, negativeLabel: string): string {
+  if (value === undefined || Number.isNaN(value)) {
+    return 'Waiting'
+  }
+
+  return `${Math.abs(value).toFixed(6)}° ${value >= 0 ? positiveLabel : negativeLabel}`
+}
+
 function hasRunningGuidedAction(snapshot: ConfiguratorSnapshot): boolean {
   return (
     Object.values(snapshot.guidedActions).some((state) => state.status === 'requested' || state.status === 'running') ||
@@ -1050,9 +1033,41 @@ function hasRunningGuidedAction(snapshot: ConfiguratorSnapshot): boolean {
   )
 }
 
-function canRunGuidedAction(snapshot: ConfiguratorSnapshot, actionId: keyof typeof actionLabels): boolean {
+function isGuidedActionBusyKey(value: string | undefined): value is keyof typeof actionLabels {
+  return value !== undefined && value in actionLabels
+}
+
+function setupActionBusyReason(busyAction: string | undefined, actionId: keyof typeof actionLabels, actionTitle: string): string | undefined {
+  if (busyAction === undefined) {
+    return undefined
+  }
+
+  if (busyAction === actionId) {
+    return `${actionTitle} request is being sent.`
+  }
+
+  if (busyAction.startsWith('connect')) {
+    return 'Finish connecting before running setup actions.'
+  }
+
+  if (busyAction === 'disconnect') {
+    return 'Finish disconnecting before running setup actions.'
+  }
+
+  if (busyAction === 'motor-test') {
+    return 'Finish the current motor test request first.'
+  }
+
+  if (isGuidedActionBusyKey(busyAction)) {
+    return `${actionLabels[busyAction]} request is still in flight.`
+  }
+
+  return 'Another request is still in flight.'
+}
+
+function guidedActionBlockingReason(snapshot: ConfiguratorSnapshot, actionId: keyof typeof actionLabels): string | undefined {
   if (snapshot.connection.kind !== 'connected') {
-    return false
+    return 'Connect to a vehicle first.'
   }
 
   const currentAction = snapshot.guidedActions[actionId]
@@ -1060,24 +1075,48 @@ function canRunGuidedAction(snapshot: ConfiguratorSnapshot, actionId: keyof type
     actionId === 'calibrate-accelerometer' &&
     (currentAction.status === 'requested' || currentAction.status === 'running') &&
     currentAction.ctaLabel !== undefined
-  const hasBlockingAction = Object.entries(snapshot.guidedActions).some(
+  const blockingAction = Object.entries(snapshot.guidedActions).find(
     ([candidateActionId, state]) =>
       candidateActionId !== actionId && (state.status === 'requested' || state.status === 'running')
   )
 
-  if (hasBlockingAction || ((currentAction.status === 'requested' || currentAction.status === 'running') && !canContinueCurrentAction)) {
-    return false
+  if (blockingAction) {
+    return `${actionLabels[blockingAction[0] as keyof typeof actionLabels]} is already in progress.`
+  }
+
+  if ((currentAction.status === 'requested' || currentAction.status === 'running') && !canContinueCurrentAction) {
+    return `${actionLabels[actionId]} is already in progress.`
   }
 
   if (snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running') {
-    return false
+    return 'Finish the current motor test first.'
   }
 
   if (actionId === 'request-parameters') {
-    return true
+    return undefined
   }
 
-  return snapshot.vehicle !== undefined && !snapshot.vehicle.armed && snapshot.parameterStats.status === 'complete'
+  if (snapshot.vehicle === undefined) {
+    return 'Waiting for vehicle heartbeat.'
+  }
+
+  if (snapshot.vehicle.armed) {
+    return 'Disarm the vehicle before running this action.'
+  }
+
+  if (snapshot.parameterStats.status !== 'complete') {
+    return 'Finish pulling parameters before running this action.'
+  }
+
+  if (actionId === 'calibrate-compass' && deriveCompassSetupAvailability(snapshot).enabledCompassCount === 0) {
+    return 'No enabled compass detected on this vehicle. Skip this step or enable a compass first.'
+  }
+
+  return undefined
+}
+
+function canRunGuidedAction(snapshot: ConfiguratorSnapshot, actionId: keyof typeof actionLabels): boolean {
+  return guidedActionBlockingReason(snapshot, actionId) === undefined
 }
 
 function guidedActionButtonLabel(
@@ -1987,7 +2026,9 @@ function downloadTextFile(filename: string, contents: string): void {
 }
 
 function downloadBinaryFile(filename: string, bytes: Uint8Array, mimeType = 'application/octet-stream'): void {
-  const blob = new Blob([bytes], { type: mimeType })
+  const normalizedBytes = new Uint8Array(bytes.byteLength)
+  normalizedBytes.set(bytes)
+  const blob = new Blob([normalizedBytes], { type: mimeType })
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url
@@ -2097,7 +2138,6 @@ export function App() {
   const snapshotImportInputRef = useRef<HTMLInputElement>(null)
   const previousModeSwitchRef = useRef<{ slot?: number; pwm?: number }>({})
   const serialAutoReconnectAttemptedRef = useRef(false)
-  const parameterSyncWidth = snapshot.parameterStats.progress === null ? 0 : snapshot.parameterStats.progress * 100
   const boardCatalogEntry = useMemo(() => findBoardCatalogEntry(snapshot.hardware.board?.boardType), [snapshot.hardware.board?.boardType])
   const rcChannelDisplays = buildRcChannelDisplays(snapshot)
   const airframe = deriveArducopterAirframe(snapshot)
@@ -2271,9 +2311,9 @@ export function App() {
           })
         }
       } finally {
-        if (!cancelled) {
-          setBusyAction(undefined)
-        }
+        // The effect re-runs as connection state changes; only clear the auto-serial sentinel so
+        // Setup actions do not stay falsely blocked after the port is already connected.
+        setBusyAction((current) => (current === 'connect:auto-serial' ? undefined : current))
       }
     })()
 
@@ -2520,13 +2560,13 @@ export function App() {
     () => selectedSnapshotDiffEntries.filter((entry) => entry.status === 'invalid'),
     [selectedSnapshotDiffEntries]
   )
-  const selectedSnapshotDiffSignature = useMemo(
-    () => createDraftSignature(selectedSnapshotDiffEntries),
-    [selectedSnapshotDiffEntries]
-  )
   const selectedSnapshotRebootSensitiveCount = useMemo(
     () => selectedSnapshotChangedEntries.filter((entry) => entry.definition?.rebootRequired).length,
     [selectedSnapshotChangedEntries]
+  )
+  const selectedSnapshotDiffSignature = useMemo(
+    () => createDraftSignature(selectedSnapshotDiffEntries),
+    [selectedSnapshotDiffEntries]
   )
   const presetDefinitions = useMemo(() => metadataCatalog.presets, [metadataCatalog.presets])
   const presetGroups = useMemo(
@@ -5004,6 +5044,8 @@ export function App() {
         case 'accelerometer': {
           const actionState = snapshot.guidedActions['calibrate-accelerometer']
           confirmationOutcome = accelerometerConfirmation?.outcome
+          const accelerometerCalibrationRecorded =
+            actionState.status === 'succeeded' || accelerometerConfirmation !== undefined
           if (accelerometerConfirmation?.outcome === 'already-done') {
             criteria = [
               {
@@ -5038,19 +5080,23 @@ export function App() {
                 met: actionState.status === 'succeeded' || section.status === 'complete'
               },
               {
-                label: 'Operator confirmed the posture prompts were completed cleanly',
-                met: accelerometerConfirmation !== undefined
+                label: 'Calibration was recorded in-app or confirmed from prior review',
+                met: accelerometerCalibrationRecorded
               }
             ]
             summary = actionState.summary
             detail =
               actionState.status === 'succeeded'
-                ? 'Accelerometer calibration completed successfully in the shared runtime. Confirm that all posture prompts were completed cleanly before proceeding.'
+                ? 'Accelerometer calibration completed successfully in the shared runtime. Guided setup now counts this step as complete, and you can rerun it any time to verify it again.'
                 : actionState.instructions[0] ?? 'Run the accelerometer calibration and follow each posture prompt in order.'
             evidence = [
               ...actionState.statusTexts.slice(-2),
               ...section.notes,
-              `Review: ${accelerometerConfirmation ? `confirmed at ${formatConfirmationTime(accelerometerConfirmation.confirmedAtMs)}` : 'pending operator confirmation'}`
+              accelerometerConfirmation
+                ? `Review: confirmed at ${formatConfirmationTime(accelerometerConfirmation.confirmedAtMs)}`
+                : actionState.status === 'succeeded'
+                  ? `Recorded from in-app calibration at ${formatConfirmationTime(actionState.completedAtMs)}`
+                  : 'Review: pending calibration'
             ].slice(0, 4)
             actions.unshift({
               kind: 'guided',
@@ -5059,15 +5105,17 @@ export function App() {
               actionId: 'calibrate-accelerometer',
               disabled: busyAction !== undefined || !canRunGuidedAction(snapshot, 'calibrate-accelerometer')
             })
-            actions.splice(1, 0, {
-              kind: accelerometerConfirmation ? 'clear-confirmation' : 'confirm-step',
-              label: accelerometerConfirmation ? 'Clear Calibration Confirmation' : 'Confirm Calibration Complete',
-              tone: 'secondary',
-              sectionId: 'accelerometer',
-              confirmationOutcome: 'complete',
-              disabled: actionState.status !== 'succeeded'
-            })
-            if (!accelerometerConfirmation) {
+            if (accelerometerConfirmation || actionState.status !== 'succeeded') {
+              actions.splice(1, 0, {
+                kind: accelerometerConfirmation ? 'clear-confirmation' : 'confirm-step',
+                label: accelerometerConfirmation ? 'Clear Calibration Confirmation' : 'Confirm Calibration Complete',
+                tone: 'secondary',
+                sectionId: 'accelerometer',
+                confirmationOutcome: 'complete',
+                disabled: actionState.status !== 'succeeded'
+              })
+            }
+            if (!accelerometerConfirmation && actionState.status !== 'succeeded') {
               actions.push({
                 kind: 'confirm-step',
                 label: 'Already Calibrated — Continue',
@@ -5083,12 +5131,10 @@ export function App() {
         case 'compass': {
           const actionState = snapshot.guidedActions['calibrate-compass']
           confirmationOutcome = compassConfirmation?.outcome
+          const compassCalibrationRecorded =
+            actionState.status === 'succeeded' || compassConfirmation !== undefined
           if (compassConfirmation?.outcome === 'not-applicable') {
             criteria = [
-              {
-                label: 'GPS is configured on this build',
-                met: compassSetupAvailability.gpsConfigured
-              },
               {
                 label: 'No enabled compass was detected on COMPASS_USE settings',
                 met: compassSetupAvailability.enabledCompassCount === 0
@@ -5176,10 +5222,6 @@ export function App() {
           } else if (compassSetupAvailability.canSkipCalibration && actionState.status !== 'succeeded') {
             criteria = [
               {
-                label: 'GPS is configured on this build',
-                met: compassSetupAvailability.gpsConfigured
-              },
-              {
                 label: 'No enabled compass was detected on COMPASS_USE settings',
                 met: compassSetupAvailability.enabledCompassCount === 0
               },
@@ -5189,8 +5231,8 @@ export function App() {
               }
             ]
             summary = compassConfirmation
-              ? 'Compass step skipped for a GPS build with no enabled compass.'
-              : 'GPS is configured, but no enabled compass was detected on this build.'
+              ? 'Compass step skipped for a build with no enabled compass.'
+              : 'No enabled compass was detected on this build.'
             detail = compassConfirmation
               ? 'The guided flow will skip compass calibration for this aircraft unless compass hardware is later added or enabled.'
               : 'If this aircraft truly has no compass, confirm that here and move on. If a compass is fitted, enable it and run calibration instead.'
@@ -5233,19 +5275,23 @@ export function App() {
                 met: actionState.status === 'succeeded' || section.status === 'complete'
               },
               {
-                label: 'Operator confirmed the full rotation workflow completed cleanly',
-                met: compassConfirmation !== undefined
+                label: 'Calibration was recorded in-app or confirmed from operator review',
+                met: compassCalibrationRecorded
               }
             ]
             summary = actionState.summary
             detail =
               actionState.status === 'succeeded'
-                ? 'Compass calibration completed successfully in the shared runtime. Confirm that the full rotation workflow completed cleanly before proceeding.'
+                ? 'Compass calibration completed successfully in the shared runtime. Guided setup now counts this step as complete, and you can rerun it any time to verify it again.'
                 : actionState.instructions[0] ?? 'Run compass calibration when the vehicle is fully powered and magnetometer hardware is available.'
             evidence = [
               ...actionState.statusTexts.slice(-2),
               ...section.notes,
-              `Review: ${compassConfirmation ? `confirmed at ${formatConfirmationTime(compassConfirmation.confirmedAtMs)}` : 'pending operator confirmation'}`
+              compassConfirmation
+                ? `Review: confirmed at ${formatConfirmationTime(compassConfirmation.confirmedAtMs)}`
+                : actionState.status === 'succeeded'
+                  ? `Recorded from in-app calibration at ${formatConfirmationTime(actionState.completedAtMs)}`
+                  : 'Review: pending calibration'
             ].slice(0, 4)
             actions.unshift({
               kind: 'guided',
@@ -5254,15 +5300,17 @@ export function App() {
               actionId: 'calibrate-compass',
               disabled: busyAction !== undefined || !canRunGuidedAction(snapshot, 'calibrate-compass')
             })
-            actions.splice(1, 0, {
-              kind: compassConfirmation ? 'clear-confirmation' : 'confirm-step',
-              label: compassConfirmation ? 'Clear Calibration Confirmation' : 'Confirm Calibration Complete',
-              tone: 'secondary',
-              sectionId: 'compass',
-              confirmationOutcome: 'complete',
-              disabled: actionState.status !== 'succeeded'
-            })
-            if (!compassConfirmation) {
+            if (compassConfirmation || actionState.status !== 'succeeded') {
+              actions.splice(1, 0, {
+                kind: compassConfirmation ? 'clear-confirmation' : 'confirm-step',
+                label: compassConfirmation ? 'Clear Calibration Confirmation' : 'Confirm Calibration Complete',
+                tone: 'secondary',
+                sectionId: 'compass',
+                confirmationOutcome: 'complete',
+                disabled: actionState.status !== 'succeeded'
+              })
+            }
+            if (!compassConfirmation && actionState.status !== 'succeeded') {
               actions.push({
                 kind: 'confirm-step',
                 label: 'Already Calibrated — Continue',
@@ -5942,84 +5990,6 @@ export function App() {
     [appViews, isExpertMode]
   )
   const activeViewDescriptor = visibleAppViews.find((view) => view.id === activeViewId) ?? visibleAppViews[0]
-  const workspaceNavSections = useMemo<WorkspaceNavSection[]>(
-    () =>
-      WORKSPACE_NAV_SECTIONS.map((section) => ({
-        id: section.id,
-        label: section.label,
-        description: section.description,
-        views: section.viewIds
-          .map((viewId) => visibleAppViews.find((view) => view.id === viewId))
-          .filter((view): view is AppViewDescriptor => view !== undefined)
-      })).filter((section) => section.views.length > 0),
-    [visibleAppViews]
-  )
-  const activeWorkspaceSection =
-    workspaceNavSections.find((section) => section.views.some((view) => view.id === activeViewId)) ?? workspaceNavSections[0]
-  const totalWorkbenchStagedChanges =
-    portsStagedDrafts.length +
-    vtxStagedDrafts.length +
-    osdStagedDrafts.length +
-    receiverStagedDrafts.length +
-    outputReviewStagedDrafts.length +
-    outputAssignmentStagedDrafts.length +
-    outputNotificationStagedDrafts.length +
-    powerStagedDrafts.length +
-    tuningStagedDrafts.length
-  const totalWorkbenchInvalidChanges =
-    portsInvalidDrafts.length +
-    vtxInvalidDrafts.length +
-    osdInvalidDrafts.length +
-    receiverInvalidDrafts.length +
-    outputReviewInvalidDrafts.length +
-    outputAssignmentInvalidDrafts.length +
-    outputNotificationInvalidDrafts.length +
-    powerInvalidDrafts.length +
-    tuningInvalidDrafts.length
-  const nextFocus = (() => {
-    if (parameterFollowUp) {
-      return {
-        title: parameterFollowUp.requiresReboot ? 'Reboot and refresh the session' : 'Refresh the live baseline',
-        detail: parameterFollowUp.text,
-        viewId: 'snapshots' as AppViewId,
-        actionLabel: parameterFollowUp.requiresReboot ? 'Open Snapshots & Restore' : 'Review Live Drift'
-      }
-    }
-
-    if (!guidedSetupComplete) {
-      return {
-        title: `Continue ${selectedSetupSection.title}`,
-        detail: selectedSetupSection.detail,
-        viewId: 'setup' as AppViewId,
-        actionLabel: 'Open Flight Deck'
-      }
-    }
-
-    if (selectedSnapshotChangedEntries.length > 0) {
-      return {
-        title: 'Review drift against the active baseline',
-        detail: `${selectedSnapshotChangedEntries.length} snapshot difference(s) are active against ${selectedSnapshot?.label ?? 'the selected baseline'}.`,
-        viewId: 'snapshots' as AppViewId,
-        actionLabel: 'Open Snapshots & Restore'
-      }
-    }
-
-    if (totalWorkbenchStagedChanges > 0 || stagedParameterDrafts.length > 0) {
-      return {
-        title: 'Resolve staged changes before moving on',
-        detail: `${totalWorkbenchStagedChanges + stagedParameterDrafts.length} staged change(s) are waiting for review or apply.`,
-        viewId: activeViewId,
-        actionLabel: 'Stay in Current Workspace'
-      }
-    }
-
-    return {
-      title: `Work the ${missionTitleForView(activeViewDescriptor.id)} surface`,
-      detail: activeViewDescriptor.description,
-      viewId: activeViewDescriptor.id,
-      actionLabel: 'Stay Focused Here'
-    }
-  })()
   function formatCategoryLabel(categoryId: string | undefined): string {
     if (!categoryId) {
       return 'Uncategorized'
@@ -6437,159 +6407,375 @@ export function App() {
     }
   }
 
-  function returnToMissionControl(): void {
-    setPendingSetupWizardFocusId(undefined)
-    setActiveViewId('setup')
-    setSetupMode('overview')
-  }
+  const setupBenchActions = [
+    {
+      actionId: 'calibrate-accelerometer',
+      title: 'Accelerometer',
+      copy: 'Keep the aircraft flat on the bench, then step through the pose prompts until the accelerometer calibration completes.'
+    },
+    {
+      actionId: 'calibrate-compass',
+      title: 'Compass',
+      copy: 'Run compass calibration from the same Setup surface so the user never has to fall back to raw parameters.'
+    },
+    {
+      actionId: 'request-parameters',
+      title: 'Pull Parameters',
+      copy: parameterFollowUp?.text ?? 'Refresh the parameter snapshot after reboots, board changes, or any setup work that needs a fresh sync.'
+    },
+    {
+      actionId: 'reboot-autopilot',
+      title: 'Reboot',
+      copy: 'Use a controlled reboot after serial-role, board-orientation, or other reboot-sensitive changes before continuing setup.'
+    }
+  ] as const
+  const setupStatusEntries = snapshot.statusTexts.slice(0, 5)
+  const setupHasGpsCard = gpsPeripheralViewModels.length > 0 || snapshot.liveVerification.globalPosition.verified
+  const setupGpsConfigured = gpsPeripheralViewModels.some((peripheral) => peripheral.value !== 0)
+  const setupTransportLabel =
+    transportMode === 'demo'
+      ? 'Demo transport'
+      : transportMode === 'web-serial'
+        ? rememberedSerialPortLabel
+          ? `Serial · ${rememberedSerialPortLabel}`
+          : 'Serial transport'
+        : `WebSocket · ${websocketUrl}`
+  const portVisibilitySummary = showAllSerialPorts
+    ? `Showing all ${serialPortViewModels.length} detected serial ports.`
+    : `Showing ${visibleSerialPortViewModels.length} active or edited port${visibleSerialPortViewModels.length === 1 ? '' : 's'} first${
+        hiddenSerialPortCount > 0
+          ? `, with ${hiddenSerialPortCount} unused slot${hiddenSerialPortCount === 1 ? '' : 's'} hidden.`
+          : '.'
+      }`
+  const headerBatteryPercent = snapshot.liveVerification.batteryTelemetry.verified
+    ? Math.max(8, Math.min(100, snapshot.liveVerification.batteryTelemetry.remainingPercent ?? 62))
+    : 6
+  const headerParameterPercent =
+    snapshot.parameterStats.status === 'complete'
+      ? 100
+      : snapshot.parameterStats.progress !== null
+        ? Math.max(4, Math.min(99, Math.round(snapshot.parameterStats.progress * 100)))
+        : snapshot.parameterStats.status === 'requesting'
+          ? 20
+          : snapshot.parameterStats.status === 'awaiting-vehicle'
+            ? 6
+            : 0
+  const headerBaroActive =
+    snapshot.connection.kind === 'connected' &&
+    (snapshot.liveVerification.globalPosition.altitudeM !== undefined ||
+      snapshot.liveVerification.globalPosition.relativeAltitudeM !== undefined)
+  const headerWarningActive =
+    !snapshot.preArmStatus.healthy || snapshot.statusTexts.some((entry) => entry.severity === 'warning' || entry.severity === 'error')
+  const headerBatteryLabel = snapshot.liveVerification.batteryTelemetry.verified
+    ? `${formatVoltage(snapshot.liveVerification.batteryTelemetry.voltageV)}${
+        snapshot.liveVerification.batteryTelemetry.remainingPercent !== undefined
+          ? ` · ${formatRemaining(snapshot.liveVerification.batteryTelemetry.remainingPercent)}`
+          : ''
+      }`
+    : sessionProfile === 'usb-bench'
+      ? 'USB bench / no pack telemetry'
+      : 'No live battery telemetry'
+  const headerParameterLabel =
+    snapshot.parameterStats.status === 'complete'
+      ? `Params ${snapshot.parameterStats.downloaded}`
+      : `Params ${formatParameterSync(snapshot)}`
+  const headerSensorItems = [
+    {
+      id: 'gyro',
+      label: 'Gyro',
+      stateClass: snapshot.liveVerification.attitudeTelemetry.verified ? 'is-active' : '',
+      title: snapshot.liveVerification.attitudeTelemetry.verified ? 'Attitude telemetry is live.' : 'Waiting for attitude telemetry.'
+    },
+    {
+      id: 'accel',
+      label: 'Accel',
+      stateClass: snapshot.liveVerification.attitudeTelemetry.verified ? 'is-active' : '',
+      title: snapshot.liveVerification.attitudeTelemetry.verified ? 'Accelerometer-backed attitude is available.' : 'Waiting for accelerometer-backed attitude.'
+    },
+    {
+      id: 'mag',
+      label: 'Mag',
+      stateClass: compassSetupAvailability.enabledCompassCount > 0 ? 'is-active' : '',
+      title:
+        compassSetupAvailability.enabledCompassCount > 0
+          ? `${compassSetupAvailability.enabledCompassCount} enabled compass${compassSetupAvailability.enabledCompassCount === 1 ? '' : 'es'}.`
+          : 'No enabled compass detected from current parameters.'
+    },
+    {
+      id: 'baro',
+      label: 'Baro',
+      stateClass: headerBaroActive ? 'is-active' : '',
+      title: headerBaroActive ? 'Altitude telemetry is present.' : 'No barometric-style altitude telemetry is live.'
+    },
+    {
+      id: 'gps',
+      label: 'GPS',
+      stateClass: snapshot.liveVerification.globalPosition.verified ? 'is-fix' : setupGpsConfigured ? 'is-active' : '',
+      title: snapshot.liveVerification.globalPosition.verified
+        ? 'GPS fix is verified.'
+        : setupGpsConfigured
+          ? 'GPS is configured but no live fix is verified.'
+          : 'GPS is not configured or no live GPS is present.'
+    },
+    {
+      id: 'rc',
+      label: 'RC',
+      stateClass: snapshot.liveVerification.rcInput.verified ? 'is-active' : '',
+      title: snapshot.liveVerification.rcInput.verified
+        ? `${snapshot.liveVerification.rcInput.channelCount} RC channels are live.`
+        : 'RC waiting.'
+    }
+  ] as const
 
   return (
 	    <main className="app-shell">
 	      <header className="app-header">
 	        <div className="app-header__brand">
             <div className="app-header__mark">AC</div>
-	          <span className="app-header__title">ArduConfigurator</span>
+            <div className="app-header__brand-copy">
+              <strong>ArduConfigurator</strong>
+              <small>
+                {snapshot.vehicle?.firmware
+                  ? `${snapshot.vehicle?.vehicle ?? 'ArduPilot'} · ${snapshot.vehicle.firmware}`
+                  : 'ArduPilot configuration utility'}
+              </small>
+            </div>
 	        </div>
-          <div className="app-header__summary">
-            <div className="app-header__status-group">
-              <span className="app-header__status-item is-live">
-                <span className={`dot ${snapshot.connection.kind === 'connected' ? 'is-connected' : ''}`} />
-                {snapshot.connection.kind}
-              </span>
+
+          <div className="app-header__connection" data-testid="header-session-strip">
+            <select
+              data-testid="transport-mode-select"
+              value={transportMode}
+              onChange={(event) => setTransportMode(event.target.value as TransportMode)}
+              disabled={busyAction !== undefined || snapshot.connection.kind === 'connected'}
+            >
+              <option value="demo">Demo</option>
+              <option value="web-serial" disabled={!webSerialSupported}>
+                Serial{webSerialSupported ? '' : ' (n/a)'}
+              </option>
+              <option value="websocket">WebSocket</option>
+            </select>
+            {transportMode === 'websocket' ? (
+              <input
+                data-testid="websocket-url-input"
+                className="app-header__connection-input"
+                type="text"
+                value={websocketUrl}
+                onChange={(event) => setWebsocketUrl(event.target.value)}
+                disabled={busyAction !== undefined || snapshot.connection.kind === 'connected'}
+                spellCheck={false}
+                placeholder={DEFAULT_WEBSOCKET_URL}
+              />
+            ) : null}
+            <select
+              data-testid="session-profile-select"
+              value={sessionProfile}
+              onChange={(event) => setSessionProfile(event.target.value as SessionProfile)}
+            >
+              <option value="full-power">Full power</option>
+              <option value="usb-bench">USB bench</option>
+            </select>
+          </div>
+
+          <div className="app-header__telemetry">
+            <div className="header-quad-status" style={{ ['--battery-level' as string]: `${headerBatteryPercent}%` }}>
+              <div className="header-quad-status__battery" title={headerBatteryLabel}>
+                <div className={`header-battery-icon${snapshot.liveVerification.batteryTelemetry.verified ? ' is-live' : ''}${batteryHealthTone(snapshot) === 'danger' ? ' is-danger' : batteryHealthTone(snapshot) === 'warning' ? ' is-warning' : ''}`}>
+                  <span className="header-battery-icon__level" />
+                </div>
+                <div className="header-quad-status__legend">
+                  <strong>{headerBatteryLabel}</strong>
+                  <small data-testid="session-vehicle-name">{snapshot.vehicle?.vehicle ?? 'No vehicle'}</small>
+                </div>
+              </div>
+
+              <div className="header-quad-status__flags">
+                <span
+                  className={`header-quad-flag header-quad-flag--armed${snapshot.vehicle?.armed ? ' is-active is-warning' : ''}`}
+                  title={snapshot.vehicle?.armed ? 'Armed' : 'Disarmed'}
+                />
+                <span
+                  className={`header-quad-flag header-quad-flag--failsafe${headerWarningActive ? ' is-active is-warning' : ''}`}
+                  title={headerWarningActive ? 'Warnings or pre-arm issues are present.' : 'No current warnings.'}
+                />
+                <span
+                  className={`header-quad-flag header-quad-flag--link${snapshot.connection.kind === 'connected' ? ' is-active' : ''}`}
+                  title={snapshot.connection.kind === 'connected' ? 'Vehicle link connected.' : 'Disconnected.'}
+                />
+              </div>
             </div>
-            <div className="app-header__status-group">
-              <span className="app-header__status-item is-live" data-testid="session-vehicle-name">{snapshot.vehicle?.vehicle ?? 'No vehicle'}</span>
-              <span className="app-header__status-item">{snapshot.vehicle?.flightMode ?? '—'}</span>
-              <span className="app-header__status-item">{snapshot.vehicle?.armed ? 'ARMED' : 'DISARMED'}</span>
+
+            <div className="header-sensor-status" aria-label="Live status sensors">
+              {headerSensorItems.map((item) => (
+                <div key={item.id} className={`header-sensor-status__item ${item.stateClass}`.trim()} title={item.title}>
+                  <span className={`header-sensor-status__icon header-sensor-status__icon--${item.id}`} />
+                  <span className="header-sensor-status__label">{item.label}</span>
+                </div>
+              ))}
             </div>
-            <div className="app-header__status-group">
-              <span className="app-header__status-item" data-testid="session-parameter-summary">
-                {snapshot.parameterStats.status === 'complete' ? `${snapshot.parameterStats.downloaded} params` : formatParameterSync(snapshot)}
-              </span>
-              <span className="app-header__status-item">{snapshot.sessionProfile === 'usb-bench' ? 'USB' : 'Full'}</span>
-              {parameterFollowUp ? <span className="app-header__status-item" style={{ color: 'var(--warning)' }}>{parameterFollowUp.requiresReboot ? 'Reboot req.' : 'Refresh req.'}</span> : null}
+
+            <div className="header-sync-panel">
+              <strong data-testid="session-parameter-summary">{headerParameterLabel}</strong>
+              <progress className="header-sync-panel__progress" value={headerParameterPercent} max={100} />
             </div>
           </div>
+
+          <div className="app-header__mode-switch">
+            <label className="expert-mode-toggle">
+              <input
+                type="checkbox"
+                data-testid="product-mode-expert"
+                checked={productMode === 'expert'}
+                onChange={(event) => setProductMode(event.target.checked ? 'expert' : 'basic')}
+              />
+              <span className="expert-mode-toggle__track" aria-hidden="true">
+                <span className="expert-mode-toggle__thumb" />
+              </span>
+              <span className="expert-mode-toggle__label">Enable Expert Mode</span>
+            </label>
+            <button
+              type="button"
+              data-testid="product-mode-basic"
+              className="visually-hidden"
+              onClick={() => setProductMode('basic')}
+            >
+              Basic
+            </button>
+          </div>
+
           <div className="app-header__actions">
-            <div className="session-strip" data-testid="header-session-strip">
-              <div className="session-strip__controls">
-                <select
-                  data-testid="transport-mode-select"
-                  value={transportMode}
-                  onChange={(event) => setTransportMode(event.target.value as TransportMode)}
-                  disabled={busyAction !== undefined || snapshot.connection.kind === 'connected'}
-                >
-                  <option value="demo">Demo</option>
-                  <option value="web-serial" disabled={!webSerialSupported}>
-                    Serial{webSerialSupported ? '' : ' (n/a)'}
-                  </option>
-                  <option value="websocket">WebSocket</option>
-                </select>
-                {transportMode === 'websocket' ? (
-                  <input
-                    data-testid="websocket-url-input"
-                    className="session-strip__input"
-                    type="text"
-                    value={websocketUrl}
-                    onChange={(event) => setWebsocketUrl(event.target.value)}
-                    disabled={busyAction !== undefined || snapshot.connection.kind === 'connected'}
-                    spellCheck={false}
-                    placeholder={DEFAULT_WEBSOCKET_URL}
-                  />
-                ) : null}
-                <select
-                  data-testid="session-profile-select"
-                  value={sessionProfile}
-                  onChange={(event) => setSessionProfile(event.target.value as SessionProfile)}
-                >
-                  <option value="full-power">Full power</option>
-                  <option value="usb-bench">USB bench</option>
-                </select>
-                <button
-                  data-testid="connect-button"
-                  className="session-strip__button session-strip__button--connect"
-                  style={buttonStyle('primary')}
-                  onClick={() => void handleConnect()}
-                  disabled={busyAction !== undefined || snapshot.connection.kind === 'connected'}
-                >
-                  {connectButtonLabel(snapshot, parameterFollowUp)}
-                </button>
-                <button
-                  data-testid="disconnect-button"
-                  className="session-strip__button session-strip__button--disconnect"
-                  style={buttonStyle()}
-                  onClick={() => void handleDisconnect()}
-                  disabled={busyAction !== undefined || snapshot.connection.kind !== 'connected'}
-                >
-                  Disconnect
-                </button>
-              </div>
-              <div className="session-strip__status">
-                <StatusBadge tone={toneForConnection(snapshot.connection.kind)}>{snapshot.connection.kind}</StatusBadge>
-                {transportMode === 'web-serial' && rememberedSerialPortLabel ? <span>{rememberedSerialPortLabel}</span> : null}
-                {transportMode === 'web-serial' && autoReconnectAvailable ? <span>auto reconnect ready</span> : null}
-              </div>
-            </div>
+            <button
+              data-testid="connect-button"
+              className="session-strip__button session-strip__button--connect"
+              style={buttonStyle('primary')}
+              onClick={() => void handleConnect()}
+              disabled={busyAction !== undefined || snapshot.connection.kind === 'connected'}
+            >
+              {connectButtonLabel(snapshot, parameterFollowUp)}
+            </button>
+            <button
+              data-testid="disconnect-button"
+              className="session-strip__button session-strip__button--disconnect"
+              style={buttonStyle()}
+              onClick={() => void handleDisconnect()}
+              disabled={busyAction !== undefined || snapshot.connection.kind !== 'connected'}
+            >
+              Disconnect
+            </button>
           </div>
 	      </header>
 
       <div className="workspace-layout">
         <aside className="workspace-sidebar">
           <div className="workspace-sidebar__shell">
-            <section className="workspace-rail-section workspace-rail-section--session">
-              <div className="workspace-rail-section__header">
-                <strong>Session</strong>
-              </div>
+            <div className="workspace-tabrail__header">
+              <span className="workspace-tabrail__eyebrow">Connected Tabs</span>
+              <strong>{snapshot.connection.kind === 'connected' ? snapshot.vehicle?.vehicle ?? 'Vehicle' : 'Disconnected'}</strong>
+              <small>
+                {transportMode === 'web-serial' && rememberedSerialPortLabel
+                  ? rememberedSerialPortLabel
+                  : transportMode === 'websocket'
+                    ? websocketUrl
+                    : transportMode === 'demo'
+                      ? 'Demo transport'
+                      : webSerialSupported
+                        ? 'Serial transport ready'
+                        : 'Serial transport unavailable'}
+              </small>
+            </div>
 
-              <div className="workspace-sidebar__meta">
-                <strong>{snapshot.vehicle?.vehicle ?? 'No vehicle'}</strong>
-                <small>
-                  {transportMode === 'demo'
-                    ? 'Demo transport selected'
-                    : transportMode === 'websocket'
-                      ? websocketUrl
-                      : selectedSerialPort
-                        ? rememberedSerialPortLabel ?? 'Previously approved serial port selected'
-                        : webSerialSupported
-                          ? 'Serial transport ready; connect from the header strip'
-                          : 'Serial transport unavailable in this browser'}
-                </small>
+            <div className="baseline-summary">
+              <div className="baseline-summary__header">
+                <div>
+                  <strong>Active Baseline</strong>
+                  <small>
+                    {selectedSnapshot
+                      ? 'Drift tracking stays visible across every tab.'
+                      : 'Capture or select a snapshot to track configuration drift.'}
+                  </small>
+                </div>
+                <StatusBadge tone={selectedSnapshotInvalidEntries.length > 0 ? 'danger' : selectedSnapshotChangedEntries.length > 0 ? 'warning' : 'neutral'}>
+                  {selectedSnapshotInvalidEntries.length > 0
+                    ? `${selectedSnapshotInvalidEntries.length} invalid`
+                    : selectedSnapshotChangedEntries.length > 0
+                      ? `${selectedSnapshotChangedEntries.length} diff`
+                      : selectedSnapshot
+                        ? 'matched'
+                        : `${savedSnapshots.length} saved`}
+                </StatusBadge>
               </div>
+              <p className="baseline-summary__text" data-testid="active-baseline-label">
+                {selectedSnapshot ? selectedSnapshot.label : 'No baseline selected'}
+              </p>
+              <div className="baseline-summary__metrics">
+                <article>
+                  <span>Saved</span>
+                  <strong>{savedSnapshots.length}</strong>
+                </article>
+                <article>
+                  <span>Drift</span>
+                  <strong>{selectedSnapshotChangedEntries.length}</strong>
+                </article>
+                <article>
+                  <span>Reboot</span>
+                  <strong>{selectedSnapshotRebootSensitiveCount}</strong>
+                </article>
+                <article>
+                  <span>Status</span>
+                  <strong>{selectedSnapshot ? (selectedSnapshotChangedEntries.length > 0 ? 'Restore' : 'Synced') : 'Idle'}</strong>
+                </article>
+              </div>
+              <p className="baseline-summary__note">
+                {selectedSnapshot
+                  ? `Captured ${formatSnapshotTimestamp(selectedSnapshot.capturedAt)}.`
+                  : 'Open Snapshots to capture a known-good baseline before larger changes.'}
+              </p>
+            </div>
 
-              <div className="config-pills" style={{ padding: '0 4px' }}>
-                <span>{snapshot.parameterStats.status === 'complete' ? `${snapshot.parameterStats.downloaded} params` : formatParameterSync(snapshot)}</span>
-                {transportMode === 'web-serial' && autoReconnectAvailable ? <span>auto reconnect ready</span> : null}
-                {transportMode === 'web-serial' && rememberedSerialPortLabel ? <span>{rememberedSerialPortLabel}</span> : null}
-              </div>
-              <div className="sync-meter" aria-hidden="true" style={{ margin: '0 4px' }}>
-                <div className="sync-meter__fill" style={{ width: `${parameterSyncWidth}%` }} />
-              </div>
+            <nav className="workspace-nav workspace-nav--flat" aria-label="Configurator tabs">
+              {visibleAppViews.map((view) => (
+                <button
+                  key={view.id}
+                  type="button"
+                  data-testid={`view-button-${view.id}`}
+                  className={`workspace-nav__item workspace-nav__item--tab${view.id === activeViewId ? ' is-active' : ''}`}
+                  onClick={() => setActiveViewId(view.id)}
+                >
+                  <span className="workspace-nav__mark">{viewMonogram(view.id)}</span>
+                  <span className="workspace-nav__item-copy">
+                    <strong>{view.label}</strong>
+                  </span>
+                  {view.badge ? (
+                    <span className={`workspace-nav__badge workspace-nav__badge--${view.tone}`}>
+                      {view.badge}
+                    </span>
+                  ) : null}
+                </button>
+              ))}
+            </nav>
+          </div>
+        </aside>
+
+        <div className="workspace-main">
+          {(sessionNotice || parameterFollowUp || (!isExpertMode && stagedParameterDrafts.length > 0)) ? (
+            <div className="workspace-main__notes">
               {sessionNotice ? (
-                <div className="session-follow-up session-follow-up--error" data-testid="session-connection-notice">
-                  <div className="session-follow-up__header">
-                    <strong>Connection issue</strong>
-                    <StatusBadge tone={sessionNotice.tone}>{sessionNotice.tone}</StatusBadge>
-                  </div>
+                <div className="workspace-note workspace-note--danger" data-testid="session-connection-notice">
+                  <strong>Connection issue</strong>
                   <p>{sessionNotice.text}</p>
                 </div>
               ) : null}
               {parameterFollowUp ? (
-                <div className="session-follow-up">
-                  <div className="session-follow-up__header">
-                    <strong>Session action required</strong>
-                    <StatusBadge tone={parameterFollowUp.requiresReboot ? 'warning' : 'neutral'}>
-                      {parameterFollowUp.requiresReboot ? 'reboot' : 'refresh'}
-                    </StatusBadge>
-                  </div>
-                  <p>
-                    {snapshot.connection.kind === 'connected'
-                      ? parameterFollowUp.text
-                      : `${parameterFollowUp.text} Reconnect from the header session strip to continue.`}
-                  </p>
-                  {snapshot.connection.kind === 'connected' ? (
+                <div className="workspace-note workspace-note--warning">
+                  <strong>{parameterFollowUp.requiresReboot ? 'Reconnect required' : 'Refresh required'}</strong>
+                  <p>{parameterFollowUp.text}</p>
+                  {snapshot.connection.kind !== 'connected' ? (
+                    <small>Reconnect from the header session strip to continue.</small>
+                  ) : (
                     <div className="button-row">
                       {parameterFollowUp.requiresReboot ? (
                         <button
+                          type="button"
                           style={buttonStyle()}
                           onClick={() => void handleGuidedAction('reboot-autopilot')}
                           disabled={busyAction !== undefined || !canRunGuidedAction(snapshot, 'reboot-autopilot')}
@@ -6598,6 +6784,7 @@ export function App() {
                         </button>
                       ) : null}
                       <button
+                        type="button"
                         style={buttonStyle()}
                         onClick={() => void handleGuidedAction('request-parameters')}
                         disabled={parameterFollowUp.requiresReboot || busyAction !== undefined || !canRunGuidedAction(snapshot, 'request-parameters')}
@@ -6605,190 +6792,26 @@ export function App() {
                         Pull Parameters
                       </button>
                     </div>
-                  ) : null}
+                  )}
                 </div>
               ) : null}
-            </section>
-
-            {workspaceNavSections.map((section) => (
-              <section key={section.id} className="workspace-rail-section workspace-rail-section--mission">
-                <div className="workspace-rail-section__header">
-                  <strong>{section.label}</strong>
-                </div>
-
-                <nav className="workspace-nav workspace-nav--grouped" aria-label={`${section.label} views`}>
-                  {section.views.map((view) => (
-                    <button
-                      key={view.id}
-                      type="button"
-                      data-testid={`view-button-${view.id}`}
-                      className={`workspace-nav__item${view.id === activeViewId ? ' is-active' : ''}`}
-                      onClick={() => setActiveViewId(view.id)}
-                    >
-                      <div className="workspace-nav__item-copy">
-                        <span className="workspace-nav__mark">{viewMonogram(view.id)}</span>
-                        <div className="workspace-nav__item-text">
-                          <strong>{missionTitleForView(view.id)}</strong>
-                        </div>
-                      </div>
-                    </button>
-                  ))}
-                </nav>
-              </section>
-            ))}
-
-            <section className="workspace-rail-section workspace-rail-section--command">
-              <div className="workspace-rail-section__header">
-                <strong>Changes</strong>
-                <StatusBadge tone={totalWorkbenchInvalidChanges > 0 ? 'danger' : totalWorkbenchStagedChanges > 0 || stagedParameterDrafts.length > 0 ? 'warning' : 'success'}>
-                  {totalWorkbenchInvalidChanges > 0
-                    ? `${totalWorkbenchInvalidChanges} invalid`
-                    : totalWorkbenchStagedChanges + stagedParameterDrafts.length > 0
-                      ? `${totalWorkbenchStagedChanges + stagedParameterDrafts.length} staged`
-                      : 'clean'}
-                </StatusBadge>
-              </div>
-
-              <div className="workspace-focus-card">
-                <div className="workspace-focus-card__header">
-                  <strong>Next focus</strong>
-                  <StatusBadge tone={nextFocus.viewId === activeViewId ? 'success' : 'warning'}>
-                    {missionSectionLabelForView(nextFocus.viewId)}
-                  </StatusBadge>
-                </div>
-                <p>{nextFocus.title}</p>
-                <small>{nextFocus.detail}</small>
-                <div className="button-row">
-                  <button style={buttonStyle('primary')} onClick={() => setActiveViewId(nextFocus.viewId)}>
-                    {nextFocus.actionLabel}
-                  </button>
-                </div>
-              </div>
-
-              <div className="change-control-dock">
-                <article className="change-control-dock__item">
-                  <span>Baseline</span>
-                  <strong data-testid={selectedSnapshot ? 'active-baseline-label' : undefined}>
-                    {selectedSnapshot ? selectedSnapshot.label : 'No baseline selected'}
-                  </strong>
-                  <small>
-                    {selectedSnapshot
-                      ? `${selectedSnapshotChangedEntries.length} drift · ${selectedSnapshotRebootSensitiveCount} reboot-sensitive`
-                      : 'Capture or select a snapshot before larger changes.'}
-                  </small>
-                </article>
-                <article className="change-control-dock__item">
-                  <span>Workbench drafts</span>
-                  <strong>{totalWorkbenchStagedChanges + stagedParameterDrafts.length}</strong>
-                  <small>
-                    {totalWorkbenchInvalidChanges > 0
-                      ? `${totalWorkbenchInvalidChanges} invalid values need attention`
-                      : totalWorkbenchStagedChanges + stagedParameterDrafts.length > 0
-                        ? 'Staged changes are waiting for apply or discard'
-                        : 'No staged changes across the current mission workspaces'}
-                  </small>
-                </article>
-                <article className="change-control-dock__item">
-                  <span>Session follow-up</span>
-                  <strong>{parameterFollowUp ? (parameterFollowUp.requiresReboot ? 'Reboot required' : 'Refresh required') : 'Clear'}</strong>
-                  <small>{parameterFollowUp ? parameterFollowUp.text : 'The live snapshot matches the current session state.'}</small>
-                </article>
-              </div>
-
-              <div className="button-row">
-                <button data-testid="open-snapshots-button" style={buttonStyle('primary')} onClick={() => setActiveViewId('snapshots')}>
-                  {selectedSnapshot ? 'Open Snapshots & Restore' : 'Open Snapshots'}
-                </button>
-                {selectedSnapshotChangedEntries.length > 0 ? (
-                  <button style={buttonStyle()} onClick={() => setActiveViewId('snapshots')}>
-                    Review Restore Diff
-                  </button>
-                ) : null}
-              </div>
-            </section>
-
-            <section className="workspace-rail-section workspace-rail-section--workspace">
-              <div className="workspace-rail-section__header">
-                <div>
-                  <strong>Access Level</strong>
-                  <small>Basic stays mission-focused. Expert exposes the low-level parameter workspace.</small>
-                </div>
-                <StatusBadge tone={isExpertMode ? 'warning' : 'success'}>{isExpertMode ? 'expert' : 'basic'}</StatusBadge>
-              </div>
-
-              <div className="mode-toggle mode-toggle--compact" role="tablist" aria-label="Configurator product mode">
-                <button
-                  type="button"
-                  data-testid="product-mode-basic"
-                  className={`mode-toggle__option${productMode === 'basic' ? ' is-active' : ''}`}
-                  onClick={() => setProductMode('basic')}
-                >
-                  <strong>Basic</strong>
-                </button>
-                <button
-                  type="button"
-                  data-testid="product-mode-expert"
-                  className={`mode-toggle__option${productMode === 'expert' ? ' is-active' : ''}`}
-                  onClick={() => setProductMode('expert')}
-                >
-                  <strong>Expert</strong>
-                </button>
-              </div>
-
-              {!isExpertMode ? (
-                <div className="workspace-mode-summary workspace-mode-summary--muted workspace-mode-summary--compact">
-                  <StatusBadge tone="neutral">guided</StatusBadge>
-                  <p>{appViews.filter((view) => isExpertOnlyView(view.id)).map((view) => missionTitleForView(view.id)).join(', ')} stay tucked away.</p>
-                </div>
-              ) : null}
-
               {!isExpertMode && stagedParameterDrafts.length > 0 ? (
-                <div className="workspace-mode-summary workspace-mode-summary--warning workspace-mode-summary--compact">
-                  <StatusBadge tone="warning">{stagedParameterDrafts.length} staged</StatusBadge>
-                  <p>There are advanced parameter drafts in progress. Switch to Expert to review or apply them.</p>
+                <div className="workspace-note">
+                  <strong>Expert drafts hidden in Basic mode</strong>
+                  <p>Switch to Expert if you need to review or apply staged advanced parameter changes.</p>
                 </div>
               ) : null}
-            </section>
-          </div>
-        </aside>
+            </div>
+          ) : null}
 
-        <div className="workspace-main">
           {activeViewDescriptor ? (
-            <header className="workspace-main__header">
-              <div>
-                <div className="workspace-main__eyebrow-row">
-                  <button
-                    type="button"
-                    data-testid="return-mission-control-button"
-                    className={`workspace-home-button${activeViewId === 'setup' && setupMode === 'overview' ? ' is-active' : ''}`}
-                    onClick={returnToMissionControl}
-                    aria-label="Return to Mission Control"
-                  >
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <path d="M4.5 11.4L12 5.25l7.5 6.15" />
-                      <path d="M7.5 10.9V18h9v-7.1" />
-                      <path d="M10.25 18v-4.75h3.5V18" />
-                    </svg>
-                    <span>Mission Control</span>
-                  </button>
-                  <span className="workspace-main__eyebrow">{activeWorkspaceSection?.label ?? missionSectionLabelForView(activeViewDescriptor.id)}</span>
-                  <StatusBadge tone={activeViewDescriptor.tone}>{activeViewDescriptor.badge}</StatusBadge>
-                </div>
-                <h2 data-testid="workspace-view-title">{missionTitleForView(activeViewDescriptor.id)}</h2>
+            <header className="workspace-main__header workspace-main__header--betaflight" aria-hidden="true">
+              <div className="workspace-main__tab-copy">
+                <h2 data-testid="workspace-view-title">{activeViewDescriptor.label}</h2>
                 <p>{activeViewDescriptor.description}</p>
               </div>
-              <div className="workspace-main__summary">
-                <div className="workspace-main__summary-card">
-                  <span>Aircraft state</span>
-                  <strong>{snapshot.vehicle?.flightMode ?? 'No active mode yet'}</strong>
-                  <small>
-                    {snapshot.connection.kind === 'connected'
-                      ? snapshot.preArmStatus.healthy
-                        ? 'Connected, synced, and pre-arm clear'
-                        : `${snapshot.preArmStatus.issues.length} pre-arm issue(s) still active`
-                      : 'Connect to start working from the live vehicle'}
-                  </small>
-                </div>
+              <div className="workspace-main__tab-meta">
+                <StatusBadge tone={activeViewDescriptor.tone}>{activeViewDescriptor.badge}</StatusBadge>
               </div>
             </header>
           ) : null}
@@ -6796,151 +6819,260 @@ export function App() {
 	      <>
 	      <section className="grid one-up">
 	        <Panel
-	          title={setupMode === 'wizard' ? 'Guided Setup' : 'Mission Control'}
-	          subtitle={
-              setupMode === 'wizard'
-                ? 'Work one setup step at a time with a single active task, clear evidence, and explicit next actions.'
-                : 'Live aircraft state, bench readiness, and setup progress in one integrated operator console.'
-            }
+	          title={setupMode === 'wizard' ? 'Guided Setup' : 'Setup'}
+	          subtitle={setupMode === 'wizard' ? 'Work one setup step at a time with a single active task, clear evidence, and explicit next actions.' : undefined}
 	          actions={
+              setupMode === 'wizard' ? (
 	            <div className="button-row">
-                {setupMode === 'wizard' && selectedSetupSection ? (
-                  <StatusBadge tone={toneForSetup(selectedSetupSection.status)}>
-                    Step {selectedSetupSectionIndex + 1}/{setupFlowSections.length}
-                  </StatusBadge>
-                ) : (
-	                <StatusBadge tone={guidedSetupComplete ? 'success' : 'warning'}>
-	                  {completedSetupSectionCount}/{setupFlowSections.length} complete
-	                </StatusBadge>
-                )}
-                {setupMode === 'wizard' ? (
+                  {selectedSetupSection ? (
+                    <StatusBadge tone={toneForSetup(selectedSetupSection.status)}>
+                      Step {selectedSetupSectionIndex + 1}/{setupFlowSections.length}
+                    </StatusBadge>
+                  ) : null}
                   <button style={buttonStyle()} onClick={closeSetupWizard}>
-                    Back to Mission Control
+                    Back to Setup
                   </button>
-                ) : (
-                  <button
-                    className="setup-launch-button"
-                    style={buttonStyle('hero')}
-                    onClick={() => openSetupWizard()}
-                    disabled={!recommendedSetupSection}
-                    data-testid="setup-start-guided-button"
-                  >
-                    {guidedSetupComplete ? 'Review Guided Setup' : completedSetupSectionCount > 0 ? 'Resume Guided Setup' : 'Start Guided Setup'}
-                  </button>
-                )}
 	            </div>
+              ) : undefined
 	          }
 	        >
 	          <div className="setup-command-center">
               {setupMode === 'overview' ? (
                 <>
-  	              <div id="setup-panel-link" className="flight-deck-command">
-	                <div className="flight-deck-command__main">
-	                  <AttitudePreview
-	                    snapshot={snapshot}
-	                    frameClassLabel={airframe.frameClassLabel}
-	                    frameTypeLabel={airframe.frameTypeLabel}
-	                  />
+  	              <div id="setup-panel-link" className="setup-bench">
+                    <div className="setup-bench__actions">
+                      {setupBenchActions.map((action) => {
+                        const actionState = snapshot.guidedActions[action.actionId]
+                        const actionGateReason = guidedActionBlockingReason(snapshot, action.actionId)
+                        const actionBusyReason = setupActionBusyReason(busyAction, action.actionId, action.title)
+                        const actionDisabledReason = actionBusyReason ?? actionGateReason
+                        const actionEnabled = actionDisabledReason === undefined
+                        const showAccelerometerPoseGuide =
+                          action.actionId === 'calibrate-accelerometer' &&
+                          (actionState.status === 'requested' || actionState.status === 'running')
+                        const actionTone =
+                          actionState.status === 'failed'
+                            ? 'danger'
+                            : actionState.status === 'succeeded'
+                              ? 'success'
+                              : actionState.status === 'requested' || actionState.status === 'running'
+                                ? 'warning'
+                                : 'neutral'
 
-                    <div className="flight-deck-command__telemetry-strip">
-                      <article className="telemetry-metric-card">
-                        <span>Mode</span>
-                        <strong>{snapshot.vehicle?.flightMode ?? '—'}</strong>
-                      </article>
-                      <article className="telemetry-metric-card">
-                        <span>Params</span>
-                        <strong>
-                          {snapshot.parameterStats.status === 'complete'
-                            ? `${snapshot.parameterStats.downloaded}`
-                            : formatParameterSync(snapshot)}
-                        </strong>
-                      </article>
-                      <article className="telemetry-metric-card">
-                        <span>Pre-arm</span>
-                        <strong>{snapshot.preArmStatus.healthy ? 'Clear' : `${snapshot.preArmStatus.issues.length}`}</strong>
-                      </article>
-                      <article className="telemetry-metric-card">
-                        <span>Frame</span>
-                        <strong>{airframe.frameClassLabel}</strong>
-                      </article>
-                    </div>
-
-                    <div className="flight-deck-command__signal-strip">
-                      <span className={snapshot.liveVerification.rcInput.verified ? 'is-live' : 'is-waiting'}>
-                        <span className="dot" />
-                        {snapshot.liveVerification.rcInput.verified ? `RC ${snapshot.liveVerification.rcInput.channelCount}ch` : 'RC —'}
-                      </span>
-                      <span className={snapshot.liveVerification.batteryTelemetry.verified ? 'is-live' : 'is-waiting'}>
-                        <span className="dot" />
-                        {snapshot.liveVerification.batteryTelemetry.verified ? 'Battery' : 'Batt —'}
-                      </span>
-                      <span className={snapshot.liveVerification.attitudeTelemetry.verified ? 'is-live' : 'is-waiting'}>
-                        <span className="dot" />
-                        {snapshot.liveVerification.attitudeTelemetry.verified ? 'Attitude' : 'Att —'}
-                      </span>
-                      <span className={snapshot.preArmStatus.healthy ? 'is-live' : 'is-warn'}>
-                        <span className="dot" />
-                        {snapshot.preArmStatus.healthy ? 'Pre-arm OK' : `${snapshot.preArmStatus.issues.length} issues`}
-                      </span>
-                    </div>
-
-                    {gpsPeripheralViewModels.length > 0 || snapshot.liveVerification.globalPosition.verified ? (
-                      <LiveGpsMapCard
-                        snapshot={snapshot}
-                        title="Aircraft location"
-                        subtitle="Live GPS position from the flight controller."
-                        compact
-                        testId="setup-gps-map-widget"
-                      />
-                    ) : null}
-	                </div>
-
-  	                <div className="flight-deck-command__sidebar">
-                      <div className="flight-deck-command__sidebar-section">
-                        <div className="flight-deck-command__sidebar-section-title">Vehicle</div>
-                        <div className="flight-deck-command__kv-row"><span>Transport</span><strong>{transportMode === 'demo' ? 'Demo' : transportMode === 'web-serial' ? 'Serial' : `WebSocket (${websocketUrl})`}</strong></div>
-                        <div className="flight-deck-command__kv-row"><span>Session</span><strong>{snapshot.sessionProfile === 'usb-bench' ? 'USB Bench' : 'Full Power'}</strong></div>
-                        <div className="flight-deck-command__kv-row"><span>Vehicle</span><strong>{snapshot.vehicle?.vehicle ?? '—'}</strong></div>
-                        <div className="flight-deck-command__kv-row"><span>Firmware</span><strong>{snapshot.vehicle?.firmware ?? '—'}</strong></div>
-                        <div className="flight-deck-command__kv-row"><span>RC Link</span><strong>{formatRcLink(snapshot)}</strong></div>
-                        <div className="flight-deck-command__kv-row"><span>Battery</span><strong>{formatBatteryTelemetry(snapshot)}</strong></div>
-                      </div>
-
-                      <div className="flight-deck-command__sidebar-section">
-                        <div className="flight-deck-command__sidebar-section-title">Status Log</div>
-                        <div className="flight-deck-command__status-log">
-                          {snapshot.statusTexts.length === 0 ? <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>No status text yet</span> : null}
-                          {snapshot.statusTexts.slice(0, 5).map((entry) => (
-                            <div key={`${entry.severity}-${entry.text}`} className={`status-entry ${entry.severity}`}>
-                              <strong>{entry.severity}</strong>
-                              <span>{entry.text}</span>
+                        return (
+                          <article
+                            key={action.actionId}
+                            className={`setup-bench-action${
+                              actionState.status === 'failed'
+                                ? ' is-danger'
+                                : actionState.status === 'succeeded'
+                                  ? ' is-success'
+                                  : actionState.status === 'requested' || actionState.status === 'running'
+                                    ? ' is-active'
+                                    : ''
+                            }`}
+                          >
+                            <div className="setup-bench-action__button">
+                              <button
+                                type="button"
+                                style={
+                                  actionEnabled
+                                    ? buttonStyle(action.actionId === 'reboot-autopilot' ? 'secondary' : 'primary')
+                                    : {
+                                        ...buttonStyle('secondary'),
+                                        opacity: 0.62,
+                                        cursor: 'not-allowed'
+                                      }
+                                }
+                                onClick={() => void handleGuidedAction(action.actionId)}
+                                disabled={!actionEnabled}
+                                title={actionDisabledReason}
+                              >
+                                {guidedActionButtonLabel(action.actionId, snapshot, busyAction)}
+                              </button>
                             </div>
-                          ))}
+                            <div className="setup-bench-action__copy">
+                              <strong>{action.title}</strong>
+                              <p>{actionState.summary ?? action.copy}</p>
+                              {actionState.status === 'idle' && actionDisabledReason ? (
+                                <p className="setup-bench-action__blocked-reason">{actionDisabledReason}</p>
+                              ) : null}
+                            </div>
+                            <div className="setup-bench-action__status">
+                              <StatusBadge tone={actionState.status === 'idle' && actionDisabledReason ? 'warning' : actionTone}>
+                                {actionState.status === 'idle' && actionDisabledReason ? 'blocked' : actionState.status}
+                              </StatusBadge>
+                            </div>
+                            {showAccelerometerPoseGuide ? (
+                              <div className="setup-bench-action__detail">
+                                <AccelerometerPoseGuide
+                                  compact
+                                  currentPose={accelerometerPoseFromAction(snapshot)}
+                                  rollDeg={snapshot.liveVerification.attitudeTelemetry.rollDeg}
+                                  pitchDeg={snapshot.liveVerification.attitudeTelemetry.pitchDeg}
+                                  attitudeVerified={snapshot.liveVerification.attitudeTelemetry.verified}
+                                  testId="setup-inline-accelerometer-guide"
+                                />
+                              </div>
+                            ) : null}
+                          </article>
+                        )
+                      })}
+                    </div>
+
+                    <div className="setup-bench__workspace">
+                      <div className="setup-bench__viewer">
+                        <div className="setup-bench__viewer-header">
+                          <div className="setup-bench__viewer-titlebar">
+                            <strong>Craft View</strong>
+                          </div>
+                          <div className="config-pills">
+                            <span>{snapshot.vehicle?.flightMode ?? 'No mode'}</span>
+                            <span>{airframe.frameClassLabel}</span>
+                            <span>{snapshot.vehicle?.armed ? 'Armed' : 'Disarmed'}</span>
+                          </div>
                         </div>
+                        <p className="setup-bench__viewer-note">
+                          Level the aircraft on the desk, verify the model response, then continue into the deeper ArduPilot workflow.
+                        </p>
+
+                        <AttitudePreview
+                          snapshot={snapshot}
+                          showReadouts={false}
+                          frameClassLabel={airframe.frameClassLabel}
+                          frameTypeLabel={airframe.frameTypeLabel}
+                        />
                       </div>
 
-                      <div className={`flight-deck-command__guided-summary${guidedSetupComplete ? ' is-complete' : ''}`}>
-                        <strong>{guidedSetupComplete ? 'Setup complete' : `Setup ${completedSetupSectionCount}/${setupFlowSections.length}`}</strong>
-                        <p>
-                          {guidedSetupComplete
-                            ? guidedSetupHasExceptions
-                              ? 'All setup steps were resolved. Review deferred or skipped items before flight.'
-                              : 'All steps verified. Use navigation for refinement.'
-                            : selectedSetupSection
-                              ? `Next: ${selectedSetupSection.title}`
-                              : 'Start guided setup to begin.'}
-                        </p>
-                        {guidedSetupComplete && guidedSetupOutcomeSummary ? (
-                          <p className="flight-deck-command__guided-summary-notes">{guidedSetupOutcomeSummary}</p>
-                        ) : null}
-                        <button
-                          className="setup-launch-button"
-                          style={buttonStyle('hero')}
-                          onClick={() => openSetupWizard()}
-                          disabled={!recommendedSetupSection}
-                        >
-                          {guidedSetupComplete ? 'Review Setup' : completedSetupSectionCount > 0 ? 'Resume Setup' : 'Start Guided Setup'}
-                        </button>
+                      <div className="setup-bench__sidebar">
+                        <article className="setup-gui-box">
+                          <div className="setup-gui-box__titlebar">
+                            <strong>Instruments</strong>
+                            <StatusBadge tone={snapshot.liveVerification.attitudeTelemetry.verified ? 'success' : 'warning'}>
+                              {snapshot.liveVerification.attitudeTelemetry.verified ? 'live' : 'waiting'}
+                            </StatusBadge>
+                          </div>
+                          <div className="setup-gui-box__body">
+                            <div className="setup-gui-box__kv-list">
+                              <div className="setup-gui-box__kv-row"><span>Flight mode</span><strong>{snapshot.vehicle?.flightMode ?? 'Waiting'}</strong></div>
+                              <div className="setup-gui-box__kv-row"><span>Roll</span><strong>{formatDegreeTelemetry(snapshot.liveVerification.attitudeTelemetry.rollDeg)}</strong></div>
+                              <div className="setup-gui-box__kv-row"><span>Pitch</span><strong>{formatDegreeTelemetry(snapshot.liveVerification.attitudeTelemetry.pitchDeg)}</strong></div>
+                              <div className="setup-gui-box__kv-row"><span>Heading</span><strong>{formatHeadingTelemetry(snapshot.liveVerification.attitudeTelemetry.yawDeg)}</strong></div>
+                              <div className="setup-gui-box__kv-row"><span>Link state</span><strong>{snapshot.liveVerification.attitudeTelemetry.verified ? 'Synced' : 'Waiting'}</strong></div>
+                            </div>
+                          </div>
+                        </article>
+
+                        <article className="setup-gui-box">
+                          <div className="setup-gui-box__titlebar">
+                            <strong>GPS</strong>
+                            <StatusBadge tone={snapshot.preArmStatus.healthy ? 'success' : 'warning'}>
+                              {snapshot.preArmStatus.healthy ? 'ready' : 'attention'}
+                            </StatusBadge>
+                          </div>
+                          <div className="setup-gui-box__body">
+                            <div className="setup-gui-box__kv-list">
+                              <div className="setup-gui-box__kv-row"><span>Driver</span><strong>{setupGpsConfigured ? 'Configured' : 'Not configured'}</strong></div>
+                              <div className="setup-gui-box__kv-row"><span>Fix</span><strong>{setupHasGpsCard && snapshot.liveVerification.globalPosition.verified ? 'Verified' : 'Waiting'}</strong></div>
+                              <div className="setup-gui-box__kv-row"><span>Latitude</span><strong>{formatCoordinateTelemetry(snapshot.liveVerification.globalPosition.latitudeDeg, 'N', 'S')}</strong></div>
+                              <div className="setup-gui-box__kv-row"><span>Longitude</span><strong>{formatCoordinateTelemetry(snapshot.liveVerification.globalPosition.longitudeDeg, 'E', 'W')}</strong></div>
+                            </div>
+                            <p className="setup-gui-box__note">
+                              {setupHasGpsCard
+                                ? snapshot.liveVerification.globalPosition.verified
+                                  ? 'Live GPS is arriving. Treat the map as a side check while the craft preview stays primary.'
+                                  : 'A GPS driver is configured, but live position is not verified yet. Finish the port and GPS workflow, then return here.'
+                                : 'No verified GPS source yet. That is acceptable for bench work, but guided modes should wait until GPS is configured.'}
+                            </p>
+                            {setupHasGpsCard ? (
+                              <div className="setup-gui-box__map">
+                                <LiveGpsMapCard
+                                  snapshot={snapshot}
+                                  title="GPS map"
+                                  subtitle="Side check"
+                                  compact
+                                  testId="setup-gps-map-widget"
+                                />
+                              </div>
+                            ) : null}
+                          </div>
+                        </article>
+
+                        <article className="setup-gui-box">
+                          <div className="setup-gui-box__titlebar">
+                            <strong>System Info</strong>
+                            <StatusBadge tone={toneForConnection(snapshot.connection.kind)}>{snapshot.connection.kind}</StatusBadge>
+                          </div>
+                          <div className="setup-gui-box__body">
+                            <div className="setup-gui-box__kv-list">
+                              <div className="setup-gui-box__kv-row"><span>Transport</span><strong>{setupTransportLabel}</strong></div>
+                              <div className="setup-gui-box__kv-row"><span>Profile</span><strong>{snapshot.sessionProfile === 'usb-bench' ? 'USB Bench' : 'Full Power'}</strong></div>
+                              <div className="setup-gui-box__kv-row"><span>Vehicle</span><strong>{snapshot.vehicle?.vehicle ?? '—'}</strong></div>
+                              <div className="setup-gui-box__kv-row"><span>Firmware</span><strong>{snapshot.vehicle?.firmware ?? '—'}</strong></div>
+                              <div className="setup-gui-box__kv-row">
+                                <span>Parameters</span>
+                                <strong>{snapshot.parameterStats.status === 'complete' ? `${snapshot.parameterStats.downloaded}` : formatParameterSync(snapshot)}</strong>
+                              </div>
+                              <div className="setup-gui-box__kv-row"><span>Battery</span><strong>{formatBatteryTelemetry(snapshot)}</strong></div>
+                              <div className="setup-gui-box__kv-row"><span>RC link</span><strong>{formatRcLink(snapshot)}</strong></div>
+                              <div className="setup-gui-box__kv-row"><span>Pre-arm</span><strong>{snapshot.preArmStatus.healthy ? 'Clear' : `${snapshot.preArmStatus.issues.length} issues`}</strong></div>
+                            </div>
+                          </div>
+                        </article>
+
+                        <article className="setup-gui-box">
+                          <div className="setup-gui-box__titlebar">
+                            <strong>Recent Notices</strong>
+                            <StatusBadge tone={snapshot.statusTexts.length > 0 ? 'warning' : 'neutral'}>
+                              {snapshot.statusTexts.length > 0 ? `${snapshot.statusTexts.length} entries` : 'quiet'}
+                            </StatusBadge>
+                          </div>
+                          <div className="setup-gui-box__body">
+                            <div className="setup-gui-box__status-list">
+                              {setupStatusEntries.length === 0 ? <span className="setup-gui-box__empty">No status text yet</span> : null}
+                              {setupStatusEntries.map((entry) => (
+                                <div key={`${entry.severity}-${entry.text}`} className={`setup-gui-box__status-entry is-${entry.severity}`}>
+                                  <strong>{entry.severity}</strong>
+                                  <span>{entry.text}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </article>
+
+                        <article className={`setup-gui-box setup-gui-box--guided${guidedSetupComplete ? ' is-complete' : ''}`}>
+                          <div className="setup-gui-box__titlebar">
+                            <strong>{guidedSetupComplete ? 'Guided setup complete' : 'Guided setup'}</strong>
+                            <StatusBadge tone={guidedSetupComplete ? 'success' : 'warning'}>
+                              {completedSetupSectionCount}/{setupFlowSections.length}
+                            </StatusBadge>
+                          </div>
+                          <div className="setup-gui-box__body">
+                            <p className="setup-gui-box__note">
+                              {guidedSetupComplete
+                                ? guidedSetupHasExceptions
+                                  ? 'All steps were resolved, but there are deferred or skipped decisions to review before flight.'
+                                  : 'All setup steps were verified. Use the task rail for refinement.'
+                                : selectedSetupSection
+                                  ? `Next recommended step: ${selectedSetupSection.title}.`
+                                  : 'Start guided setup to move through the ArduPilot-specific checklist one step at a time.'}
+                            </p>
+                            {guidedSetupComplete && guidedSetupOutcomeSummary ? (
+                              <p className="setup-gui-box__note">{guidedSetupOutcomeSummary}</p>
+                            ) : null}
+                            <div className="setup-gui-box__button-row">
+                              <button
+                                className="setup-launch-button"
+                                style={buttonStyle('hero')}
+                                onClick={() => openSetupWizard()}
+                                disabled={!recommendedSetupSection}
+                                data-testid="setup-start-guided-button"
+                              >
+                                {guidedSetupComplete ? 'Review Setup' : completedSetupSectionCount > 0 ? 'Resume Setup' : 'Start Guided Setup'}
+                              </button>
+                            </div>
+                          </div>
+                        </article>
                       </div>
                     </div>
   	              </div>
@@ -7369,7 +7501,12 @@ export function App() {
                         </div>
 
                         {selectedSetupSection.id === 'accelerometer' ? (
-                          <AccelerometerPoseGuide currentPose={accelerometerPoseFromAction(snapshot)} />
+                          <AccelerometerPoseGuide
+                            currentPose={accelerometerPoseFromAction(snapshot)}
+                            rollDeg={snapshot.liveVerification.attitudeTelemetry.rollDeg}
+                            pitchDeg={snapshot.liveVerification.attitudeTelemetry.pitchDeg}
+                            attitudeVerified={snapshot.liveVerification.attitudeTelemetry.verified}
+                          />
                         ) : null}
 
                         <div className="setup-flow__criteria">
@@ -7518,303 +7655,350 @@ export function App() {
 		          <div className="telemetry-stack telemetry-stack--ports">
 		            <div className="ports-workspace">
 		              <div className="ports-workspace__main">
-	            <div className="telemetry-header">
-	              <div>
-	                <h3>Serial port role review</h3>
-	                <p>
-	                  Configure the links that make the rest of setup possible: telemetry radios, serial receivers, GPS modules, and other attached
-	                  peripherals.
-	                </p>
-	              </div>
-	              <StatusBadge tone={toneForScopedDraftReview(portsStagedDrafts.length, portsInvalidDrafts.length)}>
-	                {portsInvalidDrafts.length > 0
-	                  ? `${portsInvalidDrafts.length} invalid`
-	                  : portsStagedDrafts.length > 0
-	                    ? `${portsStagedDrafts.length} staged`
-	                    : 'in sync'}
-	              </StatusBadge>
-	            </div>
-
-	            {parameterNotice ? (
-	              <div className="parameter-review__notice">
-	                <StatusBadge tone={parameterNotice.tone}>{parameterNotice.tone}</StatusBadge>
-	                <p>{parameterNotice.text}</p>
-	              </div>
-	            ) : null}
-
-	            <div className="telemetry-metric-grid">
-	              <article className="telemetry-metric-card">
-	                <span>Detected ports</span>
-	                <strong>{serialPortViewModels.length}</strong>
-	              </article>
-	              <article className="telemetry-metric-card">
-	                <span>Staged changes</span>
-	                <strong>{portsStagedDrafts.length}</strong>
-	              </article>
-	              <article className="telemetry-metric-card">
-	                <span>Primary GPS</span>
-	                <strong>{formatArducopterGpsType(gpsPeripheralViewModels.find((peripheral) => peripheral.label === 'Primary GPS')?.value)}</strong>
-	              </article>
-	              <article className="telemetry-metric-card">
-	                <span>Secondary GPS</span>
-	                <strong>{formatArducopterGpsType(gpsPeripheralViewModels.find((peripheral) => peripheral.label === 'Secondary GPS')?.value)}</strong>
-	              </article>
-	            </div>
-
-	            {serialPortViewModels.length > 0 ? (
-                <>
-                  <div className="scoped-review-card__disclosure">
-                    <small>
-                      {showAllSerialPorts
-                        ? `Showing all ${serialPortViewModels.length} detected serial ports.`
-                        : `Showing ${visibleSerialPortViewModels.length} active or edited port${visibleSerialPortViewModels.length === 1 ? '' : 's'} first${hiddenSerialPortCount > 0 ? `, with ${hiddenSerialPortCount} unused slot${hiddenSerialPortCount === 1 ? '' : 's'} hidden.` : '.'}`}
-                    </small>
-                    {serialPortViewModels.length > visibleSerialPortViewModels.length || showAllSerialPorts ? (
-                      <button
-                        style={buttonStyle()}
-                        onClick={() => setShowAllSerialPorts((current) => !current)}
-                        disabled={busyAction !== undefined}
-                      >
-                        {showAllSerialPorts ? 'Show Active Ports' : `Show All ${serialPortViewModels.length} Ports`}
-                      </button>
-                    ) : null}
-                  </div>
-	              <div className="port-row-list">
-	                {visibleSerialPortViewModels.map((port) => {
-                    const protocolParameter = port.protocolParameter
-                    const baudParameter = port.baudParameter
-                    const optionsParameter = port.optionsParameter
-                    const flowControlParameter = port.flowControlParameter
-                    const editedBaudValue = baudParameter ? editedValues[baudParameter.id] : undefined
-                    const currentEncodedBaud = editedBaudValue !== undefined && editedBaudValue !== '' ? Number(editedBaudValue) : port.baudValue
-                    const currentBaudRate = arducopterSerialBaudRate(currentEncodedBaud)
-                    const customBaudInputValue =
-                      baudParameter && customSerialBaudInputs[baudParameter.id] !== undefined
-                        ? customSerialBaudInputs[baudParameter.id]
-                        : currentBaudRate !== undefined
-                          ? String(currentBaudRate)
-                          : ''
-                    const showCustomBaudInput =
-                      baudParameter !== undefined &&
-                      (customSerialBaudInputs[baudParameter.id] !== undefined || !isPresetBaudRate(currentBaudRate))
-                    const editedOptionsValue = optionsParameter
-                      ? normalizeBitmaskValue(editedValues[optionsParameter.id], port.optionsValue)
-                      : undefined
-                    const serialOptionsSummary = optionsParameter
-                      ? describeBitmaskSelections(
-                          parameterDraftById.get(optionsParameter.id)?.status === 'staged'
-                            ? parameterDraftById.get(optionsParameter.id)?.nextValue
-                            : editedOptionsValue,
-                          ARDUCOPTER_SERIAL_OPTION_BIT_LABELS,
-                          'No special options'
-                        )
-                      : port.optionsLabel
-
-                    return (
-	                  <article key={port.portNumber} className="port-row">
-	                    <div className="port-row__identity">
-                        <div className="port-row__title">
-                          <strong>{port.label}</strong>
-                          <small>
-                            {`SERIAL${port.portNumber}`}
-                            {port.hardwarePort ? ` -> ${port.hardwarePort}` : ''}
-                            {` · ${port.usageSummary}`}
-                          </small>
+                    <div className="ports-surface">
+                      <div className="ports-surface__header">
+                        <div>
+                          <h3>Port matrix</h3>
+                          <p>
+                            Keep this task hardware-first: one row per UART, the serial role first, and the ArduPilot-specific options still
+                            visible inline.
+                          </p>
                         </div>
-	                      <StatusBadge tone={port.editable ? 'neutral' : 'warning'}>
-	                        {port.editable ? `Port ${port.portNumber}` : 'read only'}
-	                      </StatusBadge>
-	                    </div>
-
-	                    <div className="port-row__controls">
-	                      {protocolParameter ? (
-	                        <label className="scoped-editor-field scoped-editor-field--compact">
-	                          <span>Protocol</span>
-	                          <select
-	                            value={editedValues[protocolParameter.id] ?? String(port.protocolValue ?? '')}
-	                            onChange={(event) =>
-	                              setEditedValues((existing) => ({
-	                                ...existing,
-	                                [protocolParameter.id]: event.target.value
-	                              }))
-	                            }
-	                            disabled={!port.editable}
-	                          >
-	                            {(protocolParameter.definition?.options ?? []).map((valueOption) => (
-	                              <option key={`${protocolParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-	                                {valueOption.label}
-	                              </option>
-	                            ))}
-	                          </select>
-	                        </label>
-	                      ) : null}
-
-	                      {baudParameter ? (
-                          <div className="port-row__baud">
-                            <label className="scoped-editor-field scoped-editor-field--compact">
-                              <span>Baud</span>
-                              <select
-                                value={selectedBaudPresetValue(currentBaudRate)}
-                                onChange={(event) => {
-                                  if (event.target.value === 'custom') {
-                                    setCustomSerialBaudInputs((existing) => ({
-                                      ...existing,
-                                      [baudParameter.id]: currentBaudRate !== undefined ? String(currentBaudRate) : ''
-                                    }))
-                                    return
-                                  }
-
-                                  const selectedBaudRate = Number(event.target.value)
-                                  const encodedValue = encodeArducopterSerialBaud(selectedBaudRate)
-                                  setCustomSerialBaudInputs((existing) => {
-                                    if (!(baudParameter.id in existing)) {
-                                      return existing
-                                    }
-                                    const next = { ...existing }
-                                    delete next[baudParameter.id]
-                                    return next
-                                  })
-                                  setEditedValues((existing) => ({
-                                    ...existing,
-                                    [baudParameter.id]: String(encodedValue ?? port.baudValue ?? '')
-                                  }))
-                                }}
-                                disabled={!port.editable}
-                              >
-                                {SERIAL_BAUD_PRESET_RATES.map((baudRate) => (
-                                  <option key={`${baudParameter.id}:preset:${baudRate}`} value={String(baudRate)}>
-                                    {formatBaudRate(baudRate)}
-                                  </option>
-                                ))}
-                                <option value="custom">Custom / AP value</option>
-                              </select>
-                            </label>
-                            {showCustomBaudInput ? (
-                              <label className="scoped-editor-field scoped-editor-field--compact">
-                                <span>Custom</span>
-                                <input
-                                  type="number"
-                                  inputMode="numeric"
-                                  min={1}
-                                  value={customBaudInputValue}
-                                  onChange={(event) => {
-                                    const nextValue = event.target.value
-                                    setCustomSerialBaudInputs((existing) => ({
-                                      ...existing,
-                                      [baudParameter.id]: nextValue
-                                    }))
-                                    const parsed = parseSerialBaudInput(nextValue)
-                                    if (parsed.encodedValue === undefined) {
-                                      return
-                                    }
-                                    setEditedValues((existing) => ({
-                                      ...existing,
-                                      [baudParameter.id]: String(parsed.encodedValue)
-                                    }))
-                                  }}
-                                  disabled={!port.editable}
-                                />
-                              </label>
-                            ) : null}
-                          </div>
-	                      ) : null}
-
-	                      {flowControlParameter ? (
-	                        <label className="scoped-editor-field scoped-editor-field--compact">
-	                          <span>Flow control</span>
-	                          <select
-	                            value={editedValues[flowControlParameter.id] ?? String(port.flowControlValue ?? '')}
-	                            onChange={(event) =>
-	                              setEditedValues((existing) => ({
-	                                ...existing,
-	                                [flowControlParameter.id]: event.target.value
-	                              }))
-	                            }
-	                            disabled={!port.editable}
-	                          >
-	                            {(flowControlParameter.definition?.options ?? []).map((valueOption) => (
-	                              <option key={`${flowControlParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-	                                {valueOption.label}
-	                              </option>
-	                            ))}
-	                          </select>
-	                        </label>
-	                      ) : null}
-	                    </div>
-
-	                    <div className="config-pills">
-                        {port.hardwarePort ? <span>{port.hardwarePort}</span> : null}
-	                      <span>{protocolParameter ? formatArducopterSerialProtocol(Number(editedValues[protocolParameter.id] ?? port.protocolValue)) : port.protocolLabel}</span>
-	                      <span>{formatBaudRate(currentBaudRate)}</span>
-                        {optionsParameter ? <span>{serialOptionsSummary}</span> : null}
-	                      {flowControlParameter ? <span>{formatArducopterSerialRtscts(Number(editedValues[flowControlParameter.id] ?? port.flowControlValue))}</span> : null}
-                        {port.boardTrafficSummary ? <span>{port.boardTrafficSummary}</span> : null}
-	                    </div>
-
-                      {optionsParameter ? (
-                        <div className="port-row__options">
-                          <div className="port-row__options-header">
-                            <strong>Serial options</strong>
+                        <div className="ports-surface__header-actions">
+                          <StatusBadge tone={toneForScopedDraftReview(portsStagedDrafts.length, portsInvalidDrafts.length)}>
+                            {portsInvalidDrafts.length > 0
+                              ? `${portsInvalidDrafts.length} invalid`
+                              : portsStagedDrafts.length > 0
+                                ? `${portsStagedDrafts.length} staged`
+                                : 'in sync'}
+                          </StatusBadge>
+                          {serialPortViewModels.length > visibleSerialPortViewModels.length || showAllSerialPorts ? (
                             <button
                               style={buttonStyle()}
-                              onClick={() =>
-                                setExpandedSerialOptionsPortNumber((current) => (current === port.portNumber ? undefined : port.portNumber))
-                              }
-                              disabled={!port.editable}
+                              onClick={() => setShowAllSerialPorts((current) => !current)}
+                              disabled={busyAction !== undefined}
                             >
-                              {expandedSerialOptionsPortNumber === port.portNumber ? 'Hide Options' : 'Edit Options'}
+                              {showAllSerialPorts ? 'Show Active Ports' : `Show All ${serialPortViewModels.length} Ports`}
                             </button>
-                          </div>
-                          <small>{serialOptionsSummary}</small>
-                          {expandedSerialOptionsPortNumber === port.portNumber ? (
-                            <div className="scoped-checkbox-list port-row__options-panel">
-                              {Object.entries(ARDUCOPTER_SERIAL_OPTION_BIT_LABELS).map(([bit, label]) => {
-                                const numericBit = Number(bit)
-                                return (
-                                  <label key={`${optionsParameter.id}:${bit}`} className="scoped-checkbox-option">
-                                    <input
-                                      type="checkbox"
-                                      checked={hasBitmaskFlag(editedOptionsValue, numericBit)}
-                                      onChange={(event) =>
-                                        setEditedValues((existing) => {
-                                          const currentValue = normalizeBitmaskValue(existing[optionsParameter.id], port.optionsValue)
-                                          const nextValue = event.target.checked
-                                            ? currentValue | (1 << numericBit)
-                                            : currentValue & ~(1 << numericBit)
-
-                                          return {
-                                            ...existing,
-                                            [optionsParameter.id]: String(nextValue)
-                                          }
-                                        })
-                                      }
-                                      disabled={!port.editable}
-                                    />
-                                    <span>{label}</span>
-                                  </label>
-                                )
-                              })}
-                            </div>
                           ) : null}
+                        </div>
+                      </div>
+
+                      {parameterNotice ? (
+                        <div className="parameter-review__notice">
+                          <StatusBadge tone={parameterNotice.tone}>{parameterNotice.tone}</StatusBadge>
+                          <p>{parameterNotice.text}</p>
                         </div>
                       ) : null}
 
-	                    {port.notes.length > 0 ? (
-	                      <ul className="output-note-list">
-	                        {port.notes.map((note) => (
-	                          <li key={note}>{note}</li>
-	                        ))}
-	                      </ul>
-	                    ) : null}
-	                  </article>
-                    )
-                  })}
-	              </div>
-                </>
-	            ) : (
-	              <p className="telemetry-note">No `SERIALx_*` parameters were detected in the current snapshot.</p>
-	            )}
+                      <div className="telemetry-metric-grid">
+                        <article className="telemetry-metric-card">
+                          <span>Detected ports</span>
+                          <strong>{serialPortViewModels.length}</strong>
+                        </article>
+                        <article className="telemetry-metric-card">
+                          <span>Staged changes</span>
+                          <strong>{portsStagedDrafts.length}</strong>
+                        </article>
+                        <article className="telemetry-metric-card">
+                          <span>Primary GPS</span>
+                          <strong>{formatArducopterGpsType(gpsPeripheralViewModels.find((peripheral) => peripheral.label === 'Primary GPS')?.value)}</strong>
+                        </article>
+                        <article className="telemetry-metric-card">
+                          <span>Secondary GPS</span>
+                          <strong>{formatArducopterGpsType(gpsPeripheralViewModels.find((peripheral) => peripheral.label === 'Secondary GPS')?.value)}</strong>
+                        </article>
+                      </div>
 
+                      {serialPortViewModels.length > 0 ? (
+                        <>
+                          <div className="ports-surface__disclosure">
+                            <small>{portVisibilitySummary}</small>
+                          </div>
+
+                          <div className="ports-matrix">
+                            <div className="ports-matrix__head">
+                              <span>Port</span>
+                              <span>Function</span>
+                              <span>Baud</span>
+                              <span>Flow</span>
+                              <span>Options</span>
+                              <span>Notes</span>
+                            </div>
+
+                            {visibleSerialPortViewModels.map((port) => {
+                              const protocolParameter = port.protocolParameter
+                              const baudParameter = port.baudParameter
+                              const optionsParameter = port.optionsParameter
+                              const flowControlParameter = port.flowControlParameter
+                              const editedBaudValue = baudParameter ? editedValues[baudParameter.id] : undefined
+                              const currentEncodedBaud = editedBaudValue !== undefined && editedBaudValue !== '' ? Number(editedBaudValue) : port.baudValue
+                              const currentBaudRate = arducopterSerialBaudRate(currentEncodedBaud)
+                              const customBaudInputValue =
+                                baudParameter && customSerialBaudInputs[baudParameter.id] !== undefined
+                                  ? customSerialBaudInputs[baudParameter.id]
+                                  : currentBaudRate !== undefined
+                                    ? String(currentBaudRate)
+                                    : ''
+                              const showCustomBaudInput =
+                                baudParameter !== undefined &&
+                                (customSerialBaudInputs[baudParameter.id] !== undefined || !isPresetBaudRate(currentBaudRate))
+                              const editedOptionsValue = optionsParameter
+                                ? normalizeBitmaskValue(editedValues[optionsParameter.id], port.optionsValue)
+                                : undefined
+                              const serialOptionsSummary = optionsParameter
+                                ? describeBitmaskSelections(
+                                    parameterDraftById.get(optionsParameter.id)?.status === 'staged'
+                                      ? parameterDraftById.get(optionsParameter.id)?.nextValue
+                                      : editedOptionsValue,
+                                    ARDUCOPTER_SERIAL_OPTION_BIT_LABELS,
+                                    'No special options'
+                                  )
+                                : port.optionsLabel
+                              const rowParameterIds = [
+                                protocolParameter?.id,
+                                baudParameter?.id,
+                                optionsParameter?.id,
+                                flowControlParameter?.id
+                              ].filter((value): value is string => value !== undefined)
+                              const rowHasInvalid = rowParameterIds.some((parameterId) => parameterDraftById.get(parameterId)?.status === 'invalid')
+                              const rowHasStaged = rowParameterIds.some((parameterId) => parameterDraftById.get(parameterId)?.status === 'staged')
+
+                              return (
+                                <article
+                                  key={port.portNumber}
+                                  className={`ports-matrix-row${rowHasInvalid ? ' is-invalid' : rowHasStaged ? ' is-staged' : ''}${
+                                    !port.editable ? ' is-readonly' : ''
+                                  }`}
+                                >
+                                  <div className="ports-matrix-row__grid">
+                                    <div className="ports-matrix-row__cell ports-matrix-row__cell--port">
+                                      <div className="ports-matrix-row__identity">
+                                        <div className="ports-matrix-row__title">
+                                          <strong>{port.label}</strong>
+                                          <small>
+                                            {`SERIAL${port.portNumber}`}
+                                            {port.hardwarePort ? ` -> ${port.hardwarePort}` : ''}
+                                          </small>
+                                        </div>
+                                        <StatusBadge tone={rowHasInvalid ? 'danger' : rowHasStaged ? 'warning' : port.editable ? 'neutral' : 'warning'}>
+                                          {rowHasInvalid ? 'invalid' : rowHasStaged ? 'staged' : port.editable ? 'ready' : 'read only'}
+                                        </StatusBadge>
+                                      </div>
+                                      <div className="config-pills">
+                                        <span>{port.usageSummary}</span>
+                                        {port.boardConnectorLabel && port.boardConnectorLabel !== port.label ? <span>{port.boardConnectorLabel}</span> : null}
+                                        {port.boardTrafficSummary ? <span>{port.boardTrafficSummary}</span> : null}
+                                      </div>
+                                    </div>
+
+                                    <div className="ports-matrix-row__cell">
+                                      {protocolParameter ? (
+                                        <label className="scoped-editor-field scoped-editor-field--compact">
+                                          <span>Function</span>
+                                          <select
+                                            value={editedValues[protocolParameter.id] ?? String(port.protocolValue ?? '')}
+                                            onChange={(event) =>
+                                              setEditedValues((existing) => ({
+                                                ...existing,
+                                                [protocolParameter.id]: event.target.value
+                                              }))
+                                            }
+                                            disabled={!port.editable}
+                                          >
+                                            {(protocolParameter.definition?.options ?? []).map((valueOption) => (
+                                              <option key={`${protocolParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                                                {valueOption.label}
+                                              </option>
+                                            ))}
+                                          </select>
+                                          <small>{protocolParameter ? formatArducopterSerialProtocol(Number(editedValues[protocolParameter.id] ?? port.protocolValue)) : port.protocolLabel}</small>
+                                        </label>
+                                      ) : (
+                                        <div className="ports-matrix-row__readout">{port.protocolLabel}</div>
+                                      )}
+                                    </div>
+
+                                    <div className="ports-matrix-row__cell">
+                                      {baudParameter ? (
+                                        <div className="ports-matrix-row__baud">
+                                          <label className="scoped-editor-field scoped-editor-field--compact">
+                                            <span>Baud</span>
+                                            <select
+                                              value={selectedBaudPresetValue(currentBaudRate)}
+                                              onChange={(event) => {
+                                                if (event.target.value === 'custom') {
+                                                  setCustomSerialBaudInputs((existing) => ({
+                                                    ...existing,
+                                                    [baudParameter.id]: currentBaudRate !== undefined ? String(currentBaudRate) : ''
+                                                  }))
+                                                  return
+                                                }
+
+                                                const selectedBaudRate = Number(event.target.value)
+                                                const encodedValue = encodeArducopterSerialBaud(selectedBaudRate)
+                                                setCustomSerialBaudInputs((existing) => {
+                                                  if (!(baudParameter.id in existing)) {
+                                                    return existing
+                                                  }
+                                                  const next = { ...existing }
+                                                  delete next[baudParameter.id]
+                                                  return next
+                                                })
+                                                setEditedValues((existing) => ({
+                                                  ...existing,
+                                                  [baudParameter.id]: String(encodedValue ?? port.baudValue ?? '')
+                                                }))
+                                              }}
+                                              disabled={!port.editable}
+                                            >
+                                              {SERIAL_BAUD_PRESET_RATES.map((baudRate) => (
+                                                <option key={`${baudParameter.id}:preset:${baudRate}`} value={String(baudRate)}>
+                                                  {formatBaudRate(baudRate)}
+                                                </option>
+                                              ))}
+                                              <option value="custom">Custom / AP value</option>
+                                            </select>
+                                          </label>
+                                          {showCustomBaudInput ? (
+                                            <label className="scoped-editor-field scoped-editor-field--compact">
+                                              <span>Custom</span>
+                                              <input
+                                                type="number"
+                                                inputMode="numeric"
+                                                min={1}
+                                                value={customBaudInputValue}
+                                                onChange={(event) => {
+                                                  const nextValue = event.target.value
+                                                  setCustomSerialBaudInputs((existing) => ({
+                                                    ...existing,
+                                                    [baudParameter.id]: nextValue
+                                                  }))
+                                                  const parsed = parseSerialBaudInput(nextValue)
+                                                  if (parsed.encodedValue === undefined) {
+                                                    return
+                                                  }
+                                                  setEditedValues((existing) => ({
+                                                    ...existing,
+                                                    [baudParameter.id]: String(parsed.encodedValue)
+                                                  }))
+                                                }}
+                                                disabled={!port.editable}
+                                              />
+                                            </label>
+                                          ) : null}
+                                        </div>
+                                      ) : (
+                                        <div className="ports-matrix-row__readout">{port.baudLabel}</div>
+                                      )}
+                                    </div>
+
+                                    <div className="ports-matrix-row__cell">
+                                      {flowControlParameter ? (
+                                        <label className="scoped-editor-field scoped-editor-field--compact">
+                                          <span>Flow</span>
+                                          <select
+                                            value={editedValues[flowControlParameter.id] ?? String(port.flowControlValue ?? '')}
+                                            onChange={(event) =>
+                                              setEditedValues((existing) => ({
+                                                ...existing,
+                                                [flowControlParameter.id]: event.target.value
+                                              }))
+                                            }
+                                            disabled={!port.editable}
+                                          >
+                                            {(flowControlParameter.definition?.options ?? []).map((valueOption) => (
+                                              <option key={`${flowControlParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                                                {valueOption.label}
+                                              </option>
+                                            ))}
+                                          </select>
+                                          <small>{formatArducopterSerialRtscts(Number(editedValues[flowControlParameter.id] ?? port.flowControlValue))}</small>
+                                        </label>
+                                      ) : (
+                                        <div className="ports-matrix-row__readout">{port.flowControlLabel ?? 'N/A'}</div>
+                                      )}
+                                    </div>
+
+                                    <div className="ports-matrix-row__cell">
+                                      <div className="ports-matrix-row__options">
+                                        <div className="ports-matrix-row__options-header">
+                                          <strong>Serial options</strong>
+                                          {optionsParameter ? (
+                                            <button
+                                              style={buttonStyle()}
+                                              onClick={() =>
+                                                setExpandedSerialOptionsPortNumber((current) => (current === port.portNumber ? undefined : port.portNumber))
+                                              }
+                                              disabled={!port.editable}
+                                            >
+                                              {expandedSerialOptionsPortNumber === port.portNumber ? 'Hide' : 'Edit'}
+                                            </button>
+                                          ) : null}
+                                        </div>
+                                        <small>{serialOptionsSummary}</small>
+                                      </div>
+                                    </div>
+
+                                    <div className="ports-matrix-row__cell ports-matrix-row__cell--notes">
+                                      <div className="config-pills">
+                                        <span>{formatBaudRate(currentBaudRate)}</span>
+                                        {flowControlParameter ? <span>{formatArducopterSerialRtscts(Number(editedValues[flowControlParameter.id] ?? port.flowControlValue))}</span> : null}
+                                        {port.hardwarePort ? <span>{port.hardwarePort}</span> : null}
+                                      </div>
+                                      {port.notes.length > 0 ? (
+                                        <ul className="output-note-list">
+                                          {port.notes.map((note) => (
+                                            <li key={note}>{note}</li>
+                                          ))}
+                                        </ul>
+                                      ) : (
+                                        <p className="telemetry-note">No extra port notes.</p>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  {optionsParameter && expandedSerialOptionsPortNumber === port.portNumber ? (
+                                    <div className="ports-matrix-row__expanded">
+                                      <div className="scoped-checkbox-list port-row__options-panel">
+                                        {Object.entries(ARDUCOPTER_SERIAL_OPTION_BIT_LABELS).map(([bit, label]) => {
+                                          const numericBit = Number(bit)
+                                          return (
+                                            <label key={`${optionsParameter.id}:${bit}`} className="scoped-checkbox-option">
+                                              <input
+                                                type="checkbox"
+                                                checked={hasBitmaskFlag(editedOptionsValue, numericBit)}
+                                                onChange={(event) =>
+                                                  setEditedValues((existing) => {
+                                                    const currentValue = normalizeBitmaskValue(existing[optionsParameter.id], port.optionsValue)
+                                                    const nextValue = event.target.checked
+                                                      ? currentValue | (1 << numericBit)
+                                                      : currentValue & ~(1 << numericBit)
+
+                                                    return {
+                                                      ...existing,
+                                                      [optionsParameter.id]: String(nextValue)
+                                                    }
+                                                  })
+                                                }
+                                                disabled={!port.editable}
+                                              />
+                                              <span>{label}</span>
+                                            </label>
+                                          )
+                                        })}
+                                      </div>
+                                    </div>
+                                  ) : null}
+                                </article>
+                              )
+                            })}
+                          </div>
+                        </>
+                      ) : (
+                        <p className="telemetry-note">No `SERIALx_*` parameters were detected in the current snapshot.</p>
+                      )}
+                    </div>
 		              </div>
 		              <div className="ports-workspace__sidebar">
 
@@ -8170,7 +8354,7 @@ export function App() {
 		              </div>
 		            </div>
 
-		            <div className="switch-exercise-controls">
+		            <div className="switch-exercise-controls ports-toolbar">
 	              <button
 	                style={buttonStyle('primary')}
 	                onClick={() => void handleApplyScopedParameterDrafts(portsDraftEntries, 'ports:apply', 'Ports & peripherals')}
@@ -8204,180 +8388,204 @@ export function App() {
         {activeViewId === 'vtx' ? (
       <section className="grid one-up">
         <Panel
-          title="Video Transmitter"
-          subtitle="Keep VTX control, frequency, and power in a dedicated workflow instead of burying it inside Ports."
+          title="VTX"
+          subtitle="Use a dedicated VTX workflow while keeping the actual ArduPilot-backed controls visible and honest."
         >
-          <div className="telemetry-stack telemetry-stack--ports">
-            <div className="telemetry-header">
-              <div>
-                <h3>VTX control</h3>
-                <p>Assign the actual control UART in Ports first, then configure the transmitter here.</p>
-              </div>
-              <StatusBadge tone={toneForScopedDraftReview(vtxStagedDrafts.length, vtxInvalidDrafts.length)}>
-                {vtxInvalidDrafts.length > 0 ? `${vtxInvalidDrafts.length} invalid` : vtxStagedDrafts.length > 0 ? `${vtxStagedDrafts.length} staged` : 'in sync'}
-              </StatusBadge>
-            </div>
-
-            <div className="telemetry-metric-grid">
-              <article className="telemetry-metric-card">
-                <span>Control link</span>
-                <strong>{vtxLinkPorts.length > 0 ? `${vtxLinkPorts.length} linked` : 'Not detected'}</strong>
-              </article>
-              <article className="telemetry-metric-card">
-                <span>Frequency</span>
-                <strong>{vtxFrequency !== undefined ? `${vtxFrequency} MHz` : 'Unknown'}</strong>
-              </article>
-              <article className="telemetry-metric-card">
-                <span>Power</span>
-                <strong>{vtxPower !== undefined ? `${vtxPower} mW` : 'Unknown'}</strong>
-              </article>
-              <article className="telemetry-metric-card">
-                <span>Control state</span>
-                <strong>{formatArducopterVtxEnable(vtxEnabled)}</strong>
-              </article>
-            </div>
-
-            <div className="scoped-review-card scoped-review-card--compact">
-              <div className="switch-exercise-card__header">
-                <div>
-                  <strong>VTX configuration</strong>
-                  <p>Use this surface for the user-facing VTX workflow. Keep the port-role wiring itself in Ports.</p>
-                </div>
-              </div>
-
-              <div className="config-pills">
+          <div className="bf-tab-stack">
+            <div className="bf-note">
+              <p>Assign the control UART in Ports first. This tab is for transmitter-facing behavior, not the serial-role assignment itself.</p>
+              <p>
                 {vtxLinkPorts.length > 0
-                  ? vtxLinkPorts.map((port) => <span key={`vtx-tab-link:${port.portNumber}`}>{port.label}: {port.protocolLabel}</span>)
-                  : <span>No VTX control link detected in current port roles</span>}
-                {vtxEnableParameter ? <span>Control: {formatArducopterVtxEnable(vtxEnabled)}</span> : null}
-                {vtxMaxPowerParameter ? <span>Max power: {vtxMaxPower !== undefined ? `${vtxMaxPower} mW` : 'Unknown'}</span> : null}
-              </div>
-
-              <div className="scoped-editor-grid">
-                {vtxEnableParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(vtxEnableParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{vtxEnableParameter.definition?.label ?? vtxEnableParameter.id}</span>
-                    <select
-                      value={editedValues[vtxEnableParameter.id] ?? String(vtxEnabled ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [vtxEnableParameter.id]: event.target.value
-                        }))
-                      }
-                    >
-                      {(vtxEnableParameter.definition?.options ?? []).map((valueOption) => (
-                        <option key={`${vtxEnableParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                          {valueOption.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-
-                {vtxFrequencyParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(vtxFrequencyParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{vtxFrequencyParameter.definition?.label ?? vtxFrequencyParameter.id}</span>
-                    <input
-                      type="number"
-                      min={vtxFrequencyParameter.definition?.minimum}
-                      max={vtxFrequencyParameter.definition?.maximum}
-                      step={vtxFrequencyParameter.definition?.step ?? 1}
-                      value={editedValues[vtxFrequencyParameter.id] ?? String(vtxFrequency ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [vtxFrequencyParameter.id]: event.target.value
-                        }))
-                      }
-                    />
-                  </label>
-                ) : null}
-
-                {vtxPowerParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(vtxPowerParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{vtxPowerParameter.definition?.label ?? vtxPowerParameter.id}</span>
-                    <input
-                      type="number"
-                      min={vtxPowerParameter.definition?.minimum}
-                      max={vtxPowerParameter.definition?.maximum}
-                      step={vtxPowerParameter.definition?.step ?? 1}
-                      value={editedValues[vtxPowerParameter.id] ?? String(vtxPower ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [vtxPowerParameter.id]: event.target.value
-                        }))
-                      }
-                    />
-                  </label>
-                ) : null}
-
-                {vtxMaxPowerParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(vtxMaxPowerParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{vtxMaxPowerParameter.definition?.label ?? vtxMaxPowerParameter.id}</span>
-                    <input
-                      type="number"
-                      min={vtxMaxPowerParameter.definition?.minimum}
-                      max={vtxMaxPowerParameter.definition?.maximum}
-                      step={vtxMaxPowerParameter.definition?.step ?? 1}
-                      value={editedValues[vtxMaxPowerParameter.id] ?? String(vtxMaxPower ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [vtxMaxPowerParameter.id]: event.target.value
-                        }))
-                      }
-                    />
-                  </label>
-                ) : null}
-
-                {vtxOptionsParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(vtxOptionsParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{vtxOptionsParameter.definition?.label ?? vtxOptionsParameter.id}</span>
-                    <input
-                      type="number"
-                      min={vtxOptionsParameter.definition?.minimum}
-                      max={vtxOptionsParameter.definition?.maximum}
-                      step={vtxOptionsParameter.definition?.step ?? 1}
-                      value={editedValues[vtxOptionsParameter.id] ?? String(vtxOptions ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [vtxOptionsParameter.id]: event.target.value
-                        }))
-                      }
-                    />
-                  </label>
-                ) : null}
-              </div>
+                  ? `Detected control path: ${vtxLinkPorts.map((port) => `${port.label} (${port.protocolLabel})`).join(', ')}`
+                  : 'No VTX control link detected in current port roles.'}
+              </p>
             </div>
 
-            <div className="scoped-review-card scoped-review-card--compact">
-              <div className="switch-exercise-card__header">
-                <div>
-                  <strong>VTX Table</strong>
-                  <p>Visible by design so the missing upstream capability stays obvious.</p>
+            <div className="bf-vtx-grid">
+              <article className="bf-gui-box bf-vtx-grid__config">
+                <div className="bf-gui-box__titlebar">
+                  <strong>Selected Mode</strong>
                 </div>
-                <StatusBadge tone="warning">Not yet supported by ArduPilot</StatusBadge>
-              </div>
-              <p className="telemetry-note">This placeholder is intentional. If ArduPilot gains VTX Table support upstream, this tab should expose it here instead of hiding the gap.</p>
+                <div className="bf-gui-box__body">
+                  <div className="config-pills">
+                    {vtxEnableParameter ? <span>Control: {formatArducopterVtxEnable(vtxEnabled)}</span> : null}
+                    {vtxFrequencyParameter ? <span>Frequency: {vtxFrequency !== undefined ? `${vtxFrequency} MHz` : 'Unknown'}</span> : null}
+                    {vtxPowerParameter ? <span>Power: {vtxPower !== undefined ? `${vtxPower} mW` : 'Unknown'}</span> : null}
+                    {vtxMaxPowerParameter ? <span>Max power: {vtxMaxPower !== undefined ? `${vtxMaxPower} mW` : 'Unknown'}</span> : null}
+                  </div>
+
+                  <div className="bf-compact-field-grid">
+                    {vtxEnableParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(vtxEnableParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{vtxEnableParameter.definition?.label ?? vtxEnableParameter.id}</span>
+                        <select
+                          value={editedValues[vtxEnableParameter.id] ?? String(vtxEnabled ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [vtxEnableParameter.id]: event.target.value
+                            }))
+                          }
+                        >
+                          {(vtxEnableParameter.definition?.options ?? []).map((valueOption) => (
+                            <option key={`${vtxEnableParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                              {valueOption.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+
+                    {vtxFrequencyParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(vtxFrequencyParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{vtxFrequencyParameter.definition?.label ?? vtxFrequencyParameter.id}</span>
+                        <input
+                          type="number"
+                          min={vtxFrequencyParameter.definition?.minimum}
+                          max={vtxFrequencyParameter.definition?.maximum}
+                          step={vtxFrequencyParameter.definition?.step ?? 1}
+                          value={editedValues[vtxFrequencyParameter.id] ?? String(vtxFrequency ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [vtxFrequencyParameter.id]: event.target.value
+                            }))
+                          }
+                        />
+                      </label>
+                    ) : null}
+
+                    {vtxPowerParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(vtxPowerParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{vtxPowerParameter.definition?.label ?? vtxPowerParameter.id}</span>
+                        <input
+                          type="number"
+                          min={vtxPowerParameter.definition?.minimum}
+                          max={vtxPowerParameter.definition?.maximum}
+                          step={vtxPowerParameter.definition?.step ?? 1}
+                          value={editedValues[vtxPowerParameter.id] ?? String(vtxPower ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [vtxPowerParameter.id]: event.target.value
+                            }))
+                          }
+                        />
+                      </label>
+                    ) : null}
+
+                    {vtxMaxPowerParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(vtxMaxPowerParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{vtxMaxPowerParameter.definition?.label ?? vtxMaxPowerParameter.id}</span>
+                        <input
+                          type="number"
+                          min={vtxMaxPowerParameter.definition?.minimum}
+                          max={vtxMaxPowerParameter.definition?.maximum}
+                          step={vtxMaxPowerParameter.definition?.step ?? 1}
+                          value={editedValues[vtxMaxPowerParameter.id] ?? String(vtxMaxPower ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [vtxMaxPowerParameter.id]: event.target.value
+                            }))
+                          }
+                        />
+                      </label>
+                    ) : null}
+                  </div>
+                </div>
+              </article>
+
+              <article className="bf-gui-box bf-vtx-grid__status">
+                <div className="bf-gui-box__titlebar">
+                  <strong>Actual State</strong>
+                </div>
+                <div className="bf-gui-box__body">
+                  <div className="bf-gui-box__kv-list">
+                    <div className="bf-gui-box__kv-row">
+                      <span>Device ready</span>
+                      <strong>{vtxLinkPorts.length > 0 ? 'Linked' : 'Not detected'}</strong>
+                    </div>
+                    <div className="bf-gui-box__kv-row">
+                      <span>Control</span>
+                      <strong>{formatArducopterVtxEnable(vtxEnabled)}</strong>
+                    </div>
+                    <div className="bf-gui-box__kv-row">
+                      <span>Frequency</span>
+                      <strong>{vtxFrequency !== undefined ? `${vtxFrequency} MHz` : 'Unknown'}</strong>
+                    </div>
+                    <div className="bf-gui-box__kv-row">
+                      <span>Power</span>
+                      <strong>{vtxPower !== undefined ? `${vtxPower} mW` : 'Unknown'}</strong>
+                    </div>
+                    <div className="bf-gui-box__kv-row">
+                      <span>Max power</span>
+                      <strong>{vtxMaxPower !== undefined ? `${vtxMaxPower} mW` : 'Unknown'}</strong>
+                    </div>
+                    <div className="bf-gui-box__kv-row">
+                      <span>Advanced</span>
+                      <strong>{vtxOptions !== undefined ? String(vtxOptions) : 'N/A'}</strong>
+                    </div>
+                  </div>
+                </div>
+              </article>
+
+              <article className="bf-gui-box bf-vtx-grid__advanced">
+                <div className="bf-gui-box__titlebar">
+                  <strong>VTX Table / Advanced</strong>
+                </div>
+                <div className="bf-gui-box__body">
+                  <p className="setup-gui-box__note">ArduPilot currently exposes frequency, power, max power, and an advanced options bitmask here instead of a full band/channel table.</p>
+                  <div className="bf-vtx-advanced-grid">
+                    {vtxOptionsParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(vtxOptionsParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{vtxOptionsParameter.definition?.label ?? vtxOptionsParameter.id}</span>
+                        <input
+                          type="number"
+                          min={vtxOptionsParameter.definition?.minimum}
+                          max={vtxOptionsParameter.definition?.maximum}
+                          step={vtxOptionsParameter.definition?.step ?? 1}
+                          value={editedValues[vtxOptionsParameter.id] ?? String(vtxOptions ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [vtxOptionsParameter.id]: event.target.value
+                            }))
+                          }
+                        />
+                        <small>Keep this exposed so the ArduPilot gap stays obvious instead of hidden.</small>
+                      </label>
+                    ) : null}
+
+                    <div className="bf-vtx-callout">
+                      <StatusBadge tone="warning">Table not available</StatusBadge>
+                      <p>When ArduPilot grows explicit VTX band/channel table support, this box should turn into a full table editor instead of staying a placeholder.</p>
+                    </div>
+                  </div>
+                </div>
+              </article>
             </div>
 
-            <div className="switch-exercise-controls">
+            <div className="bf-toolbar">
+              <div className="bf-toolbar__status">
+                <span>{vtxStagedDrafts.length} staged</span>
+                <span>{vtxInvalidDrafts.length} invalid</span>
+              </div>
               <button
+                type="button"
                 style={buttonStyle('primary')}
                 onClick={() => void handleApplyScopedParameterDrafts(vtxDraftEntries, 'vtx:apply', 'VTX')}
                 disabled={busyAction !== undefined || vtxStagedDrafts.length === 0 || vtxInvalidDrafts.length > 0 || !canApplyDraftParameters}
               >
-                {busyAction === 'vtx:apply' ? 'Applying…' : `Apply VTX Changes (${vtxStagedDrafts.length})`}
+                {busyAction === 'vtx:apply' ? 'Applying…' : `Save VTX (${vtxStagedDrafts.length})`}
               </button>
               <button
+                type="button"
                 style={buttonStyle()}
                 onClick={() => handleDiscardScopedParameterDrafts(vtxDraftEntries.map((entry) => entry.id), 'VTX')}
                 disabled={busyAction !== undefined || vtxDraftEntries.length === 0}
               >
-                Discard VTX Changes
+                Revert
               </button>
             </div>
           </div>
@@ -8388,205 +8596,224 @@ export function App() {
         {activeViewId === 'osd' ? (
       <section className="grid one-up">
         <Panel
-          title="On-Screen Display"
-          subtitle="Keep OSD backend and display behavior in a dedicated FPV tab instead of the Ports sidebar."
+          title="OSD"
+          subtitle="Use a dedicated OSD workspace while keeping the current ArduPilot capability boundary explicit."
         >
-          <div className="telemetry-stack telemetry-stack--ports">
-            <div className="telemetry-header">
-              <div>
-                <h3>OSD configuration</h3>
-                <p>Assign the matching serial role in Ports first, then use this view for the pilot-facing overlay workflow.</p>
-              </div>
-              <StatusBadge tone={toneForScopedDraftReview(osdStagedDrafts.length, osdInvalidDrafts.length)}>
-                {osdInvalidDrafts.length > 0 ? `${osdInvalidDrafts.length} invalid` : osdStagedDrafts.length > 0 ? `${osdStagedDrafts.length} staged` : 'in sync'}
-              </StatusBadge>
-            </div>
-
-            <div className="telemetry-metric-grid">
-              <article className="telemetry-metric-card">
-                <span>Display link</span>
-                <strong>{osdLinkPorts.length > 0 ? `${osdLinkPorts.length} linked` : 'Not detected'}</strong>
-              </article>
-              <article className="telemetry-metric-card">
-                <span>Backend</span>
-                <strong>{formatArducopterOsdType(osdType)}</strong>
-              </article>
-              <article className="telemetry-metric-card">
-                <span>Switching</span>
-                <strong>{formatArducopterOsdSwitchMethod(osdSwitchMethod)}</strong>
-              </article>
-              <article className="telemetry-metric-card">
-                <span>MSP cells</span>
-                <strong>{formatArducopterMspOsdCellCount(mspOsdCellCount)}</strong>
-              </article>
-            </div>
-
-            <div className="scoped-review-card scoped-review-card--compact">
-              <div className="switch-exercise-card__header">
-                <div>
-                  <strong>OSD backend and switching</strong>
-                  <p>This is the dedicated OSD surface. The linked UART still belongs in Ports, but the overlay setup belongs here.</p>
-                </div>
-              </div>
-
-              <div className="config-pills">
+          <div className="bf-tab-stack">
+            <div className="bf-note">
+              <p>Assign the matching serial role in Ports first. This tab owns the pilot-facing overlay workflow after the transport path is in place.</p>
+              <p>
                 {osdLinkPorts.length > 0
-                  ? osdLinkPorts.map((port) => <span key={`osd-tab-link:${port.portNumber}`}>{port.label}: {port.protocolLabel}</span>)
-                  : <span>No MSP / DisplayPort OSD link detected in current port roles</span>}
-                {mspOptionsParameter ? <span>MSP options: {describeBitmaskSelections(mspOptions, ARDUCOPTER_MSP_OPTION_BIT_LABELS, 'No special options')}</span> : null}
-              </div>
-
-              <div className="scoped-editor-grid">
-                {osdTypeParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(osdTypeParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{osdTypeParameter.definition?.label ?? osdTypeParameter.id}</span>
-                    <select
-                      value={editedValues[osdTypeParameter.id] ?? String(osdType ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [osdTypeParameter.id]: event.target.value
-                        }))
-                      }
-                    >
-                      {(osdTypeParameter.definition?.options ?? []).map((valueOption) => (
-                        <option key={`${osdTypeParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                          {valueOption.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-
-                {osdChannelParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(osdChannelParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{osdChannelParameter.definition?.label ?? osdChannelParameter.id}</span>
-                    <select
-                      value={editedValues[osdChannelParameter.id] ?? String(osdChannel ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [osdChannelParameter.id]: event.target.value
-                        }))
-                      }
-                    >
-                      {(osdChannelParameter.definition?.options ?? []).map((valueOption) => (
-                        <option key={`${osdChannelParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                          {valueOption.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-
-                {osdSwitchMethodParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(osdSwitchMethodParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{osdSwitchMethodParameter.definition?.label ?? osdSwitchMethodParameter.id}</span>
-                    <select
-                      value={editedValues[osdSwitchMethodParameter.id] ?? String(osdSwitchMethod ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [osdSwitchMethodParameter.id]: event.target.value
-                        }))
-                      }
-                    >
-                      {(osdSwitchMethodParameter.definition?.options ?? []).map((valueOption) => (
-                        <option key={`${osdSwitchMethodParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                          {valueOption.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-
-                {mspOsdCellCountParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(mspOsdCellCountParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{mspOsdCellCountParameter.definition?.label ?? mspOsdCellCountParameter.id}</span>
-                    <select
-                      value={editedValues[mspOsdCellCountParameter.id] ?? String(mspOsdCellCount ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [mspOsdCellCountParameter.id]: event.target.value
-                        }))
-                      }
-                    >
-                      {(mspOsdCellCountParameter.definition?.options ?? []).map((valueOption) => (
-                        <option key={`${mspOsdCellCountParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                          {valueOption.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-
-                {mspOptionsParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(mspOptionsParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{mspOptionsParameter.definition?.label ?? mspOptionsParameter.id}</span>
-                    <div className="scoped-checkbox-list">
-                      {Object.entries(ARDUCOPTER_MSP_OPTION_BIT_LABELS).map(([bit, label]) => {
-                        const numericBit = Number(bit)
-                        return (
-                          <label key={`${mspOptionsParameter.id}:${bit}`} className="scoped-checkbox-option">
-                            <input
-                              type="checkbox"
-                              checked={hasBitmaskFlag(editedMspOptions, numericBit)}
-                              onChange={(event) =>
-                                setEditedValues((existing) => {
-                                  const currentValue = normalizeBitmaskValue(existing[mspOptionsParameter.id], mspOptions)
-                                  const nextValue = event.target.checked
-                                    ? currentValue | (1 << numericBit)
-                                    : currentValue & ~(1 << numericBit)
-
-                                  return {
-                                    ...existing,
-                                    [mspOptionsParameter.id]: String(nextValue)
-                                  }
-                                })
-                              }
-                            />
-                            <span>{label}</span>
-                          </label>
-                        )
-                      })}
-                    </div>
-                    <small>
-                      {parameterDraftById.get(mspOptionsParameter.id)?.status === 'staged'
-                        ? `Staged ${describeBitmaskSelections(parameterDraftById.get(mspOptionsParameter.id)?.nextValue, ARDUCOPTER_MSP_OPTION_BIT_LABELS, 'No special options')}`
-                        : parameterDraftById.get(mspOptionsParameter.id)?.reason ??
-                          `Current ${describeBitmaskSelections(mspOptions, ARDUCOPTER_MSP_OPTION_BIT_LABELS, 'No special options')}`}
-                    </small>
-                  </label>
-                ) : null}
-              </div>
+                  ? `Detected display path: ${osdLinkPorts.map((port) => `${port.label} (${port.protocolLabel})`).join(', ')}`
+                  : 'No MSP / DisplayPort OSD link detected in current port roles.'}
+              </p>
             </div>
 
-            <div className="scoped-review-card scoped-review-card--compact">
-              <div className="switch-exercise-card__header">
-                <div>
-                  <strong>Live editor roadmap</strong>
-                  <p>The dedicated tab exists now. Full drag-and-drop layout editing still needs broader OSD element metadata coverage.</p>
+            <div className="bf-osd-grid">
+              <article className="bf-gui-box bf-osd-grid__left">
+                <div className="bf-gui-box__titlebar">
+                  <strong>Elements / Backend</strong>
                 </div>
-                <StatusBadge tone="warning">layout editor pending</StatusBadge>
-              </div>
-              <p className="telemetry-note">This tab is where the Betaflight-style OSD layout editor should land. The current pass establishes the dedicated workflow and keeps OSD-specific settings out of Ports.</p>
+                <div className="bf-gui-box__body">
+                  <p className="setup-gui-box__note">ArduPilot currently exposes backend, page channel, and switching mode first. A fuller selectable element list still needs broader OSD metadata coverage.</p>
+                  <div className="bf-compact-field-grid">
+                    {osdTypeParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(osdTypeParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{osdTypeParameter.definition?.label ?? osdTypeParameter.id}</span>
+                        <select
+                          value={editedValues[osdTypeParameter.id] ?? String(osdType ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [osdTypeParameter.id]: event.target.value
+                            }))
+                          }
+                        >
+                          {(osdTypeParameter.definition?.options ?? []).map((valueOption) => (
+                            <option key={`${osdTypeParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                              {valueOption.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+
+                    {osdChannelParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(osdChannelParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{osdChannelParameter.definition?.label ?? osdChannelParameter.id}</span>
+                        <select
+                          value={editedValues[osdChannelParameter.id] ?? String(osdChannel ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [osdChannelParameter.id]: event.target.value
+                            }))
+                          }
+                        >
+                          {(osdChannelParameter.definition?.options ?? []).map((valueOption) => (
+                            <option key={`${osdChannelParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                              {valueOption.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+
+                    {osdSwitchMethodParameter ? (
+                      <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(osdSwitchMethodParameter.id)?.status ?? 'unchanged'}`}>
+                        <span>{osdSwitchMethodParameter.definition?.label ?? osdSwitchMethodParameter.id}</span>
+                        <select
+                          value={editedValues[osdSwitchMethodParameter.id] ?? String(osdSwitchMethod ?? '')}
+                          onChange={(event) =>
+                            setEditedValues((existing) => ({
+                              ...existing,
+                              [osdSwitchMethodParameter.id]: event.target.value
+                            }))
+                          }
+                        >
+                          {(osdSwitchMethodParameter.definition?.options ?? []).map((valueOption) => (
+                            <option key={`${osdSwitchMethodParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                              {valueOption.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                  </div>
+                </div>
+              </article>
+
+              <article className="bf-gui-box bf-osd-grid__center">
+                <div className="bf-gui-box__titlebar">
+                  <strong>Preview</strong>
+                </div>
+                <div className="bf-gui-box__body">
+                  <div className="bf-osd-preview-toolbar">
+                    <span>Backend {formatArducopterOsdType(osdType)}</span>
+                    <span>Switching {formatArducopterOsdSwitchMethod(osdSwitchMethod)}</span>
+                    <span>Cells {formatArducopterMspOsdCellCount(mspOsdCellCount)}</span>
+                  </div>
+                  <div className="bf-osd-preview-screen">
+                    <div className="bf-osd-preview-screen__hud">
+                      <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--top-left">
+                        LINK {osdLinkPorts.length > 0 ? osdLinkPorts[0]?.label : 'NONE'}
+                      </span>
+                      <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--top-right">
+                        {formatArducopterOsdType(osdType)}
+                      </span>
+                      <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--center">
+                        Drag-and-drop editor pending
+                      </span>
+                      <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--bottom-left">
+                        {formatArducopterMspOsdCellCount(mspOsdCellCount)}
+                      </span>
+                      <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--bottom-right">
+                        {formatArducopterOsdSwitchMethod(osdSwitchMethod)}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="bf-osd-preview-footer">
+                    <StatusBadge tone="warning">layout editor pending</StatusBadge>
+                    <p>This preview establishes the center stage, but full element positioning still needs broader ArduPilot OSD metadata coverage.</p>
+                  </div>
+                </div>
+              </article>
+
+              <article className="bf-gui-box bf-osd-grid__right">
+                <div className="bf-gui-box__titlebar">
+                  <strong>MSP / DisplayPort</strong>
+                </div>
+                <div className="bf-gui-box__body">
+                  <div className="config-pills">
+                    {osdLinkPorts.length > 0
+                      ? osdLinkPorts.map((port) => <span key={`osd-tab-link:${port.portNumber}`}>{port.label}: {port.protocolLabel}</span>)
+                      : <span>No active display link</span>}
+                    {mspOptionsParameter ? <span>MSP options: {describeBitmaskSelections(mspOptions, ARDUCOPTER_MSP_OPTION_BIT_LABELS, 'No special options')}</span> : null}
+                  </div>
+
+                  {mspOsdCellCountParameter ? (
+                    <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(mspOsdCellCountParameter.id)?.status ?? 'unchanged'}`}>
+                      <span>{mspOsdCellCountParameter.definition?.label ?? mspOsdCellCountParameter.id}</span>
+                      <select
+                        value={editedValues[mspOsdCellCountParameter.id] ?? String(mspOsdCellCount ?? '')}
+                        onChange={(event) =>
+                          setEditedValues((existing) => ({
+                            ...existing,
+                            [mspOsdCellCountParameter.id]: event.target.value
+                          }))
+                        }
+                      >
+                        {(mspOsdCellCountParameter.definition?.options ?? []).map((valueOption) => (
+                          <option key={`${mspOsdCellCountParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                            {valueOption.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+
+                  {mspOptionsParameter ? (
+                    <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(mspOptionsParameter.id)?.status ?? 'unchanged'}`}>
+                      <span>{mspOptionsParameter.definition?.label ?? mspOptionsParameter.id}</span>
+                      <div className="scoped-checkbox-list">
+                        {Object.entries(ARDUCOPTER_MSP_OPTION_BIT_LABELS).map(([bit, label]) => {
+                          const numericBit = Number(bit)
+                          return (
+                            <label key={`${mspOptionsParameter.id}:${bit}`} className="scoped-checkbox-option">
+                              <input
+                                type="checkbox"
+                                checked={hasBitmaskFlag(editedMspOptions, numericBit)}
+                                onChange={(event) =>
+                                  setEditedValues((existing) => {
+                                    const currentValue = normalizeBitmaskValue(existing[mspOptionsParameter.id], mspOptions)
+                                    const nextValue = event.target.checked
+                                      ? currentValue | (1 << numericBit)
+                                      : currentValue & ~(1 << numericBit)
+
+                                    return {
+                                      ...existing,
+                                      [mspOptionsParameter.id]: String(nextValue)
+                                    }
+                                  })
+                                }
+                              />
+                              <span>{label}</span>
+                            </label>
+                          )
+                        })}
+                      </div>
+                      <small>
+                        {parameterDraftById.get(mspOptionsParameter.id)?.status === 'staged'
+                          ? `Staged ${describeBitmaskSelections(parameterDraftById.get(mspOptionsParameter.id)?.nextValue, ARDUCOPTER_MSP_OPTION_BIT_LABELS, 'No special options')}`
+                          : parameterDraftById.get(mspOptionsParameter.id)?.reason ??
+                            `Current ${describeBitmaskSelections(mspOptions, ARDUCOPTER_MSP_OPTION_BIT_LABELS, 'No special options')}`}
+                      </small>
+                    </label>
+                  ) : null}
+                </div>
+              </article>
             </div>
 
-            <div className="switch-exercise-controls">
+            <div className="bf-toolbar">
+              <div className="bf-toolbar__status">
+                <span>{osdStagedDrafts.length} staged</span>
+                <span>{osdInvalidDrafts.length} invalid</span>
+              </div>
               <button
+                type="button"
                 style={buttonStyle('primary')}
                 onClick={() => void handleApplyScopedParameterDrafts(osdDraftEntries, 'osd:apply', 'OSD')}
                 disabled={busyAction !== undefined || osdStagedDrafts.length === 0 || osdInvalidDrafts.length > 0 || !canApplyDraftParameters}
               >
-                {busyAction === 'osd:apply' ? 'Applying…' : `Apply OSD Changes (${osdStagedDrafts.length})`}
+                {busyAction === 'osd:apply' ? 'Applying…' : `Save OSD (${osdStagedDrafts.length})`}
               </button>
               <button
+                type="button"
                 style={buttonStyle()}
                 onClick={() => handleDiscardScopedParameterDrafts(osdDraftEntries.map((entry) => entry.id), 'OSD')}
                 disabled={busyAction !== undefined || osdDraftEntries.length === 0}
               >
-                Discard OSD Changes
+                Revert
               </button>
             </div>
           </div>

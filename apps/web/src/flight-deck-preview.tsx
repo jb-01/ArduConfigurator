@@ -12,6 +12,7 @@ interface FlightDeckPreviewProps {
   frameClassLabel?: string
   frameTypeLabel?: string
   compact?: boolean
+  showReadouts?: boolean
   testId?: string
 }
 
@@ -92,7 +93,7 @@ function mountModel(
   }
 
   if (scaleMode === 'betaflight') {
-    model.scale.setScalar(compact ? 15.5 : 18)
+    model.scale.setScalar(compact ? 15 : 16.5)
     model.position.set(0, 0, 0)
   } else {
     const box = new THREE.Box3().setFromObject(model)
@@ -383,6 +384,7 @@ export function FlightDeckPreview({
   frameClassLabel,
   frameTypeLabel,
   compact = false,
+  showReadouts = true,
   testId
 }: FlightDeckPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -679,28 +681,30 @@ export function FlightDeckPreview({
             </div>
           </div>
         </div>
-        <div className="flight-deck__readout-grid">
-          <article className={`flight-deck__readout-card${verified ? ' is-live' : ''}`}>
-            <span>Roll</span>
-            <strong>{formatDegrees(rollDeg)}</strong>
-            <small>Live bank attitude from the 3D craft view.</small>
-          </article>
-          <article className={`flight-deck__readout-card${verified ? ' is-live' : ''}`}>
-            <span>Pitch</span>
-            <strong>{formatDegrees(pitchDeg)}</strong>
-            <small>Forward / aft tilt with quaternion interpolation.</small>
-          </article>
-          <article className={`flight-deck__readout-card${verified ? ' is-live' : ''}`}>
-            <span>Heading</span>
-            <strong>{Math.round(heading)}°</strong>
-            <small>{benchHeadingOffsetDeg === null ? 'Centered on the HUD heading tape.' : 'Relative to the saved bench-forward heading.'}</small>
-          </article>
-          <article className={`flight-deck__readout-card${verified ? ' is-live' : ''}`}>
-            <span>Link State</span>
-            <strong>{verified ? 'Synced' : 'Waiting'}</strong>
-            <small>{verified ? 'ATTITUDE stream active.' : 'Preview is holding the staged pose.'}</small>
-          </article>
-        </div>
+        {showReadouts ? (
+          <div className="flight-deck__readout-grid">
+            <article className={`flight-deck__readout-card${verified ? ' is-live' : ''}`}>
+              <span>Roll</span>
+              <strong>{formatDegrees(rollDeg)}</strong>
+              <small>Live bank attitude from the 3D craft view.</small>
+            </article>
+            <article className={`flight-deck__readout-card${verified ? ' is-live' : ''}`}>
+              <span>Pitch</span>
+              <strong>{formatDegrees(pitchDeg)}</strong>
+              <small>Forward / aft tilt with quaternion interpolation.</small>
+            </article>
+            <article className={`flight-deck__readout-card${verified ? ' is-live' : ''}`}>
+              <span>Heading</span>
+              <strong>{Math.round(heading)}°</strong>
+              <small>{benchHeadingOffsetDeg === null ? 'Centered on the HUD heading tape.' : 'Relative to the saved bench-forward heading.'}</small>
+            </article>
+            <article className={`flight-deck__readout-card${verified ? ' is-live' : ''}`}>
+              <span>Link State</span>
+              <strong>{verified ? 'Synced' : 'Waiting'}</strong>
+              <small>{verified ? 'ATTITUDE stream active.' : 'Preview is holding the staged pose.'}</small>
+            </article>
+          </div>
+        ) : null}
       </div>
     </div>
   )
