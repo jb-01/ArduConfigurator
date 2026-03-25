@@ -142,6 +142,7 @@ export interface ArduPilotConfiguratorRuntimeOptions {
   accelerometerInitialWarmupMs?: number
   accelerometerStepAdvanceMs?: number
   accelerometerCompletionFallbackMs?: number
+  compassGuidanceTimeoutMs?: number
 }
 
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 5000
@@ -156,6 +157,7 @@ const DEFAULT_PARAMETER_WRITE_TOLERANCE = 0.0001
 const DEFAULT_ACCELEROMETER_INITIAL_WARMUP_MS = 6000
 const DEFAULT_ACCELEROMETER_STEP_ADVANCE_MS = 1500
 const DEFAULT_ACCELEROMETER_COMPLETION_FALLBACK_MS = 4000
+const DEFAULT_COMPASS_GUIDANCE_TIMEOUT_MS = 5000
 const PRE_ARM_ISSUE_TTL_MS = 15000
 const MAX_GUIDED_ACTION_STATUS_TEXTS = 5
 const MOTOR_TEST_COMPLETION_BUFFER_MS = 250
@@ -274,6 +276,7 @@ export class ArduPilotConfiguratorRuntime {
   private readonly accelerometerInitialWarmupMs: number
   private readonly accelerometerStepAdvanceMs: number
   private readonly accelerometerCompletionFallbackMs: number
+  private readonly compassGuidanceTimeoutMs: number
 
   private connection: TransportStatus
   private sessionProfile: SessionProfile
@@ -289,6 +292,7 @@ export class ArduPilotConfiguratorRuntime {
   private accelerometerCalibration?: AccelerometerCalibrationProgressState
   private accelerometerPromptFallbackTimer?: ReturnType<typeof setTimeout>
   private accelerometerAdvanceTimer?: ReturnType<typeof setTimeout>
+  private compassGuidanceTimer?: ReturnType<typeof setTimeout>
   private motorTestTimer?: ReturnType<typeof setTimeout>
   private preArmExpiryTimer?: ReturnType<typeof setTimeout>
   private parameterSyncRetryTimer?: ReturnType<typeof setTimeout>
@@ -308,6 +312,7 @@ export class ArduPilotConfiguratorRuntime {
     this.accelerometerStepAdvanceMs = options.accelerometerStepAdvanceMs ?? DEFAULT_ACCELEROMETER_STEP_ADVANCE_MS
     this.accelerometerCompletionFallbackMs =
       options.accelerometerCompletionFallbackMs ?? DEFAULT_ACCELEROMETER_COMPLETION_FALLBACK_MS
+    this.compassGuidanceTimeoutMs = options.compassGuidanceTimeoutMs ?? DEFAULT_COMPASS_GUIDANCE_TIMEOUT_MS
     this.subscriptions = [
       this.session.onStatus((status: TransportStatus) => {
         this.connection = status
@@ -724,15 +729,7 @@ export class ArduPilotConfiguratorRuntime {
         await this.runAccelerometerCalibrationAction()
         return
       case 'calibrate-compass':
-        await this.performCommandGuidedAction(
-          'calibrate-compass',
-          'Compass calibration command queued.',
-          'Compass calibration command sent. Waiting for autopilot guidance.',
-          defaultInstructionsForAction('calibrate-compass', this.sessionProfile),
-          async () => {
-            await this.sendCommand(MAV_CMD.PREFLIGHT_CALIBRATION, [0, 1, 0, 0, 0, 0, 0])
-          }
-        )
+        await this.runCompassCalibrationAction()
         return
       case 'reboot-autopilot':
         await this.performCommandGuidedAction(
@@ -826,6 +823,7 @@ export class ArduPilotConfiguratorRuntime {
     this.clearParameterSyncRetryTimer()
     this.clearAccelerometerPromptFallbackTimer()
     this.clearAccelerometerAdvanceTimer()
+    this.clearCompassGuidanceTimer()
     this.rejectVehicleWaiters(new Error('Runtime destroyed before vehicle heartbeat was received.'))
     this.rejectParameterSyncWaiters(new Error('Runtime destroyed before parameter sync completed.'))
     this.session.destroy()
@@ -1407,8 +1405,24 @@ export class ArduPilotConfiguratorRuntime {
   }
 
   private emit(): void {
+    this.reconcileCompassCalibrationAvailability()
     const snapshot = this.getSnapshot()
     this.updateListeners.forEach((listener) => listener(snapshot))
+  }
+
+  private reconcileCompassCalibrationAvailability(): void {
+    const current = this.guidedActions['calibrate-compass']
+    if (
+      this.parameterSync.status !== 'complete' ||
+      (current.status !== 'requested' && current.status !== 'running') ||
+      enabledCompassCountFromParameters(this.parameters) > 0
+    ) {
+      return
+    }
+
+    const message = 'No enabled compass detected on this vehicle. Skip this step or enable a compass first.'
+    this.failGuidedAction('calibrate-compass', new Error(message))
+    this.appendStatusEntry('warning', message)
   }
 
   private resetLiveState(): void {
@@ -1434,6 +1448,7 @@ export class ArduPilotConfiguratorRuntime {
     this.clearParameterSyncRetryTimer()
     this.clearAccelerometerPromptFallbackTimer()
     this.clearAccelerometerAdvanceTimer()
+    this.clearCompassGuidanceTimer()
   }
 
   private resolveVehicleWaiters(vehicle: VehicleIdentity): void {
@@ -1872,6 +1887,15 @@ export class ArduPilotConfiguratorRuntime {
     this.accelerometerAdvanceTimer = undefined
   }
 
+  private clearCompassGuidanceTimer(): void {
+    if (!this.compassGuidanceTimer) {
+      return
+    }
+
+    clearTimeout(this.compassGuidanceTimer)
+    this.compassGuidanceTimer = undefined
+  }
+
   private scheduleAccelerometerPromptFallback(stepIndex: number): void {
     this.clearAccelerometerPromptFallbackTimer()
     this.accelerometerPromptFallbackTimer = setTimeout(() => {
@@ -1949,6 +1973,23 @@ export class ArduPilotConfiguratorRuntime {
     }, this.accelerometerCompletionFallbackMs)
   }
 
+  private scheduleCompassGuidanceTimeout(): void {
+    this.clearCompassGuidanceTimer()
+    this.compassGuidanceTimer = setTimeout(() => {
+      this.compassGuidanceTimer = undefined
+      const current = this.guidedActions['calibrate-compass']
+      if ((current.status !== 'requested' && current.status !== 'running') || current.statusTexts.length > 0) {
+        return
+      }
+
+      const message =
+        'No compass calibration guidance arrived from the autopilot. This vehicle may not have a usable compass, or compass calibration may be unsupported on this setup.'
+      this.failGuidedAction('calibrate-compass', new Error(message))
+      this.appendStatusEntry('warning', message)
+      this.emit()
+    }, this.compassGuidanceTimeoutMs)
+  }
+
   private scheduleMotorTestCompletion(): void {
     this.clearMotorTestTimer()
     const durationMs = Math.max((this.motorTest.durationSeconds ?? 0) * 1000, 0)
@@ -2009,6 +2050,27 @@ export class ArduPilotConfiguratorRuntime {
       this.failGuidedAction(actionId, error)
       this.emit()
       throw error
+    }
+  }
+
+  private async runCompassCalibrationAction(): Promise<void> {
+    this.clearCompassGuidanceTimer()
+    await this.performCommandGuidedAction(
+      'calibrate-compass',
+      'Compass calibration command queued.',
+      'Compass calibration command sent. Waiting for autopilot guidance.',
+      defaultInstructionsForAction('calibrate-compass', this.sessionProfile),
+      async () => {
+        await this.sendCommand(MAV_CMD.PREFLIGHT_CALIBRATION, [0, 1, 0, 0, 0, 0, 0], {
+          waitForAck: true,
+          ackTimeoutMs: 3000
+        })
+      }
+    )
+
+    const current = this.guidedActions['calibrate-compass']
+    if (current.status === 'requested' || current.status === 'running') {
+      this.scheduleCompassGuidanceTimeout()
     }
   }
 
@@ -2126,6 +2188,9 @@ export class ArduPilotConfiguratorRuntime {
 
   private failGuidedAction(actionId: GuidedActionId, error: unknown): void {
     const message = error instanceof Error ? error.message : 'Unknown guided action error.'
+    if (actionId === 'calibrate-compass') {
+      this.clearCompassGuidanceTimer()
+    }
     this.setGuidedAction(actionId, {
       ...this.guidedActions[actionId],
       status: 'failed',
@@ -2143,6 +2208,10 @@ export class ArduPilotConfiguratorRuntime {
       const match = matchGuidedActionText(actionId, current, text, this.sessionProfile)
       if (!match) {
         return
+      }
+
+      if (actionId === 'calibrate-compass') {
+        this.clearCompassGuidanceTimer()
       }
 
       const nextStatus = match.status ?? (current.status === 'idle' ? 'running' : current.status)
@@ -2460,6 +2529,13 @@ function idleSummaryForAction(actionId: GuidedActionId): string {
     default:
       return 'Ready.'
   }
+}
+
+function enabledCompassCountFromParameters(parameters: Map<string, ParameterState>): number {
+  return ['COMPASS_USE', 'COMPASS_USE2', 'COMPASS_USE3'].filter((paramId) => {
+    const value = parameters.get(paramId)?.value
+    return value !== undefined && Math.round(value) > 0
+  }).length
 }
 
 function defaultInstructionsForAction(actionId: GuidedActionId, sessionProfile: SessionProfile): string[] {

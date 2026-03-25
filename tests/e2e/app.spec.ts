@@ -38,7 +38,39 @@ async function applySingleTuningChange(page: Page, value: string): Promise<void>
   await expect(page.getByRole('button', { name: 'Pull Parameters' })).toBeVisible()
 }
 
+async function completeAccelerometerCalibrationFromSetup(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Calibrate Accelerometer' }).click()
+  await expect(page.getByText('Accelerometer calibration complete.').first()).toBeVisible()
+}
+
 test.describe('browser configurator regression flows', () => {
+  test('setup actions explain when they are blocked', async ({ page }) => {
+    await page.goto('/')
+
+    await expect(page.getByRole('heading', { name: 'Setup' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Calibrate Accelerometer' })).toBeDisabled()
+    await expect(page.getByText('Connect to a vehicle first.').first()).toBeVisible()
+  })
+
+  test('setup overview shows the inline accelerometer pose guide while calibration is active', async ({ page }) => {
+    await connectToVehicle(page, 'demo')
+
+    await page.getByRole('button', { name: 'Calibrate Accelerometer' }).click()
+    await expect(page.getByTestId('setup-inline-accelerometer-guide')).toBeVisible()
+    await expect(page.getByText('Current Posture')).toBeVisible()
+    await expect(page.getByText('Pose aligned')).toBeVisible()
+  })
+
+  test('guided setup marks accelerometer complete after the in-app calibration succeeds', async ({ page }) => {
+    await connectToVehicle(page, 'demo')
+
+    await completeAccelerometerCalibrationFromSetup(page)
+
+    await page.getByTestId('setup-start-guided-button').click()
+    const accelerometerStep = page.locator('.setup-wizard-step').filter({ hasText: 'Accelerometer' })
+    await expect(accelerometerStep).toHaveClass(/is-complete/)
+  })
+
   test('bundled websocket demo keeps core configuration surfaces reachable', async ({ page }) => {
     await connectToVehicle(page, 'demo')
 
@@ -55,6 +87,7 @@ test.describe('browser configurator regression flows', () => {
     await expect(page.getByTestId('view-button-parameters')).toHaveCount(0)
     await expect(page.getByRole('heading', { name: 'Setup' })).toBeVisible()
     await expect(page.getByTestId('setup-craft-preview')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Calibrate Accelerometer' })).toBeEnabled()
     await expect(page.getByTestId('flight-deck-zero-heading-button')).toBeVisible()
     await page.getByTestId('flight-deck-zero-heading-button').click()
     await expect(page.getByText('Bench-forward zeroed')).toBeVisible()
@@ -92,11 +125,13 @@ test.describe('browser configurator regression flows', () => {
 
     await openView(page, 'vtx')
     await expectWorkspaceViewTitle(page, 'VTX')
-    await expect(page.getByText('VTX Table', { exact: true })).toBeVisible()
+    await expect(page.getByText('Selected Mode', { exact: true })).toBeVisible()
+    await expect(page.getByText('Actual State', { exact: true })).toBeVisible()
 
     await openView(page, 'osd')
     await expectWorkspaceViewTitle(page, 'OSD')
-    await expect(page.getByText('Live editor roadmap', { exact: true })).toBeVisible()
+    await expect(page.getByText('Preview', { exact: true })).toBeVisible()
+    await expect(page.getByText('Drag-and-drop editor pending')).toBeVisible()
 
     await openView(page, 'receiver')
     await expect(page.getByText('Receiver status')).toBeVisible()

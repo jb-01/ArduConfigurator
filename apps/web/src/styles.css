@@ -58,6 +58,9 @@
   --text: hsl(0, 0%, 95%);
   --text-muted: var(--surface-900);
   --text-dim: var(--surface-800);
+  --text-on-light: #171a1f;
+  --text-muted-on-light: #616874;
+  --text-disabled-on-light: #7f8794;
   --accent: var(--primary-500);
   --accent-strong: var(--primary-400);
   --accent-weak: rgba(255, 187, 0, 0.14);
@@ -77,7 +80,7 @@
   --radius-2xl: 12px;
   --shadow-soft: 0 10px 24px rgba(0, 0, 0, 0.30);
   --shadow-hard: 0 6px 14px rgba(0, 0, 0, 0.35);
-  --header-height: 80px;
+  --header-height: 112px;
   --statusbar-height: 26px;
   --sidebar-width: 272px;
   background: var(--bg-app);
@@ -160,7 +163,7 @@ textarea:focus {
 
 .app-shell {
   display: grid;
-  grid-template-rows: var(--header-height) auto var(--statusbar-height);
+  grid-template-rows: auto 1fr var(--statusbar-height);
   min-height: 100vh;
   height: auto;
   width: 100%;
@@ -169,9 +172,10 @@ textarea:focus {
 
 .app-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
   gap: 12px;
-  height: var(--header-height);
+  min-height: var(--header-height);
   padding: 12px 16px;
   background: var(--surface-200);
   border-bottom: 1px solid var(--border);
@@ -186,7 +190,7 @@ textarea:focus {
   align-items: center;
   gap: 10px;
   min-width: 0;
-  width: 260px;
+  width: 220px;
   flex-shrink: 0;
   height: auto;
 }
@@ -234,7 +238,7 @@ textarea:focus {
   align-items: center;
   gap: 8px;
   min-width: 0;
-  flex: 1.2;
+  flex: 1 1 320px;
 }
 
 .app-header__connection select,
@@ -251,56 +255,335 @@ textarea:focus {
   width: 250px;
 }
 
-.app-header__summary {
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+
+.app-header__telemetry {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  flex: 1;
+  align-items: flex-start;
+  gap: 12px;
+  flex: 1 1 520px;
   min-width: 0;
 }
 
-.app-header__status-item {
-  display: inline-flex;
+.header-quad-status {
+  display: grid;
+  gap: 8px;
+  min-width: 180px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--surface-400);
+  background: var(--surface-300);
+}
+
+.header-quad-status__battery {
+  display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px 8px;
+  gap: 10px;
+}
+
+.header-battery-icon {
+  position: relative;
+  width: 44px;
+  height: 28px;
+  border: 3px solid var(--surface-800);
   border-radius: 4px;
-  border: 1px solid var(--border);
-  font-family: var(--font-data);
-  font-size: 10px;
-  letter-spacing: 0.02em;
-  color: var(--text-muted);
-  white-space: nowrap;
-  background: var(--bg-panel-raised);
-}
-
-.app-header__status-item.is-live {
-  color: var(--text);
-}
-
-.app-header__status-item.is-warning {
-  color: var(--warning);
-  border-color: rgba(255, 102, 0, 0.28);
-  background: rgba(255, 102, 0, 0.08);
-}
-
-.app-header__status-item .dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--text-dim);
   flex-shrink: 0;
 }
 
-.app-header__status-item .dot.is-connected { background: var(--success); }
-.app-header__status-item .dot.is-warning { background: var(--warning); }
-.app-header__status-item .dot.is-danger { background: var(--danger); }
+.header-battery-icon::after {
+  content: "";
+  position: absolute;
+  top: 7px;
+  right: -7px;
+  width: 5px;
+  height: 10px;
+  border-radius: 0 2px 2px 0;
+  background: var(--surface-700);
+}
+
+.header-battery-icon__level {
+  position: absolute;
+  inset: 4px;
+  width: var(--battery-level, 0%);
+  max-width: calc(100% - 8px);
+  border-radius: 2px;
+  background: var(--surface-700);
+}
+
+.header-battery-icon.is-live {
+  border-color: var(--text);
+}
+
+.header-battery-icon.is-live .header-battery-icon__level {
+  background: var(--primary-500);
+}
+
+.header-battery-icon.is-warning .header-battery-icon__level {
+  background: var(--warning);
+}
+
+.header-battery-icon.is-danger .header-battery-icon__level {
+  background: var(--danger);
+}
+
+.header-quad-status__legend {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.header-quad-status__legend strong,
+.header-sync-panel strong {
+  display: block;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.header-quad-status__legend small {
+  display: block;
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.header-quad-status__flags {
+  display: flex;
+  gap: 10px;
+}
+
+.header-quad-flag {
+  width: 18px;
+  height: 18px;
+  opacity: 0.8;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: contain;
+}
+
+.header-quad-flag--armed {
+  background-image: url('/betaflight-header/cf_icon_armed_grey.svg');
+}
+
+.header-quad-flag--failsafe {
+  background-image: url('/betaflight-header/cf_icon_failsafe_grey.svg');
+}
+
+.header-quad-flag--link {
+  background-image: url('/betaflight-header/cf_icon_link_grey.svg');
+}
+
+.header-quad-flag--armed.is-active {
+  background-image: url('/betaflight-header/cf_icon_armed_active.svg');
+}
+
+.header-quad-flag--failsafe.is-active {
+  background-image: url('/betaflight-header/cf_icon_failsafe_active.svg');
+}
+
+.header-quad-flag--link.is-active {
+  background-image: url('/betaflight-header/cf_icon_link_active.svg');
+}
+
+.header-sensor-status {
+  display: flex;
+  border-radius: 10px;
+  border: 1px solid var(--surface-400);
+  background: var(--surface-300);
+  overflow: hidden;
+}
+
+.header-sensor-status__item {
+  width: 64px;
+  min-height: 74px;
+  display: grid;
+  align-content: start;
+  justify-items: center;
+  gap: 6px;
+  padding: 6px 4px 8px;
+  border-right: 1px solid var(--surface-400);
+}
+
+.header-sensor-status__item:last-child {
+  border-right: none;
+}
+
+.header-sensor-status__icon {
+  width: 100%;
+  height: 44px;
+  background-repeat: no-repeat;
+  background-position: center 2px;
+  background-size: 38px;
+}
+
+.header-sensor-status__label {
+  color: var(--surface-700);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.header-sensor-status__item.is-active .header-sensor-status__label,
+.header-sensor-status__item.is-fix .header-sensor-status__label {
+  color: var(--text);
+}
+
+.header-sensor-status__icon--gyro {
+  background-image: url('/betaflight-header/sensor_gyro_off.png');
+}
+
+.header-sensor-status__item.is-active .header-sensor-status__icon--gyro {
+  background-image: url('/betaflight-header/sensor_gyro_on.png');
+}
+
+.header-sensor-status__icon--accel {
+  background-image: url('/betaflight-header/sensor_acc_off.png');
+}
+
+.header-sensor-status__item.is-active .header-sensor-status__icon--accel {
+  background-image: url('/betaflight-header/sensor_acc_on.png');
+}
+
+.header-sensor-status__icon--mag {
+  background-image: url('/betaflight-header/sensor_mag_off.png');
+}
+
+.header-sensor-status__item.is-active .header-sensor-status__icon--mag {
+  background-image: url('/betaflight-header/sensor_mag_on.png');
+}
+
+.header-sensor-status__icon--baro {
+  background-image: url('/betaflight-header/sensor_baro_off.png');
+}
+
+.header-sensor-status__item.is-active .header-sensor-status__icon--baro {
+  background-image: url('/betaflight-header/sensor_baro_on.png');
+}
+
+.header-sensor-status__icon--gps {
+  background-image: url('/betaflight-header/sensor_sat_off.png');
+}
+
+.header-sensor-status__item.is-active .header-sensor-status__icon--gps {
+  background-image: url('/betaflight-header/sensor_sat_on_no_fix.png');
+}
+
+.header-sensor-status__item.is-fix .header-sensor-status__icon--gps {
+  background-image: url('/betaflight-header/sensor_sat_on_with_fix.png');
+}
+
+.header-sensor-status__icon--rc {
+  background-image: url('/betaflight-header/cf_icon_rx_grey.svg');
+  background-size: 32px;
+}
+
+.header-sensor-status__item.is-active .header-sensor-status__icon--rc {
+  background-image: url('/betaflight-header/cf_icon_rx_white.svg');
+}
+
+.header-sync-panel {
+  min-width: 164px;
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--surface-400);
+  background: var(--surface-300);
+}
+
+.header-sync-panel__progress {
+  height: 7px;
+  width: 100%;
+  border-radius: 999px;
+  appearance: none;
+  -webkit-appearance: none;
+  overflow: hidden;
+}
+
+.header-sync-panel__progress::-webkit-progress-bar {
+  background: var(--surface-500);
+}
+
+.header-sync-panel__progress::-webkit-progress-value {
+  background: var(--primary-500);
+  border-radius: 999px;
+}
 
 .app-header__mode-switch {
   display: flex;
   align-items: center;
   flex-shrink: 0;
+}
+
+.expert-mode-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.expert-mode-toggle input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  margin: 0;
+  cursor: pointer;
+  z-index: 1;
+}
+
+.expert-mode-toggle__track,
+.expert-mode-toggle__thumb,
+.expert-mode-toggle__label {
+  pointer-events: none;
+}
+
+.expert-mode-toggle__track {
+  width: 34px;
+  height: 18px;
+  padding: 2px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  background: var(--surface-600);
+  transition: background-color 0.2s ease;
+}
+
+.expert-mode-toggle__thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  transform: translateX(0);
+  transition: transform 0.2s ease;
+}
+
+.expert-mode-toggle input:checked + .expert-mode-toggle__track {
+  background: var(--primary-500);
+}
+
+.expert-mode-toggle input:checked + .expert-mode-toggle__track .expert-mode-toggle__thumb {
+  transform: translateX(16px);
+}
+
+.expert-mode-toggle__label {
+  white-space: nowrap;
 }
 
 .app-header__actions {
@@ -1315,7 +1598,13 @@ textarea:focus {
   gap: 14px;
 }
 
-.ports-workspace,
+.ports-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
 .outputs-workspace {
   display: grid;
   grid-template-columns: minmax(0, 1.38fr) minmax(320px, 0.62fr);
@@ -1332,13 +1621,18 @@ textarea:focus {
   gap: 10px;
 }
 
+.ports-workspace__sidebar {
+  grid-template-columns: 1fr;
+  align-items: start;
+}
+
 .ports-surface {
   display: grid;
   gap: 12px;
   padding: 14px;
-  border-radius: var(--radius-lg);
-  border: 2px solid var(--bg-surface-strong);
-  background: var(--bg-panel);
+  border-radius: 12px;
+  border: 2px solid var(--surface-400);
+  background: var(--surface-200);
 }
 
 .ports-surface__header {
@@ -1347,7 +1641,7 @@ textarea:focus {
   align-items: flex-start;
   gap: 16px;
   padding-bottom: 10px;
-  border-bottom: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--surface-400);
 }
 
 .ports-surface__header h3 {
@@ -1361,6 +1655,10 @@ textarea:focus {
   margin: 0;
   color: var(--text-muted);
   line-height: 1.5;
+}
+
+.telemetry-stack--ports > .telemetry-metric-grid {
+  display: none;
 }
 
 .ports-surface__header-actions {
@@ -1495,8 +1793,20 @@ textarea:focus {
   line-height: 1.45;
 }
 
+.setup-bench-action__blocked-reason {
+  color: var(--warning);
+  font-family: var(--font-data);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
 .setup-bench-action__status {
   justify-self: end;
+}
+
+.setup-bench-action__detail {
+  grid-column: 1 / -1;
+  padding: 10px 0 4px;
 }
 
 .setup-bench__workspace {
@@ -1692,6 +2002,264 @@ textarea:focus {
 
 .setup-gui-box__map .gps-map-card {
   gap: 8px;
+}
+
+.bf-tab-stack {
+  display: grid;
+  gap: 14px;
+  padding-bottom: 84px;
+}
+
+.bf-note {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--primary-600);
+  background: var(--primary-transparent-2);
+}
+
+.bf-note--warning {
+  border-color: var(--warning);
+  background: rgba(255, 102, 0, 0.12);
+}
+
+.bf-note--danger {
+  border-color: var(--danger);
+  background: rgba(226, 18, 63, 0.14);
+}
+
+.bf-note p {
+  margin: 0;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.bf-gui-box {
+  display: grid;
+  gap: 10px;
+  border: 2px solid var(--surface-400);
+  border-radius: 12px;
+  background: var(--surface-200);
+  padding: 14px;
+  padding-top: 24px;
+  position: relative;
+}
+
+.bf-gui-box__titlebar {
+  position: absolute;
+  top: -14px;
+  left: 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: var(--primary-500);
+}
+
+.bf-gui-box__titlebar strong {
+  color: #000;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.bf-gui-box__body {
+  display: grid;
+  gap: 12px;
+}
+
+.bf-gui-box__kv-list {
+  display: grid;
+  gap: 0;
+}
+
+.bf-gui-box__kv-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--surface-400);
+  font-size: 12px;
+}
+
+.bf-gui-box__kv-row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.bf-gui-box__kv-row:first-child {
+  padding-top: 0;
+}
+
+.bf-gui-box__kv-row span {
+  color: var(--text-dim);
+}
+
+.bf-gui-box__kv-row strong {
+  text-align: right;
+  color: var(--text);
+  font-family: var(--font-data);
+}
+
+.bf-compact-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.bf-toolbar {
+  position: sticky;
+  bottom: 16px;
+  justify-self: end;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  padding: 10px 12px;
+  border-radius: 18px 0 0 18px;
+  border: 1px solid var(--surface-400);
+  border-right: none;
+  background: var(--surface-300);
+  box-shadow: 0 -10px 28px rgba(0, 0, 0, 0.32);
+  z-index: 5;
+}
+
+.bf-toolbar__status {
+  display: flex;
+  gap: 8px;
+  margin-right: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.bf-vtx-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.bf-vtx-grid__config {
+  grid-column: span 3;
+}
+
+.bf-vtx-grid__status {
+  grid-column: span 1;
+}
+
+.bf-vtx-grid__advanced {
+  grid-column: 1 / -1;
+}
+
+.bf-vtx-advanced-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.9fr) minmax(0, 1.1fr);
+  gap: 12px;
+}
+
+.bf-vtx-callout {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 102, 0, 0.35);
+  background: rgba(255, 102, 0, 0.08);
+}
+
+.bf-vtx-callout p {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.bf-osd-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 1.3fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.bf-osd-preview-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.bf-osd-preview-screen {
+  position: relative;
+  min-height: 320px;
+  border-radius: 12px;
+  border: 2px solid var(--surface-400);
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+    radial-gradient(circle at top, rgba(255, 187, 0, 0.08), transparent 55%),
+    #050708;
+  background-size: 20px 20px, 20px 20px, auto, auto;
+  overflow: hidden;
+}
+
+.bf-osd-preview-screen__hud {
+  position: absolute;
+  inset: 0;
+  font-family: var(--font-data);
+  font-size: 13px;
+  color: #d7dcd1;
+  text-shadow: 0 0 10px rgba(255, 243, 189, 0.18);
+}
+
+.bf-osd-preview-screen__item {
+  position: absolute;
+}
+
+.bf-osd-preview-screen__item--top-left {
+  top: 14px;
+  left: 14px;
+}
+
+.bf-osd-preview-screen__item--top-right {
+  top: 14px;
+  right: 14px;
+}
+
+.bf-osd-preview-screen__item--center {
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 187, 0, 0.28);
+  background: rgba(255, 187, 0, 0.08);
+}
+
+.bf-osd-preview-screen__item--bottom-left {
+  left: 14px;
+  bottom: 14px;
+}
+
+.bf-osd-preview-screen__item--bottom-right {
+  right: 14px;
+  bottom: 14px;
+}
+
+.bf-osd-preview-footer {
+  display: grid;
+  gap: 8px;
+}
+
+.bf-osd-preview-footer p {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.5;
 }
 
 .setup-overview__launch-row {
@@ -2138,6 +2706,12 @@ textarea:focus {
   gap: 14px;
 }
 
+.accelerometer-pose-guide--compact {
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
 .accelerometer-pose-guide__hero {
   display: grid;
   gap: 12px;
@@ -2145,6 +2719,21 @@ textarea:focus {
   border-radius: var(--radius-lg);
   border: 1px solid rgba(104, 144, 202, 0.22);
   background: linear-gradient(180deg, rgba(13, 18, 24, 0.98), rgba(9, 13, 17, 1));
+}
+
+.accelerometer-pose-guide__hero--ready {
+  border-color: rgba(92, 194, 138, 0.54);
+  box-shadow: inset 0 0 0 1px rgba(92, 194, 138, 0.1);
+}
+
+.accelerometer-pose-guide__hero--adjust {
+  border-color: rgba(241, 199, 91, 0.52);
+  box-shadow: inset 0 0 0 1px rgba(241, 199, 91, 0.08);
+}
+
+.accelerometer-pose-guide__hero--mismatch {
+  border-color: rgba(226, 18, 63, 0.44);
+  box-shadow: inset 0 0 0 1px rgba(226, 18, 63, 0.08);
 }
 
 .accelerometer-pose-guide__header {
@@ -2169,6 +2758,58 @@ textarea:focus {
   letter-spacing: -0.02em;
 }
 
+.accelerometer-pose-guide__validation {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--surface-400);
+  background: rgba(17, 22, 28, 0.88);
+}
+
+.accelerometer-pose-guide__validation strong {
+  font-family: var(--font-data);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.accelerometer-pose-guide__validation span {
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.accelerometer-pose-guide__validation--waiting strong {
+  color: var(--text-dim);
+}
+
+.accelerometer-pose-guide__validation--ready {
+  border-color: rgba(92, 194, 138, 0.42);
+  background: rgba(92, 194, 138, 0.08);
+}
+
+.accelerometer-pose-guide__validation--ready strong {
+  color: var(--success);
+}
+
+.accelerometer-pose-guide__validation--adjust {
+  border-color: rgba(241, 199, 91, 0.48);
+  background: rgba(241, 199, 91, 0.08);
+}
+
+.accelerometer-pose-guide__validation--adjust strong {
+  color: var(--primary-400);
+}
+
+.accelerometer-pose-guide__validation--mismatch {
+  border-color: rgba(226, 18, 63, 0.38);
+  background: rgba(226, 18, 63, 0.08);
+}
+
+.accelerometer-pose-guide__validation--mismatch strong {
+  color: #ff7f99;
+}
+
 .accelerometer-pose-guide__hero-visual {
   display: flex;
   justify-content: center;
@@ -2189,10 +2830,33 @@ textarea:focus {
   object-fit: contain;
 }
 
+.accelerometer-pose-guide--compact .accelerometer-pose-guide__hero {
+  gap: 10px;
+  padding: 12px;
+}
+
+.accelerometer-pose-guide--compact .accelerometer-pose-guide__header span {
+  font-size: 16px;
+}
+
+.accelerometer-pose-guide--compact .accelerometer-pose-guide__hero-visual {
+  min-height: 132px;
+  padding: 8px 10px;
+}
+
+.accelerometer-pose-guide--compact .accelerometer-pose-guide__hero-visual img {
+  width: min(100%, 180px);
+}
+
 .accelerometer-pose-guide__steps {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
+}
+
+.accelerometer-pose-guide--compact .accelerometer-pose-guide__steps {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .accelerometer-pose-guide__step {
@@ -2234,6 +2898,27 @@ textarea:focus {
     0 0 0 4px rgba(241, 199, 91, 0.07);
 }
 
+.accelerometer-pose-guide__step.is-current.is-ready {
+  border-color: rgba(92, 194, 138, 0.72);
+  box-shadow:
+    inset 0 0 0 1px rgba(92, 194, 138, 0.16),
+    0 0 0 4px rgba(92, 194, 138, 0.08);
+}
+
+.accelerometer-pose-guide__step.is-current.is-adjust {
+  border-color: rgba(241, 199, 91, 0.72);
+  box-shadow:
+    inset 0 0 0 1px rgba(241, 199, 91, 0.14),
+    0 0 0 4px rgba(241, 199, 91, 0.07);
+}
+
+.accelerometer-pose-guide__step.is-current.is-mismatch {
+  border-color: rgba(226, 18, 63, 0.68);
+  box-shadow:
+    inset 0 0 0 1px rgba(226, 18, 63, 0.14),
+    0 0 0 4px rgba(226, 18, 63, 0.08);
+}
+
 .accelerometer-pose-guide__step.is-complete {
   border-color: rgba(91, 196, 140, 0.38);
 }
@@ -2257,8 +2942,35 @@ textarea:focus {
   color: rgba(241, 199, 91, 0.96);
 }
 
+.accelerometer-pose-guide__step.is-current.is-ready .accelerometer-pose-guide__step-index {
+  border-color: rgba(92, 194, 138, 0.72);
+  color: rgba(92, 194, 138, 0.96);
+}
+
+.accelerometer-pose-guide__step.is-current.is-mismatch .accelerometer-pose-guide__step-index {
+  border-color: rgba(226, 18, 63, 0.68);
+  color: rgba(255, 127, 153, 0.96);
+}
+
 .accelerometer-pose-guide__step strong {
   color: var(--text);
+}
+
+.accelerometer-pose-guide--compact .accelerometer-pose-guide__step {
+  gap: 6px;
+  padding: 8px 6px 10px;
+}
+
+.accelerometer-pose-guide--compact .accelerometer-pose-guide__step-visual {
+  min-height: 66px;
+}
+
+.accelerometer-pose-guide--compact .accelerometer-pose-guide__step-visual img {
+  max-width: 76px;
+}
+
+.accelerometer-pose-guide--compact .accelerometer-pose-guide__step strong {
+  font-size: 10px;
 }
 
 .setup-wizard__task-card {
@@ -2564,6 +3276,11 @@ textarea:focus {
   align-self: start;
 }
 
+.flight-deck__model-shell {
+  width: min(100%, 52rem);
+  justify-self: center;
+}
+
 .flight-deck__instruments {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: start;
@@ -2575,7 +3292,7 @@ textarea:focus {
 
 .flight-deck__model-frame {
   position: relative;
-  height: clamp(300px, 34vw, 380px);
+  height: clamp(360px, 44vw, 512px);
   border-radius: var(--radius-lg);
   border: 2px solid var(--bg-surface-strong);
   background:
@@ -3717,13 +4434,16 @@ textarea:focus {
 
 .ports-toolbar {
   position: sticky;
-  bottom: 10px;
+  bottom: 16px;
   z-index: 3;
   padding: 12px;
-  border-radius: var(--radius-lg);
-  border: 1px solid rgba(255, 187, 0, 0.18);
-  background: rgba(250, 250, 250, 0.98);
-  box-shadow: var(--shadow-soft);
+  margin-left: auto;
+  width: fit-content;
+  border-radius: 18px 0 0 18px;
+  border: 1px solid var(--surface-400);
+  border-right: none;
+  background: var(--surface-300);
+  box-shadow: 0 -10px 28px rgba(0, 0, 0, 0.32);
 }
 
 .receiver-workspace {
@@ -4055,8 +4775,25 @@ textarea:focus {
   border-radius: var(--radius-md);
   border: 1px solid var(--border);
   background: #ffffff;
-  color: var(--text);
+  color: var(--text-on-light);
+  -webkit-text-fill-color: var(--text-on-light);
+  color-scheme: light;
   padding: 10px 12px;
+}
+
+.scoped-editor-field input::placeholder,
+.scoped-editor-field textarea::placeholder {
+  color: var(--text-muted-on-light);
+}
+
+.scoped-editor-field input:disabled,
+.scoped-editor-field select:disabled,
+.scoped-editor-field textarea:disabled {
+  background: #f3f4f6;
+  color: var(--text-disabled-on-light);
+  -webkit-text-fill-color: var(--text-disabled-on-light);
+  opacity: 1;
+  cursor: not-allowed;
 }
 
 .scoped-editor-field textarea {
@@ -4083,7 +4820,8 @@ textarea:focus {
   border-radius: var(--radius-lg);
   border: 1px solid var(--card-outline-soft);
   background: #ffffff;
-  color: var(--text);
+  color: var(--text-on-light);
+  color-scheme: light;
 }
 
 .scoped-checkbox-option input {
@@ -4091,7 +4829,7 @@ textarea:focus {
 }
 
 .scoped-checkbox-option span {
-  color: var(--text);
+  color: var(--text-on-light);
   font-size: 13px;
   letter-spacing: normal;
   text-transform: none;
@@ -4130,7 +4868,10 @@ textarea:focus {
 
 .ports-matrix {
   display: grid;
-  gap: 8px;
+  gap: 0;
+  border-radius: 10px;
+  border: 1px solid var(--surface-400);
+  overflow: hidden;
 }
 
 .ports-matrix__head,
@@ -4141,7 +4882,9 @@ textarea:focus {
 }
 
 .ports-matrix__head {
-  padding: 0 10px 2px;
+  padding: 10px 12px;
+  background: var(--surface-300);
+  border-bottom: 1px solid var(--surface-400);
 }
 
 .ports-matrix__head span {
@@ -4156,9 +4899,10 @@ textarea:focus {
   display: grid;
   gap: 10px;
   padding: 12px;
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border);
-  background: var(--bg-panel-raised);
+  border-radius: 0;
+  border: none;
+  border-bottom: 1px solid var(--surface-400);
+  background: var(--surface-100);
 }
 
 .ports-matrix-row.is-staged {
@@ -4172,6 +4916,10 @@ textarea:focus {
 .ports-matrix-row.is-readonly {
   border-color: rgba(112, 112, 112, 0.48);
   opacity: 0.9;
+}
+
+.ports-matrix-row:last-child {
+  border-bottom: none;
 }
 
 .ports-matrix-row__cell {
@@ -4235,8 +4983,8 @@ textarea:focus {
 .ports-matrix-row__readout {
   padding: 10px 12px;
   border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-  background: #ffffff;
+  border: 1px solid var(--surface-400);
+  background: var(--surface-200);
   color: var(--text);
   min-height: 44px;
   display: flex;
@@ -4247,7 +4995,7 @@ textarea:focus {
   display: grid;
   gap: 8px;
   padding-top: 10px;
-  border-top: 1px solid var(--border-soft);
+  border-top: 1px solid var(--surface-400);
 }
 
 .port-row-list {
@@ -4537,8 +5285,8 @@ textarea:focus {
 .telemetry-stack--ports .scoped-editor-field,
 .telemetry-stack--ports .port-card .scoped-editor-field,
 .telemetry-stack--ports .port-row .scoped-editor-field {
-  background: #ffffff;
-  border-color: var(--border);
+  background: var(--surface-100);
+  border-color: var(--surface-400);
 }
 
 .telemetry-stack--receiver .mode-estimate-card,
@@ -4583,7 +5331,10 @@ textarea:focus {
 .telemetry-stack--ports .port-card {
   gap: 10px;
   padding: 14px;
-  border-radius: 15px;
+  border-radius: 12px;
+  border-width: 2px;
+  border-color: var(--surface-400);
+  background: var(--surface-200);
 }
 
 .telemetry-stack--ports .port-row {
@@ -5529,7 +6280,7 @@ textarea:focus {
 
 @media (max-width: 1024px) {
   .app-shell {
-    grid-template-rows: var(--header-height) auto var(--statusbar-height);
+    grid-template-rows: auto auto var(--statusbar-height);
   }
 
   .app-header,
@@ -5570,6 +6321,24 @@ textarea:focus {
 
   .app-header__summary {
     justify-content: flex-start;
+  }
+
+  .app-header__connection,
+  .app-header__telemetry {
+    flex: 1 1 100%;
+  }
+
+  .app-header__telemetry {
+    flex-wrap: wrap;
+  }
+
+  .header-sensor-status {
+    overflow-x: auto;
+  }
+
+  .header-sync-panel,
+  .header-quad-status {
+    min-width: 0;
   }
 
   .session-strip__controls,
@@ -5628,6 +6397,11 @@ textarea:focus {
   .setup-bench__metric-strip,
   .setup-overview__fact-grid,
   .mode-toggle,
+  .bf-compact-field-grid,
+  .bf-vtx-grid,
+  .bf-vtx-advanced-grid,
+  .bf-osd-grid,
+  .ports-workspace__sidebar,
   .rc-range-axis-grid,
   .snapshot-library-grid,
   .preset-card-grid,
@@ -5649,8 +6423,24 @@ textarea:focus {
     grid-template-columns: 1fr;
   }
 
+  .accelerometer-pose-guide--compact {
+    grid-template-columns: 1fr;
+  }
+
+  .accelerometer-pose-guide--compact .accelerometer-pose-guide__steps {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .ports-matrix__head {
     display: none;
+  }
+
+  .bf-toolbar {
+    position: static;
+    width: 100%;
+    border-radius: 12px;
+    border-right: 1px solid var(--surface-400);
+    justify-self: stretch;
   }
 
   .parameter-row {

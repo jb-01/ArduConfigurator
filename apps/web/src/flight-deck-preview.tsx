@@ -93,7 +93,7 @@ function mountModel(
   }
 
   if (scaleMode === 'betaflight') {
-    model.scale.setScalar(compact ? 15.5 : 18)
+    model.scale.setScalar(compact ? 15 : 16.5)
     model.position.set(0, 0, 0)
   } else {
     const box = new THREE.Box3().setFromObject(model)
