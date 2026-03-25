@@ -7584,8 +7584,8 @@ export function App() {
                         <div>
                           <h3>Port matrix</h3>
                           <p>
-                            Keep the first impression close to Betaflight: one row per UART, the function first, and the ArduPilot-specific
-                            options still visible inline.
+                            Keep this task hardware-first: one row per UART, the serial role first, and the ArduPilot-specific options still
+                            visible inline.
                           </p>
                         </div>
                         <div className="ports-surface__header-actions">
@@ -8313,7 +8313,7 @@ export function App() {
       <section className="grid one-up">
         <Panel
           title="VTX"
-          subtitle="Mirror Betaflight’s dedicated VTX workflow while keeping the actual ArduPilot-backed controls visible and honest."
+          subtitle="Use a dedicated VTX workflow while keeping the actual ArduPilot-backed controls visible and honest."
         >
           <div className="bf-tab-stack">
             <div className="bf-note">
@@ -8459,7 +8459,7 @@ export function App() {
                   <strong>VTX Table / Advanced</strong>
                 </div>
                 <div className="bf-gui-box__body">
-                  <p className="setup-gui-box__note">Betaflight exposes a full VTX table with bands and channels. ArduPilot currently exposes frequency, power, max power, and an advanced options bitmask instead.</p>
+                  <p className="setup-gui-box__note">ArduPilot currently exposes frequency, power, max power, and an advanced options bitmask here instead of a full band/channel table.</p>
                   <div className="bf-vtx-advanced-grid">
                     {vtxOptionsParameter ? (
                       <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(vtxOptionsParameter.id)?.status ?? 'unchanged'}`}>
@@ -8483,7 +8483,7 @@ export function App() {
 
                     <div className="bf-vtx-callout">
                       <StatusBadge tone="warning">Table not available</StatusBadge>
-                      <p>When ArduPilot grows explicit VTX band/channel table support, this box should turn into the Betaflight-style table editor instead of staying a placeholder.</p>
+                      <p>When ArduPilot grows explicit VTX band/channel table support, this box should turn into a full table editor instead of staying a placeholder.</p>
                     </div>
                   </div>
                 </div>
@@ -8521,7 +8521,7 @@ export function App() {
       <section className="grid one-up">
         <Panel
           title="OSD"
-          subtitle="Use a Betaflight-like OSD workspace shape, while keeping the current ArduPilot capability boundary explicit."
+          subtitle="Use a dedicated OSD workspace while keeping the current ArduPilot capability boundary explicit."
         >
           <div className="bf-tab-stack">
             <div className="bf-note">
@@ -8539,7 +8539,7 @@ export function App() {
                   <strong>Elements / Backend</strong>
                 </div>
                 <div className="bf-gui-box__body">
-                  <p className="setup-gui-box__note">Betaflight exposes a full selectable element list here. ArduPilot currently exposes backend, page channel, and switching mode first.</p>
+                  <p className="setup-gui-box__note">ArduPilot currently exposes backend, page channel, and switching mode first. A fuller selectable element list still needs broader OSD metadata coverage.</p>
                   <div className="bf-compact-field-grid">
                     {osdTypeParameter ? (
                       <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(osdTypeParameter.id)?.status ?? 'unchanged'}`}>
@@ -8638,7 +8638,7 @@ export function App() {
                   </div>
                   <div className="bf-osd-preview-footer">
                     <StatusBadge tone="warning">layout editor pending</StatusBadge>
-                    <p>This preview establishes the Betaflight-style center stage, but full element positioning still needs broader ArduPilot OSD metadata coverage.</p>
+                    <p>This preview establishes the center stage, but full element positioning still needs broader ArduPilot OSD metadata coverage.</p>
                   </div>
                 </div>
               </article>

@@ -333,7 +333,7 @@ export const ARDUCOPTER_VTX_ENABLE_LABELS: Record<number, string> = {
 export const ARDUCOPTER_MSP_OPTION_BIT_LABELS: Record<number, string> = {
   0: 'Telemetry Mode',
   1: 'Disable DJI Workarounds',
-  2: 'Betaflight Fonts'
+  2: 'Alternate FPV Fonts'
 }
 
 export const ARDUCOPTER_RSSI_TYPE_LABELS: Record<number, string> = {
