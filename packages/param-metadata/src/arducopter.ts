@@ -21,6 +21,7 @@ import {
   ARDUCOPTER_OSD_TYPE_LABELS,
   ARDUCOPTER_RSSI_TYPE_LABELS,
   ARDUCOPTER_SERIAL_BAUD_LABELS,
+  ARDUCOPTER_SERIAL_OPTION_BIT_LABELS,
   ARDUCOPTER_SERIAL_PROTOCOL_LABELS,
   ARDUCOPTER_SERIAL_RTSCTS_LABELS,
   ARDUCOPTER_SERVO_FUNCTION_LABELS,
@@ -53,6 +54,11 @@ const serialBaudNotes = [
 
 const serialFlowControlNotes = [
   'Only enable RTS/CTS flow control if the connected peripheral and wiring support it.'
+]
+
+const serialOptionsNotes = [
+  'Serial options expose board-level UART behavior such as half-duplex, inversion, and DMA quirks.',
+  'Change these only when the connected receiver, VTX, or peripheral explicitly needs a specific option combination.'
 ]
 
 const gpsTypeNotes = [
@@ -259,6 +265,18 @@ function buildSerialPortParameterDefinitions(maxPortNumber: number): FirmwareMet
       options: enumOptions(ARDUCOPTER_SERIAL_BAUD_LABELS)
     }
 
+    definitions[`SERIAL${portNumber}_OPTIONS`] = {
+      id: `SERIAL${portNumber}_OPTIONS`,
+      label: `${portLabel} Serial Options`,
+      description: `Advanced UART option bitmask for ${portLabel}.`,
+      category: 'ports',
+      minimum: 0,
+      maximum: 8191,
+      rebootRequired: true,
+      notes: serialOptionsNotes,
+      options: enumOptions(ARDUCOPTER_SERIAL_OPTION_BIT_LABELS)
+    }
+
     if (portNumber > 0 && portNumber <= 6) {
       definitions[`BRD_SER${portNumber}_RTSCTS`] = {
         id: `BRD_SER${portNumber}_RTSCTS`,
@@ -293,46 +311,58 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       order: 2
     },
     {
+      id: 'vtx',
+      label: 'VTX',
+      description: 'Video transmitter control, channel, and power setup.',
+      order: 3
+    },
+    {
+      id: 'osd',
+      label: 'OSD',
+      description: 'FPV display backend, screen mode, and overlay switching.',
+      order: 4
+    },
+    {
       id: 'receiver',
       label: 'Receiver',
       description: 'RC mapping, ranges, and flight modes.',
-      order: 3
+      order: 5
     },
     {
       id: 'outputs',
       label: 'Outputs',
       description: 'Airframe, outputs, motor tests, and ESC review.',
-      order: 4
+      order: 6
     },
     {
       id: 'power',
       label: 'Power',
       description: 'Battery, failsafe, and pre-arm review.',
-      order: 5
+      order: 7
     },
     {
       id: 'snapshots',
       label: 'Snapshots',
       description: 'Capture, compare, and restore known-good parameter sets.',
-      order: 6
+      order: 8
     },
     {
       id: 'tuning',
       label: 'Tuning',
       description: 'Beginner-safe flight-feel and acro-rate tuning.',
-      order: 7
+      order: 9
     },
     {
       id: 'presets',
       label: 'Presets',
       description: 'Curated, explainable tuning bundles with automatic backup.',
-      order: 8
+      order: 10
     },
     {
       id: 'parameters',
       label: 'Parameters',
       description: 'Low-level parameter editing and backup work.',
-      order: 9
+      order: 11
     }
   ],
   categories: {
@@ -364,53 +394,67 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       order: 4,
       viewId: 'ports'
     },
+    vtx: {
+      id: 'vtx',
+      label: 'VTX',
+      description: 'Video transmitter control, frequency, and power settings.',
+      order: 5,
+      viewId: 'vtx'
+    },
+    osd: {
+      id: 'osd',
+      label: 'OSD',
+      description: 'FPV overlay backend, switching, and display configuration.',
+      order: 6,
+      viewId: 'osd'
+    },
     radio: {
       id: 'radio',
       label: 'Receiver',
       description: 'RC mapping, ranges, and calibration values.',
-      order: 5,
+      order: 7,
       viewId: 'receiver'
     },
     modes: {
       id: 'modes',
       label: 'Modes',
       description: 'Flight-mode assignments and switch setup.',
-      order: 6,
+      order: 8,
       viewId: 'receiver'
     },
     outputs: {
       id: 'outputs',
       label: 'Outputs',
       description: 'Motor, servo, and propulsion-related outputs.',
-      order: 7,
+      order: 9,
       viewId: 'outputs'
     },
     power: {
       id: 'power',
       label: 'Power',
       description: 'Battery sensing and power monitoring.',
-      order: 8,
+      order: 10,
       viewId: 'power'
     },
     failsafe: {
       id: 'failsafe',
       label: 'Failsafe',
       description: 'Throttle, battery, and failsafe behavior.',
-      order: 9,
+      order: 11,
       viewId: 'power'
     },
     tuning: {
       id: 'tuning',
       label: 'Flight Feel',
       description: 'Simple multirotor handling adjustments for angle mode and general stick feel.',
-      order: 10,
+      order: 12,
       viewId: 'tuning'
     },
     acro: {
       id: 'acro',
       label: 'Acro Rates',
       description: 'Acro roll, pitch, and yaw rates plus expo.',
-      order: 11,
+      order: 13,
       viewId: 'tuning'
     }
   },
@@ -678,7 +722,7 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       id: 'OSD_TYPE',
       label: 'OSD Backend',
       description: 'Display backend used for the FPV on-screen display.',
-      category: 'peripherals',
+      category: 'osd',
       minimum: 0,
       maximum: 5,
       rebootRequired: true,
@@ -689,7 +733,7 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       id: 'OSD_CHAN',
       label: 'OSD Screen Channel',
       description: 'Receiver channel used to switch between OSD pages.',
-      category: 'peripherals',
+      category: 'osd',
       minimum: 0,
       maximum: 16,
       notes: osdSwitchNotes,
@@ -699,7 +743,7 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       id: 'OSD_SW_METHOD',
       label: 'OSD Switch Method',
       description: 'How the selected OSD channel chooses or advances through pages.',
-      category: 'peripherals',
+      category: 'osd',
       minimum: 0,
       maximum: 2,
       notes: osdSwitchNotes,
@@ -709,7 +753,7 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       id: 'MSP_OPTIONS',
       label: 'MSP Options',
       description: 'Advanced MSP and DisplayPort behavior bitmask.',
-      category: 'peripherals',
+      category: 'osd',
       minimum: 0,
       maximum: 7,
       notes: mspOsdNotes
@@ -718,7 +762,7 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       id: 'MSP_OSD_NCELLS',
       label: 'MSP Cell Count',
       description: 'Battery cell-count value sent to MSP-capable FPV displays.',
-      category: 'peripherals',
+      category: 'osd',
       minimum: 0,
       maximum: 14,
       notes: mspOsdNotes,
@@ -728,7 +772,7 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       id: 'VTX_ENABLE',
       label: 'VTX Control',
       description: 'Enables ArduPilot control of a supported video transmitter.',
-      category: 'peripherals',
+      category: 'vtx',
       notes: vtxEnableNotes,
       options: enumOptions(ARDUCOPTER_VTX_ENABLE_LABELS)
     },
@@ -736,7 +780,7 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       id: 'VTX_FREQ',
       label: 'VTX Frequency',
       description: 'Requested VTX output frequency.',
-      category: 'peripherals',
+      category: 'vtx',
       unit: 'MHz',
       minimum: 0,
       maximum: 6000,
@@ -747,7 +791,7 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       id: 'VTX_POWER',
       label: 'VTX Power',
       description: 'Requested VTX output power.',
-      category: 'peripherals',
+      category: 'vtx',
       unit: 'mW',
       minimum: 0,
       maximum: 5000,
@@ -758,7 +802,7 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       id: 'VTX_MAX_POWER',
       label: 'VTX Max Power',
       description: 'Upper power limit allowed for VTX control requests.',
-      category: 'peripherals',
+      category: 'vtx',
       unit: 'mW',
       minimum: 0,
       maximum: 5000,
@@ -769,7 +813,7 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       id: 'VTX_OPTIONS',
       label: 'VTX Advanced Options',
       description: 'Advanced VTX behavior bitmask.',
-      category: 'peripherals',
+      category: 'vtx',
       minimum: 0,
       maximum: 255,
       step: 1,

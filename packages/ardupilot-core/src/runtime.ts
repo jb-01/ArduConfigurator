@@ -8,8 +8,10 @@ import type {
 import { formatArducopterFlightMode } from '@arduconfig/param-metadata'
 import type {
   AttitudeMessage,
+  AutopilotVersionMessage,
   CommandAckMessage,
   CommandLongMessage,
+  FileTransferProtocolMessage,
   GlobalPositionIntMessage,
   HeartbeatMessage,
   MavlinkEnvelope,
@@ -19,6 +21,9 @@ import type {
   SysStatusMessage,
 } from '@arduconfig/protocol-mavlink'
 import {
+  MAV_FTP_ERR,
+  MAV_FTP_OPCODE,
+  MAV_PROTOCOL_CAPABILITY,
   MAV_AUTOPILOT,
   MAV_CMD,
   MAV_MODE_FLAG,
@@ -34,6 +39,9 @@ import {
 import type { TransportStatus, Unsubscribe } from '@arduconfig/transport'
 
 import type {
+  BoardFileState,
+  HardwareBoardState,
+  HardwareState,
   ConfiguratorSnapshot,
   GuidedActionState,
   LiveVerificationState,
@@ -51,6 +59,18 @@ import type {
   StatusTextEntry,
   VehicleIdentity,
 } from './types.js'
+import {
+  boardTypeFromBoardVersion,
+  decodeMavftpPayload,
+  encodeMavftpPayload,
+  formatAutopilotUid,
+  MavftpRequestError,
+  normalizeMavftpPath,
+  parseMavftpDirectoryEntries,
+  parseUartsFile,
+  type MavftpDirectoryEntry,
+  type MavftpPayload,
+} from './mavftp.js'
 import { evaluateMotorTestEligibility, motorTestInstructions } from './motor-test.js'
 
 type UpdateListener = (snapshot: ConfiguratorSnapshot) => void
@@ -80,6 +100,19 @@ interface ParameterValueWaiter {
   expectedValue: number
   tolerance: number
   resolve: (parameter: ParameterState) => void
+  reject: (error: Error) => void
+  timer: ReturnType<typeof setTimeout>
+}
+
+interface AutopilotVersionWaiter {
+  resolve: (board: HardwareBoardState) => void
+  reject: (error: Error) => void
+  timer: ReturnType<typeof setTimeout>
+}
+
+interface MavftpWaiter {
+  seqNumber: number
+  resolve: (payload: MavftpPayload) => void
   reject: (error: Error) => void
   timer: ReturnType<typeof setTimeout>
 }
@@ -116,7 +149,9 @@ const DEFAULT_PARAMETER_SYNC_TIMEOUT_MS = 20000
 const PARAMETER_SYNC_STALL_RETRY_MS = 1500
 const MAX_PARAMETER_SYNC_RETRIES = 3
 const DEFAULT_COMMAND_ACK_TIMEOUT_MS = 3000
-const DEFAULT_PARAMETER_WRITE_TIMEOUT_MS = 3000
+const DEFAULT_PARAMETER_WRITE_TIMEOUT_MS = 5000
+const DEFAULT_AUTOPILOT_VERSION_TIMEOUT_MS = 3000
+const DEFAULT_MAVFTP_TIMEOUT_MS = 3000
 const DEFAULT_PARAMETER_WRITE_TOLERANCE = 0.0001
 const DEFAULT_ACCELEROMETER_INITIAL_WARMUP_MS = 6000
 const DEFAULT_ACCELEROMETER_STEP_ADVANCE_MS = 1500
@@ -124,6 +159,8 @@ const DEFAULT_ACCELEROMETER_COMPLETION_FALLBACK_MS = 4000
 const PRE_ARM_ISSUE_TTL_MS = 15000
 const MAX_GUIDED_ACTION_STATUS_TEXTS = 5
 const MOTOR_TEST_COMPLETION_BUFFER_MS = 250
+const UARTS_FILE_PATH = '@SYS/uarts.txt'
+const MAVFTP_TRANSFER_CHUNK_SIZE = 200
 const LIVE_TELEMETRY_REQUESTS = [
   {
     messageId: MAVLINK_MESSAGE_IDS.GLOBAL_POSITION_INT,
@@ -229,6 +266,8 @@ export class ArduPilotConfiguratorRuntime {
   private readonly parameterSyncWaiters = new Set<ParameterSyncWaiter>()
   private readonly commandAckWaiters = new Set<CommandAckWaiter>()
   private readonly parameterValueWaiters = new Set<ParameterValueWaiter>()
+  private readonly autopilotVersionWaiters = new Set<AutopilotVersionWaiter>()
+  private readonly mavftpWaiters = new Set<MavftpWaiter>()
   private readonly parameters = new Map<string, ParameterState>()
   private readonly preArmIssues = new Map<string, PreArmIssueState>()
   private readonly statusTexts: StatusTextEntry[] = []
@@ -239,6 +278,8 @@ export class ArduPilotConfiguratorRuntime {
   private connection: TransportStatus
   private sessionProfile: SessionProfile
   private vehicle?: VehicleIdentity
+  private hardwareBoard?: HardwareBoardState
+  private uartsFile: BoardFileState = createIdleUartsFileState()
   private parameterSync: ParameterSyncState = createIdleParameterSync()
   private guidedActions = createIdleGuidedActions()
   private motorTest = createIdleMotorTestState()
@@ -252,6 +293,9 @@ export class ArduPilotConfiguratorRuntime {
   private preArmExpiryTimer?: ReturnType<typeof setTimeout>
   private parameterSyncRetryTimer?: ReturnType<typeof setTimeout>
   private parameterSyncRetryCount = 0
+  private autopilotVersionRequested = false
+  private uartsFileRequested = false
+  private mavftpSequence = 0
 
   constructor(
     private readonly session: MavlinkSession,
@@ -276,6 +320,8 @@ export class ArduPilotConfiguratorRuntime {
           this.rejectParameterSyncWaiters(new Error(reason))
           this.rejectCommandAckWaiters(new Error(reason))
           this.rejectParameterValueWaiters(new Error(reason))
+          this.rejectAutopilotVersionWaiters(new Error(reason))
+          this.rejectMavftpWaiters(new Error(reason))
           this.resetLiveState()
         }
         this.emit()
@@ -295,6 +341,10 @@ export class ArduPilotConfiguratorRuntime {
       connection: this.connection,
       sessionProfile: this.sessionProfile,
       vehicle: this.vehicle,
+      hardware: cloneHardwareState({
+        board: this.hardwareBoard ? { ...this.hardwareBoard } : undefined,
+        uartsFile: cloneBoardFileState(this.uartsFile)
+      }),
       parameterStats: {
         downloaded: parameters.length,
         total: this.totalParameters,
@@ -548,6 +598,123 @@ export class ArduPilotConfiguratorRuntime {
     return result
   }
 
+  async listRemoteDirectory(path = '@SYS'): Promise<MavftpDirectoryEntry[]> {
+    await this.requireMavftpSupport()
+
+    const normalizedPath = normalizeMavftpPath(path)
+    const pathBytes = new TextEncoder().encode(normalizedPath)
+    const entries: MavftpDirectoryEntry[] = []
+    let offset = 0
+
+    while (true) {
+      try {
+        const response = await this.sendMavftpRequest({
+          session: 0,
+          opcode: MAV_FTP_OPCODE.LIST_DIRECTORY,
+          size: pathBytes.length,
+          offset,
+          data: pathBytes
+        })
+        const chunkEntries = parseMavftpDirectoryEntries(normalizedPath, response.data)
+        if (chunkEntries.length === 0) {
+          break
+        }
+
+        entries.push(...chunkEntries)
+        offset += chunkEntries.length
+      } catch (error) {
+        if (error instanceof MavftpRequestError && error.errorCode === MAV_FTP_ERR.EOF) {
+          break
+        }
+        throw error
+      }
+    }
+
+    return entries.sort(sortMavftpDirectoryEntries)
+  }
+
+  async downloadRemoteFile(path: string): Promise<Uint8Array> {
+    await this.requireMavftpSupport()
+    return this.readRemoteFile(normalizeMavftpPath(path))
+  }
+
+  async uploadRemoteFile(path: string, bytes: Uint8Array, options: { overwrite?: boolean } = {}): Promise<void> {
+    await this.requireMavftpSupport()
+
+    const normalizedPath = normalizeMavftpPath(path)
+    const pathBytes = new TextEncoder().encode(normalizedPath)
+    const overwriteExisting = options.overwrite ?? true
+    let createResponse: MavftpPayload
+
+    try {
+      createResponse = await this.sendMavftpRequest({
+        session: 0,
+        opcode: MAV_FTP_OPCODE.CREATE_FILE,
+        size: pathBytes.length,
+        offset: 0,
+        data: pathBytes
+      })
+    } catch (error) {
+      if (!(overwriteExisting && error instanceof MavftpRequestError && error.errorCode === MAV_FTP_ERR.FILE_EXISTS)) {
+        throw error
+      }
+
+      await this.deleteRemotePath(normalizedPath, 'file')
+      createResponse = await this.sendMavftpRequest({
+        session: 0,
+        opcode: MAV_FTP_OPCODE.CREATE_FILE,
+        size: pathBytes.length,
+        offset: 0,
+        data: pathBytes
+      })
+    }
+
+    const session = createResponse.session
+    let offset = 0
+
+    try {
+      while (offset < bytes.length) {
+        const chunk = bytes.slice(offset, offset + MAVFTP_TRANSFER_CHUNK_SIZE)
+        await this.sendMavftpRequest({
+          session,
+          opcode: MAV_FTP_OPCODE.WRITE_FILE,
+          size: chunk.length,
+          offset,
+          data: chunk
+        })
+        offset += chunk.length
+      }
+    } finally {
+      await this.sendMavftpRequest({
+        session,
+        opcode: MAV_FTP_OPCODE.TERMINATE_SESSION,
+        size: 0,
+        offset: 0,
+        data: new Uint8Array(0)
+      }).catch(() => {})
+    }
+
+    this.appendStatusEntry('info', `Uploaded ${normalizedPath} via MAVFTP.`)
+    this.emit()
+  }
+
+  async deleteRemotePath(path: string, kind: 'file' | 'directory' = 'file'): Promise<void> {
+    await this.requireMavftpSupport()
+
+    const normalizedPath = normalizeMavftpPath(path)
+    const pathBytes = new TextEncoder().encode(normalizedPath)
+    await this.sendMavftpRequest({
+      session: 0,
+      opcode: kind === 'directory' ? MAV_FTP_OPCODE.REMOVE_DIRECTORY : MAV_FTP_OPCODE.REMOVE_FILE,
+      size: pathBytes.length,
+      offset: 0,
+      data: pathBytes
+    })
+
+    this.appendStatusEntry('info', `Removed ${normalizedPath} via MAVFTP.`)
+    this.emit()
+  }
+
   async runGuidedAction(actionId: GuidedActionId): Promise<void> {
     switch (actionId) {
       case 'request-parameters':
@@ -652,6 +819,8 @@ export class ArduPilotConfiguratorRuntime {
     })
     this.commandAckWaiters.clear()
     this.rejectParameterValueWaiters(new Error('Runtime destroyed before parameter verification was received.'))
+    this.rejectAutopilotVersionWaiters(new Error('Runtime destroyed before AUTOPILOT_VERSION was received.'))
+    this.rejectMavftpWaiters(new Error('Runtime destroyed before the MAVFTP request completed.'))
     this.clearMotorTestTimer()
     this.clearPreArmExpiryTimer()
     this.clearParameterSyncRetryTimer()
@@ -718,6 +887,222 @@ export class ArduPilotConfiguratorRuntime {
     }
   }
 
+  private async requestAutopilotVersion(systemId: number, componentId: number): Promise<void> {
+    const waiter = this.waitForAutopilotVersion()
+
+    try {
+      await this.session.send({
+        type: 'COMMAND_LONG',
+        command: MAV_CMD.REQUEST_MESSAGE,
+        targetSystem: systemId,
+        targetComponent: componentId,
+        confirmation: 0,
+        params: [MAVLINK_MESSAGE_IDS.AUTOPILOT_VERSION, 0, 0, 0, 0, 0, 0]
+      })
+      await waiter.promise
+    } catch (error) {
+      const requestError = error instanceof Error ? error : new Error('Unknown AUTOPILOT_VERSION request error.')
+      waiter.cancel(requestError)
+      void waiter.promise.catch(() => {})
+      this.autopilotVersionRequested = false
+      this.appendStatusEntry('warning', `Failed to identify board metadata: ${requestError.message}`)
+      this.emit()
+    }
+  }
+
+  private processAutopilotVersion(message: AutopilotVersionMessage): void {
+    const board: HardwareBoardState = {
+      boardVersion: message.boardVersion,
+      boardType: boardTypeFromBoardVersion(message.boardVersion),
+      vendorId: message.vendorId,
+      productId: message.productId,
+      uid: formatAutopilotUid(message.uid, message.uid2),
+      ftpSupported: (message.capabilities & MAV_PROTOCOL_CAPABILITY.FTP) !== 0n,
+      lastUpdatedAtMs: Date.now()
+    }
+
+    this.hardwareBoard = board
+    this.resolveAutopilotVersionWaiters(board)
+
+    if (!board.ftpSupported && this.uartsFile.status === 'idle') {
+      this.uartsFile = {
+        ...createIdleUartsFileState(),
+        status: 'unsupported'
+      }
+      return
+    }
+
+    if (board.ftpSupported && !this.uartsFileRequested && this.uartsFile.status === 'idle') {
+      this.uartsFileRequested = true
+      void this.fetchUartsFile()
+    }
+  }
+
+  private processFileTransferProtocol(message: FileTransferProtocolMessage): void {
+    const payload = decodeMavftpPayload(message.payload)
+    this.resolveMavftpWaiters(payload)
+  }
+
+  private async fetchUartsFile(): Promise<void> {
+    if (!this.vehicle) {
+      return
+    }
+
+    this.uartsFile = {
+      ...createIdleUartsFileState(),
+      status: 'loading'
+    }
+    this.emit()
+
+    try {
+      const rawText = await this.readRemoteTextFile(UARTS_FILE_PATH)
+      this.uartsFile = {
+        status: 'ready',
+        path: UARTS_FILE_PATH,
+        mappings: parseUartsFile(rawText),
+        rawText,
+        fetchedAtMs: Date.now()
+      }
+      this.appendStatusEntry('info', `Fetched ${UARTS_FILE_PATH} via MAVFTP.`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown MAVFTP error.'
+      const status = /file not found/i.test(message) ? 'missing' : 'error'
+      this.uartsFile = {
+        status,
+        path: UARTS_FILE_PATH,
+        mappings: [],
+        error: message
+      }
+      this.appendStatusEntry('warning', `Unable to fetch ${UARTS_FILE_PATH}: ${message}`)
+    }
+
+    this.emit()
+  }
+
+  private async readRemoteTextFile(path: string): Promise<string> {
+    const bytes = await this.readRemoteFile(path)
+    return new TextDecoder().decode(bytes).replace(/\0+$/, '')
+  }
+
+  private async readRemoteFile(path: string): Promise<Uint8Array> {
+    const normalizedPath = normalizeMavftpPath(path)
+    const pathBytes = new TextEncoder().encode(normalizedPath)
+    const openResponse = await this.sendMavftpRequest({
+      session: 0,
+      opcode: MAV_FTP_OPCODE.OPEN_FILE_RO,
+      size: pathBytes.length,
+      offset: 0,
+      data: pathBytes
+    })
+
+    const session = openResponse.session
+    const fileSize = openResponse.data.byteLength >= 4 ? new DataView(openResponse.data.buffer, openResponse.data.byteOffset, openResponse.data.byteLength).getUint32(0, true) : 0
+    const chunks: Uint8Array[] = []
+    let offset = 0
+
+    try {
+      while (offset < fileSize) {
+        const response = await this.sendMavftpRequest({
+          session,
+          opcode: MAV_FTP_OPCODE.READ_FILE,
+          size: Math.min(MAVFTP_TRANSFER_CHUNK_SIZE, fileSize - offset),
+          offset,
+          data: new Uint8Array(0)
+        })
+        chunks.push(response.data)
+        offset += response.data.length
+        if (response.data.length === 0) {
+          break
+        }
+      }
+    } finally {
+      await this.sendMavftpRequest({
+        session,
+        opcode: MAV_FTP_OPCODE.TERMINATE_SESSION,
+        size: 0,
+        offset: 0,
+        data: new Uint8Array(0)
+      }).catch(() => {})
+    }
+
+    const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0)
+    const bytes = new Uint8Array(totalLength)
+    let writeOffset = 0
+    chunks.forEach((chunk) => {
+      bytes.set(chunk, writeOffset)
+      writeOffset += chunk.length
+    })
+    return bytes
+  }
+
+  private async sendMavftpRequest(
+    request: Pick<MavftpPayload, 'session' | 'opcode' | 'size' | 'offset' | 'data'>
+  ): Promise<MavftpPayload> {
+    if (!this.vehicle) {
+      throw new Error('MAVFTP requires an identified vehicle.')
+    }
+
+    const seqNumber = this.mavftpSequence
+    this.mavftpSequence = (this.mavftpSequence + 1) & 0xffff
+    const waiter = this.waitForMavftpResponse(seqNumber)
+
+    try {
+      await this.session.send({
+        type: 'FILE_TRANSFER_PROTOCOL',
+        targetNetwork: 0,
+        targetSystem: this.vehicle.systemId,
+        targetComponent: this.vehicle.componentId,
+        payload: encodeMavftpPayload({
+          seqNumber,
+          session: request.session,
+          opcode: request.opcode,
+          size: request.size,
+          reqOpcode: 0,
+          burstComplete: 0,
+          offset: request.offset,
+          data: request.data
+        })
+      })
+    } catch (error) {
+      const sendError = error instanceof Error ? error : new Error('Unknown MAVFTP send error.')
+      waiter.cancel(sendError)
+      void waiter.promise.catch(() => {})
+      throw sendError
+    }
+
+    const response = await waiter.promise
+    if (response.opcode === MAV_FTP_OPCODE.ACK) {
+      return response
+    }
+
+    const errorCode = response.data[0] ?? 0
+    const errno = response.data[1]
+    throw new MavftpRequestError(errorCode, errno)
+  }
+
+  private async requireMavftpSupport(): Promise<void> {
+    if (!this.vehicle) {
+      throw new Error('MAVFTP requires an identified vehicle.')
+    }
+
+    if (!this.hardwareBoard) {
+      if (!this.autopilotVersionRequested) {
+        this.autopilotVersionRequested = true
+        void this.requestAutopilotVersion(this.vehicle.systemId, this.vehicle.componentId)
+      }
+
+      const board = await this.waitForAutopilotVersion().promise
+      if (!board.ftpSupported) {
+        throw new Error('This controller did not advertise MAVFTP support.')
+      }
+      return
+    }
+
+    if (!this.hardwareBoard.ftpSupported) {
+      throw new Error('This controller did not advertise MAVFTP support.')
+    }
+  }
+
   private processEnvelope(envelope: MavlinkEnvelope): void {
     switch (envelope.message.type) {
       case 'HEARTBEAT':
@@ -734,6 +1119,12 @@ export class ArduPilotConfiguratorRuntime {
         break
       case 'ATTITUDE':
         this.processAttitude(envelope.message)
+        break
+      case 'AUTOPILOT_VERSION':
+        this.processAutopilotVersion(envelope.message)
+        break
+      case 'FILE_TRANSFER_PROTOCOL':
+        this.processFileTransferProtocol(envelope.message)
         break
       case 'COMMAND_ACK':
         this.processCommandAck(envelope.message)
@@ -771,6 +1162,11 @@ export class ArduPilotConfiguratorRuntime {
 
     if (!this.liveTelemetryRequestsIssued) {
       void this.requestLiveTelemetryStreams(systemId, componentId)
+    }
+
+    if (!this.autopilotVersionRequested) {
+      this.autopilotVersionRequested = true
+      void this.requestAutopilotVersion(systemId, componentId)
     }
   }
 
@@ -1017,6 +1413,8 @@ export class ArduPilotConfiguratorRuntime {
 
   private resetLiveState(): void {
     this.vehicle = undefined
+    this.hardwareBoard = undefined
+    this.uartsFile = createIdleUartsFileState()
     this.parameters.clear()
     this.totalParameters = 0
     this.parameterSyncRetryCount = 0
@@ -1025,6 +1423,9 @@ export class ArduPilotConfiguratorRuntime {
     this.motorTest = createIdleMotorTestState()
     this.liveVerification = createIdleLiveVerification()
     this.liveTelemetryRequestsIssued = false
+    this.autopilotVersionRequested = false
+    this.uartsFileRequested = false
+    this.mavftpSequence = 0
     this.accelerometerCalibration = undefined
     this.preArmIssues.clear()
     this.statusTexts.splice(0)
@@ -1065,6 +1466,141 @@ export class ArduPilotConfiguratorRuntime {
       waiter.reject(error)
     })
     this.parameterSyncWaiters.clear()
+  }
+
+  private waitForAutopilotVersion(timeoutMs = DEFAULT_AUTOPILOT_VERSION_TIMEOUT_MS): WaiterHandle<HardwareBoardState> {
+    if (this.hardwareBoard) {
+      return {
+        promise: Promise.resolve(this.hardwareBoard),
+        cancel: () => {}
+      }
+    }
+
+    let cancel = (_error: Error) => {}
+    const promise = new Promise<HardwareBoardState>((resolve, reject) => {
+      let settled = false
+      const waiter: AutopilotVersionWaiter = {
+        resolve: (board) => {
+          settled = true
+          clearTimeout(timer)
+          resolve(board)
+        },
+        reject: (error) => {
+          settled = true
+          clearTimeout(timer)
+          reject(error)
+        },
+        timer: undefined as unknown as ReturnType<typeof setTimeout>
+      }
+
+      const timer = setTimeout(() => {
+        settled = true
+        this.autopilotVersionWaiters.delete(waiter)
+        reject(new Error(`Timed out waiting for AUTOPILOT_VERSION after ${timeoutMs}ms.`))
+      }, timeoutMs)
+
+      waiter.timer = timer
+      this.autopilotVersionWaiters.add(waiter)
+
+      cancel = (error: Error) => {
+        if (settled) {
+          return
+        }
+
+        settled = true
+        clearTimeout(timer)
+        this.autopilotVersionWaiters.delete(waiter)
+        reject(error)
+      }
+    })
+
+    return {
+      promise,
+      cancel
+    }
+  }
+
+  private resolveAutopilotVersionWaiters(board: HardwareBoardState): void {
+    this.autopilotVersionWaiters.forEach((waiter) => {
+      clearTimeout(waiter.timer)
+      waiter.resolve(board)
+    })
+    this.autopilotVersionWaiters.clear()
+  }
+
+  private rejectAutopilotVersionWaiters(error: Error): void {
+    this.autopilotVersionWaiters.forEach((waiter) => {
+      clearTimeout(waiter.timer)
+      waiter.reject(error)
+    })
+    this.autopilotVersionWaiters.clear()
+  }
+
+  private waitForMavftpResponse(
+    seqNumber: number,
+    timeoutMs = DEFAULT_MAVFTP_TIMEOUT_MS
+  ): WaiterHandle<MavftpPayload> & { seqNumber: number } {
+    let cancel = (_error: Error) => {}
+    const promise = new Promise<MavftpPayload>((resolve, reject) => {
+      let settled = false
+      const waiter: MavftpWaiter = {
+        seqNumber,
+        resolve: (payload) => {
+          settled = true
+          clearTimeout(timer)
+          resolve(payload)
+        },
+        reject: (error) => {
+          settled = true
+          clearTimeout(timer)
+          reject(error)
+        },
+        timer: undefined as unknown as ReturnType<typeof setTimeout>
+      }
+
+      const timer = setTimeout(() => {
+        settled = true
+        this.mavftpWaiters.delete(waiter)
+        reject(new Error(`Timed out waiting for MAVFTP response after ${timeoutMs}ms.`))
+      }, timeoutMs)
+
+      waiter.timer = timer
+      this.mavftpWaiters.add(waiter)
+
+      cancel = (error: Error) => {
+        if (settled) {
+          return
+        }
+
+        settled = true
+        clearTimeout(timer)
+        this.mavftpWaiters.delete(waiter)
+        reject(error)
+      }
+    })
+
+    return {
+      seqNumber,
+      promise,
+      cancel
+    }
+  }
+
+  private resolveMavftpWaiters(payload: MavftpPayload): void {
+    const waiters = [...this.mavftpWaiters].filter((waiter) => waiter.seqNumber === payload.seqNumber)
+    waiters.forEach((waiter) => {
+      clearTimeout(waiter.timer)
+      this.mavftpWaiters.delete(waiter)
+      waiter.resolve(payload)
+    })
+  }
+
+  private rejectMavftpWaiters(error: Error): void {
+    this.mavftpWaiters.forEach((waiter) => {
+      clearTimeout(waiter.timer)
+      waiter.reject(error)
+    })
+    this.mavftpWaiters.clear()
   }
 
   private async requestParameterTable(systemId: number, componentId: number): Promise<void> {
@@ -1740,6 +2276,14 @@ function createIdleParameterSync(): ParameterSyncState {
   }
 }
 
+function createIdleUartsFileState(): BoardFileState {
+  return {
+    status: 'idle',
+    path: UARTS_FILE_PATH,
+    mappings: []
+  }
+}
+
 function createIdleLiveVerification(): LiveVerificationState {
   return {
     satisfiedSignals: [],
@@ -1864,6 +2408,27 @@ function cloneMotorTestState(motorTest: MotorTestState): MotorTestState {
     ...motorTest,
     instructions: [...motorTest.instructions]
   }
+}
+
+function cloneBoardFileState(boardFile: BoardFileState): BoardFileState {
+  return {
+    ...boardFile,
+    mappings: boardFile.mappings.map((mapping) => ({ ...mapping }))
+  }
+}
+
+function cloneHardwareState(hardware: HardwareState): HardwareState {
+  return {
+    board: hardware.board ? { ...hardware.board } : undefined,
+    uartsFile: cloneBoardFileState(hardware.uartsFile)
+  }
+}
+
+function sortMavftpDirectoryEntries(left: MavftpDirectoryEntry, right: MavftpDirectoryEntry): number {
+  if (left.kind !== right.kind) {
+    return left.kind === 'directory' ? -1 : 1
+  }
+  return left.name.localeCompare(right.name, undefined, { sensitivity: 'base', numeric: true })
 }
 
 function hasActiveGuidedAction(guidedActions: Record<GuidedActionId, GuidedActionState>): boolean {
@@ -2222,6 +2787,8 @@ function mavCommandLabel(command: number): string {
       return 'PREFLIGHT_REBOOT_SHUTDOWN'
     case MAV_CMD.SET_MESSAGE_INTERVAL:
       return 'SET_MESSAGE_INTERVAL'
+    case MAV_CMD.REQUEST_MESSAGE:
+      return 'REQUEST_MESSAGE'
     case MAV_CMD.DO_MOTOR_TEST:
       return 'DO_MOTOR_TEST'
     case MAV_CMD.ACCELCAL_VEHICLE_POS:

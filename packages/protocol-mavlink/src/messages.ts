@@ -77,6 +77,14 @@ export interface AttitudeMessage {
   yawSpeedRadS: number
 }
 
+export interface FileTransferProtocolMessage {
+  type: 'FILE_TRANSFER_PROTOCOL'
+  targetNetwork: number
+  targetSystem: number
+  targetComponent: number
+  payload: Uint8Array
+}
+
 export interface ParamRequestListMessage {
   type: 'PARAM_REQUEST_LIST'
   targetSystem: number
@@ -111,18 +119,36 @@ export interface CommandLongMessage {
   params: [number, number, number, number, number, number, number]
 }
 
+export interface AutopilotVersionMessage {
+  type: 'AUTOPILOT_VERSION'
+  capabilities: bigint
+  flightSwVersion: number
+  middlewareSwVersion: number
+  osSwVersion: number
+  boardVersion: number
+  flightCustomVersion: Uint8Array
+  middlewareCustomVersion: Uint8Array
+  osCustomVersion: Uint8Array
+  vendorId: number
+  productId: number
+  uid: bigint
+  uid2?: Uint8Array
+}
+
 export type MavlinkMessage =
   | HeartbeatMessage
   | RcChannelsMessage
   | SysStatusMessage
   | GlobalPositionIntMessage
   | AttitudeMessage
+  | FileTransferProtocolMessage
   | ParamValueMessage
   | StatusTextMessage
   | ParamRequestListMessage
   | ParamSetMessage
   | CommandAckMessage
   | CommandLongMessage
+  | AutopilotVersionMessage
 
 export interface MavlinkEnvelope {
   header: {

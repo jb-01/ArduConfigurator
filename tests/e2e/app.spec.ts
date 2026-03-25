@@ -3,17 +3,19 @@ import { expect, test, type Page } from '@playwright/test'
 async function connectToVehicle(page: Page, transportMode: 'demo' | 'websocket' = 'demo'): Promise<void> {
   await page.goto('/')
 
-  if (transportMode !== 'demo') {
-    await page.getByTestId('transport-mode-select').selectOption(transportMode)
-  }
+  await page.getByTestId('transport-mode-select').selectOption(transportMode)
 
   await page.getByTestId('connect-button').click()
   await expect(page.getByTestId('session-vehicle-name')).toHaveText('ArduCopter')
-  await expect(page.getByTestId('session-parameter-summary')).toHaveText('125 params')
+  await expect(page.getByTestId('session-parameter-summary')).toHaveText('134 params')
 }
 
 async function openView(page: Page, viewId: string): Promise<void> {
   await page.getByTestId(`view-button-${viewId}`).click()
+}
+
+async function expectWorkspaceViewTitle(page: Page, title: string): Promise<void> {
+  await expect(page.getByTestId('workspace-view-title')).toHaveText(title)
 }
 
 async function pullParameters(page: Page): Promise<void> {
@@ -21,7 +23,7 @@ async function pullParameters(page: Page): Promise<void> {
   await expect(pullParametersButton).toBeVisible()
   await pullParametersButton.click()
   await expect(pullParametersButton).toHaveCount(0)
-  await expect(page.getByTestId('session-parameter-summary')).toHaveText('125 params')
+  await expect(page.getByTestId('session-parameter-summary')).toHaveText('134 params')
 }
 
 async function applySingleTuningChange(page: Page, value: string): Promise<void> {
@@ -38,6 +40,8 @@ test.describe('browser configurator regression flows', () => {
 
     await expect(page.getByTestId('view-button-setup')).toBeVisible()
     await expect(page.getByTestId('view-button-ports')).toBeVisible()
+    await expect(page.getByTestId('view-button-vtx')).toBeVisible()
+    await expect(page.getByTestId('view-button-osd')).toBeVisible()
     await expect(page.getByTestId('view-button-receiver')).toBeVisible()
     await expect(page.getByTestId('view-button-outputs')).toBeVisible()
     await expect(page.getByTestId('view-button-power')).toBeVisible()
@@ -47,6 +51,10 @@ test.describe('browser configurator regression flows', () => {
     await expect(page.getByTestId('view-button-parameters')).toHaveCount(0)
     await expect(page.getByRole('heading', { name: 'Mission Control' })).toBeVisible()
     await expect(page.getByTestId('setup-craft-preview')).toBeVisible()
+    await expect(page.getByTestId('flight-deck-zero-heading-button')).toBeVisible()
+    await page.getByTestId('flight-deck-zero-heading-button').click()
+    await expect(page.getByText('Bench-forward zeroed')).toBeVisible()
+    await expect(page.getByTestId('flight-deck-clear-heading-button')).toBeVisible()
     await expect(page.getByTestId('setup-gps-map-widget')).toBeVisible()
     await expect(page.getByTestId('setup-start-guided-button')).toBeVisible()
     await page.getByTestId('setup-start-guided-button').click()
@@ -73,10 +81,18 @@ test.describe('browser configurator regression flows', () => {
     await openView(page, 'ports')
     await expect(page.getByRole('heading', { name: 'Ports & Peripherals' })).toBeVisible()
     await expect(page.getByTestId('ports-gps-map-widget')).toBeVisible()
-    await expect(page.getByText('Video OSD')).toBeVisible()
-    await expect(page.getByText('Video transmitter')).toBeVisible()
+    await expect(page.getByText('OSD routed through dedicated tab')).toBeVisible()
+    await expect(page.getByText('VTX routed through dedicated tab')).toBeVisible()
     await page.getByTestId('return-mission-control-button').click()
     await expect(page.getByRole('heading', { name: 'Mission Control' })).toBeVisible()
+
+    await openView(page, 'vtx')
+    await expectWorkspaceViewTitle(page, 'Video Transmitter')
+    await expect(page.getByText('VTX Table', { exact: true })).toBeVisible()
+
+    await openView(page, 'osd')
+    await expectWorkspaceViewTitle(page, 'On-Screen Display')
+    await expect(page.getByText('Live editor roadmap', { exact: true })).toBeVisible()
 
     await openView(page, 'receiver')
     await expect(page.getByText('Receiver status')).toBeVisible()
@@ -97,6 +113,18 @@ test.describe('browser configurator regression flows', () => {
 
     await page.getByTestId('product-mode-expert').click()
     await expect(page.getByTestId('view-button-parameters')).toBeVisible()
+
+    await openView(page, 'parameters')
+    await expect(page.getByTestId('mavftp-browser')).toBeVisible()
+    await expect(page.getByText('@SYS/scripts')).toBeVisible()
+    const scriptsRow = page.locator('.mavftp-browser__row').filter({ hasText: '@SYS/scripts' })
+    await scriptsRow.getByRole('button', { name: 'Open' }).click()
+    await expect(page.getByTestId('mavftp-path-input')).toHaveValue('@SYS/scripts')
+
+    await openView(page, 'ports')
+    await page.getByRole('button', { name: 'Port Map' }).click()
+    await expect(page.getByRole('dialog')).toBeVisible()
+    await page.getByRole('button', { name: 'Close' }).click()
   })
 
   test('snapshots and presets stay consistent through a tuning-write round-trip', async ({ page }) => {
@@ -107,7 +135,7 @@ test.describe('browser configurator regression flows', () => {
     await page.getByTestId('snapshot-protected-toggle').check()
     await page.getByTestId('capture-live-snapshot-button').click()
 
-    await expect(page.getByText('Saved snapshot "E2E baseline" with 125 parameters.')).toBeVisible()
+    await expect(page.getByText('Saved snapshot "E2E baseline" with 134 parameters.')).toBeVisible()
     await expect(page.getByTestId('active-baseline-label')).toHaveText('E2E baseline')
 
     await openView(page, 'presets')
@@ -172,7 +200,7 @@ test.describe('browser configurator regression flows', () => {
     await openView(page, 'snapshots')
     await page.getByTestId('snapshot-label-input').fill('Ack reset baseline')
     await page.getByTestId('capture-live-snapshot-button').click()
-    await expect(page.getByText('Saved snapshot "Ack reset baseline" with 125 parameters.')).toBeVisible()
+    await expect(page.getByText('Saved snapshot "Ack reset baseline" with 134 parameters.')).toBeVisible()
 
     await openView(page, 'presets')
     await page.getByTestId('preset-card-flight-feel-soft').click()
@@ -206,7 +234,7 @@ test.describe('browser configurator regression flows', () => {
     await page.getByTestId('snapshot-protected-toggle').check()
     await page.getByTestId('capture-live-snapshot-button').click()
 
-    await expect(page.getByText('Saved snapshot "Protected baseline" with 125 parameters.')).toBeVisible()
+    await expect(page.getByText('Saved snapshot "Protected baseline" with 134 parameters.')).toBeVisible()
     await expect(page.getByTestId('delete-selected-snapshot-button')).toBeDisabled()
 
     await page.getByTestId('toggle-selected-snapshot-protection-button').click()
@@ -248,6 +276,6 @@ test.describe('browser configurator regression flows', () => {
 
     await page.getByTestId('snapshot-label-input').fill('In-memory baseline')
     await page.getByTestId('capture-live-snapshot-button').click()
-    await expect(page.getByText('Saved snapshot "In-memory baseline" with 125 parameters.')).toBeVisible()
+    await expect(page.getByText('Saved snapshot "In-memory baseline" with 134 parameters.')).toBeVisible()
   })
 })

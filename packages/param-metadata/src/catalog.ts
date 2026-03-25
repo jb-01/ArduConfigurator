@@ -21,46 +21,58 @@ const DEFAULT_APP_VIEWS: AppViewDefinition[] = [
     order: 2
   },
   {
+    id: 'vtx',
+    label: 'VTX',
+    description: 'Video transmitter control, channel, and power setup.',
+    order: 3
+  },
+  {
+    id: 'osd',
+    label: 'OSD',
+    description: 'FPV overlay backend, screen mode, and display-page setup.',
+    order: 4
+  },
+  {
     id: 'receiver',
     label: 'Receiver',
     description: 'RC mapping, ranges, and mode-switch setup.',
-    order: 3
+    order: 5
   },
   {
     id: 'outputs',
     label: 'Outputs',
     description: 'Airframe, output mapping, motor tests, and ESC review.',
-    order: 4
+    order: 6
   },
   {
     id: 'power',
     label: 'Power',
     description: 'Battery, failsafe, and pre-arm review.',
-    order: 5
+    order: 7
   },
   {
     id: 'snapshots',
     label: 'Snapshots',
     description: 'Capture, compare, and restore known-good parameter sets.',
-    order: 6
+    order: 8
   },
   {
     id: 'tuning',
     label: 'Tuning',
     description: 'Beginner-safe flight-feel and acro-rate tuning.',
-    order: 7
+    order: 9
   },
   {
     id: 'presets',
     label: 'Presets',
     description: 'Curated, explainable tuning bundles with automatic backup.',
-    order: 8
+    order: 10
   },
   {
     id: 'parameters',
     label: 'Parameters',
     description: 'Low-level parameter editing, diffing, and backup work.',
-    order: 9
+    order: 11
   }
 ]
 

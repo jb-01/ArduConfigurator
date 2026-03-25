@@ -13,8 +13,10 @@ import {
 import type { StreamingCodec } from './json-lines-codec.js'
 import type {
   AttitudeMessage,
+  AutopilotVersionMessage,
   CommandAckMessage,
   CommandLongMessage,
+  FileTransferProtocolMessage,
   GlobalPositionIntMessage,
   HeartbeatMessage,
   MavlinkEnvelope,
@@ -157,10 +159,14 @@ function encodePayload(message: MavlinkMessage): Uint8Array {
       return encodeAttitudePayload(message)
     case 'RC_CHANNELS':
       return encodeRcChannelsPayload(message)
+    case 'FILE_TRANSFER_PROTOCOL':
+      return encodeFileTransferProtocolPayload(message)
     case 'COMMAND_ACK':
       return encodeCommandAckPayload(message)
     case 'COMMAND_LONG':
       return encodeCommandLongPayload(message)
+    case 'AUTOPILOT_VERSION':
+      return encodeAutopilotVersionPayload(message)
     case 'STATUSTEXT':
       return encodeStatusTextPayload(message)
     default:
@@ -186,10 +192,14 @@ function decodePayload(messageId: number, payload: Uint8Array): MavlinkMessage |
       return decodeAttitudePayload(payload)
     case MAVLINK_MESSAGE_IDS.RC_CHANNELS:
       return decodeRcChannelsPayload(payload)
+    case MAVLINK_MESSAGE_IDS.FILE_TRANSFER_PROTOCOL:
+      return decodeFileTransferProtocolPayload(payload)
     case MAVLINK_MESSAGE_IDS.COMMAND_ACK:
       return decodeCommandAckPayload(payload)
     case MAVLINK_MESSAGE_IDS.COMMAND_LONG:
       return decodeCommandLongPayload(payload)
+    case MAVLINK_MESSAGE_IDS.AUTOPILOT_VERSION:
+      return decodeAutopilotVersionPayload(payload)
     case MAVLINK_MESSAGE_IDS.STATUSTEXT:
       return decodeStatusTextPayload(payload)
     default:
@@ -215,10 +225,14 @@ function messageIdFor(message: MavlinkMessage): number {
       return MAVLINK_MESSAGE_IDS.ATTITUDE
     case 'RC_CHANNELS':
       return MAVLINK_MESSAGE_IDS.RC_CHANNELS
+    case 'FILE_TRANSFER_PROTOCOL':
+      return MAVLINK_MESSAGE_IDS.FILE_TRANSFER_PROTOCOL
     case 'COMMAND_ACK':
       return MAVLINK_MESSAGE_IDS.COMMAND_ACK
     case 'COMMAND_LONG':
       return MAVLINK_MESSAGE_IDS.COMMAND_LONG
+    case 'AUTOPILOT_VERSION':
+      return MAVLINK_MESSAGE_IDS.AUTOPILOT_VERSION
     case 'STATUSTEXT':
       return MAVLINK_MESSAGE_IDS.STATUSTEXT
     default:
@@ -446,6 +460,25 @@ function decodeRcChannelsPayload(payload: Uint8Array): RcChannelsMessage {
   }
 }
 
+function encodeFileTransferProtocolPayload(message: FileTransferProtocolMessage): Uint8Array {
+  const payload = new Uint8Array(MAVLINK_PAYLOAD_LENGTHS[MAVLINK_MESSAGE_IDS.FILE_TRANSFER_PROTOCOL])
+  payload[0] = message.targetNetwork & 0xff
+  payload[1] = message.targetSystem & 0xff
+  payload[2] = message.targetComponent & 0xff
+  payload.set(message.payload.slice(0, payload.length - 3), 3)
+  return payload
+}
+
+function decodeFileTransferProtocolPayload(payload: Uint8Array): FileTransferProtocolMessage {
+  return {
+    type: 'FILE_TRANSFER_PROTOCOL',
+    targetNetwork: payload[0] ?? 0,
+    targetSystem: payload[1] ?? 0,
+    targetComponent: payload[2] ?? 0,
+    payload: payload.slice(3)
+  }
+}
+
 function encodeCommandAckPayload(message: CommandAckMessage): Uint8Array {
   const payload = new Uint8Array(MAVLINK_PAYLOAD_LENGTHS[MAVLINK_MESSAGE_IDS.COMMAND_ACK])
   const view = new DataView(payload.buffer)
@@ -504,6 +537,47 @@ function decodeCommandLongPayload(payload: Uint8Array): CommandLongMessage {
   }
 }
 
+function encodeAutopilotVersionPayload(message: AutopilotVersionMessage): Uint8Array {
+  const maxPayloadLength = MAVLINK_PAYLOAD_LENGTHS[MAVLINK_MESSAGE_IDS.AUTOPILOT_VERSION]
+  const hasUid2 = message.uid2 !== undefined && message.uid2.some((byte) => byte !== 0)
+  const payload = new Uint8Array(hasUid2 ? maxPayloadLength : MAVLINK_MIN_PAYLOAD_LENGTHS[MAVLINK_MESSAGE_IDS.AUTOPILOT_VERSION])
+  const view = new DataView(payload.buffer)
+  view.setBigUint64(0, message.capabilities, true)
+  view.setBigUint64(8, message.uid, true)
+  view.setUint32(16, message.flightSwVersion, true)
+  view.setUint32(20, message.middlewareSwVersion, true)
+  view.setUint32(24, message.osSwVersion, true)
+  view.setUint32(28, message.boardVersion, true)
+  payload.set(copyFixedBytes(message.flightCustomVersion, 8), 32)
+  payload.set(copyFixedBytes(message.middlewareCustomVersion, 8), 40)
+  payload.set(copyFixedBytes(message.osCustomVersion, 8), 48)
+  view.setUint16(56, message.vendorId, true)
+  view.setUint16(58, message.productId, true)
+  if (hasUid2) {
+    payload.set(copyFixedBytes(message.uid2 as Uint8Array, 18), 60)
+  }
+  return payload
+}
+
+function decodeAutopilotVersionPayload(payload: Uint8Array): AutopilotVersionMessage {
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength)
+  return {
+    type: 'AUTOPILOT_VERSION',
+    capabilities: view.getBigUint64(0, true),
+    uid: view.getBigUint64(8, true),
+    flightSwVersion: view.getUint32(16, true),
+    middlewareSwVersion: view.getUint32(20, true),
+    osSwVersion: view.getUint32(24, true),
+    boardVersion: view.getUint32(28, true),
+    flightCustomVersion: payload.slice(32, 40),
+    middlewareCustomVersion: payload.slice(40, 48),
+    osCustomVersion: payload.slice(48, 56),
+    vendorId: view.getUint16(56, true),
+    productId: view.getUint16(58, true),
+    uid2: payload.byteLength >= 78 ? payload.slice(60, 78) : undefined
+  }
+}
+
 function encodeStatusTextPayload(message: StatusTextMessage): Uint8Array {
   const payload = new Uint8Array(MAVLINK_PAYLOAD_LENGTHS[MAVLINK_MESSAGE_IDS.STATUSTEXT])
   const view = new DataView(payload.buffer)
@@ -536,6 +610,12 @@ function decodeFixedString(bytes: Uint8Array): string {
   const zeroIndex = bytes.indexOf(0)
   const effective = zeroIndex === -1 ? bytes : bytes.subarray(0, zeroIndex)
   return textDecoder.decode(effective)
+}
+
+function copyFixedBytes(value: Uint8Array, size: number): Uint8Array {
+  const bytes = new Uint8Array(size)
+  bytes.set(value.slice(0, size))
+  return bytes
 }
 
 function concatBytes(left: Uint8Array, right: Uint8Array): Uint8Array {

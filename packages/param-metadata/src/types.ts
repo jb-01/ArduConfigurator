@@ -6,7 +6,18 @@ export type GuidedActionId =
 
 export type SessionProfile = 'full-power' | 'usb-bench'
 export type LiveSignalId = 'rc-input' | 'battery-telemetry'
-export type AppViewId = 'setup' | 'ports' | 'receiver' | 'outputs' | 'power' | 'snapshots' | 'tuning' | 'presets' | 'parameters'
+export type AppViewId =
+  | 'setup'
+  | 'ports'
+  | 'vtx'
+  | 'osd'
+  | 'receiver'
+  | 'outputs'
+  | 'power'
+  | 'snapshots'
+  | 'tuning'
+  | 'presets'
+  | 'parameters'
 
 export interface ParameterValueOption {
   value: number

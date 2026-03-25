@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
@@ -20,19 +20,20 @@ interface ModelSceneState {
   scene: THREE.Scene
   camera: THREE.PerspectiveCamera
   modelWrapper: THREE.Group
+  attitudeGroup: THREE.Group
   model?: THREE.Object3D
 }
 
-interface TargetTelemetryState {
-  pitchRad: number
-  rollRad: number
-  yawRad: number
+interface TelemetryState {
+  attitudeQuaternion: THREE.Quaternion
   pitchVisual: number
   rollVisual: number
   headingDeg: number
 }
 
-interface CurrentTelemetryState extends TargetTelemetryState {}
+interface TargetTelemetryState extends TelemetryState {}
+
+interface CurrentTelemetryState extends TelemetryState {}
 
 interface DisplayTelemetryState {
   pitchVisual: number
@@ -40,29 +41,26 @@ interface DisplayTelemetryState {
   headingDeg: number
 }
 
-const ZERO_TELEMETRY: TargetTelemetryState = {
-  pitchRad: 0,
-  rollRad: 0,
-  yawRad: 0,
-  pitchVisual: 0,
-  rollVisual: 0,
-  headingDeg: 0
-}
+const HEADING_TAPE_WINDOW_DEGREES = 120
+const HEADING_TAPE_STEP_DEGREES = 5
+const PITCH_AXIS = new THREE.Vector3(1, 0, 0)
+const ROLL_AXIS = new THREE.Vector3(0, 0, 1)
+const YAW_AXIS = new THREE.Vector3(0, 1, 0)
+// Flight assets are authored Y-up with the nose on -Z. Rotate once so zero-attitude
+// renders nose-up on screen, then keep live roll/pitch/yaw purely on the attitude group.
+const MODEL_MOUNT_QUATERNION = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0))
 
-const ATTITUDE_PITCH_MARKS = [-30, -20, -10, -5, 5, 10, 20, 30] as const
+function createTelemetryState(): TelemetryState {
+  return {
+    attitudeQuaternion: new THREE.Quaternion(),
+    pitchVisual: 0,
+    rollVisual: 0,
+    headingDeg: 0
+  }
+}
 
 function renderScene(state: ModelSceneState): void {
   state.renderer.render(state.scene, state.camera)
-}
-
-function shortestAngleDeltaRadians(current: number, target: number): number {
-  let delta = (target - current) % (Math.PI * 2)
-  if (delta > Math.PI) {
-    delta -= Math.PI * 2
-  } else if (delta < -Math.PI) {
-    delta += Math.PI * 2
-  }
-  return delta
 }
 
 function shortestAngleDeltaDegrees(current: number, target: number): number {
@@ -79,10 +77,6 @@ function approachLinear(current: number, target: number, factor: number): number
   return current + (target - current) * factor
 }
 
-function approachWrappedRadians(current: number, target: number, factor: number): number {
-  return current + shortestAngleDeltaRadians(current, target) * factor
-}
-
 function approachWrappedDegrees(current: number, target: number, factor: number): number {
   return current + shortestAngleDeltaDegrees(current, target) * factor
 }
@@ -94,7 +88,7 @@ function mountModel(
   scaleMode: 'betaflight' | 'fit' = 'fit'
 ): void {
   if (state.model) {
-    state.modelWrapper.remove(state.model)
+    state.attitudeGroup.remove(state.model)
   }
 
   if (scaleMode === 'betaflight') {
@@ -134,7 +128,7 @@ function mountModel(
   })
 
   state.model = model
-  state.modelWrapper.add(model)
+  state.attitudeGroup.add(model)
   renderScene(state)
 }
 
@@ -276,6 +270,14 @@ function normalizeHeading(value: number | undefined): number {
   return normalized >= 0 ? normalized : normalized + 360
 }
 
+function offsetHeading(value: number | undefined, offsetDeg: number): number | undefined {
+  if (value === undefined || Number.isNaN(value)) {
+    return undefined
+  }
+
+  return normalizeHeading(value - offsetDeg)
+}
+
 function modelFileForAirframe(frameClassLabel: string | undefined, frameTypeLabel: string | undefined): string {
   const frameClass = frameClassLabel?.toLowerCase() ?? ''
   const frameType = frameTypeLabel?.toLowerCase() ?? ''
@@ -307,54 +309,69 @@ function formatHeadingValue(value: number): string {
   return `${Math.round(normalizeHeading(value))}`.padStart(3, '0')
 }
 
-function formatCompassRoseLabel(value: number): string {
+function formatHeadingTapeLabel(value: number): string {
   const normalized = normalizeHeading(value)
   if (normalized === 0) {
     return 'N'
   }
-  if (normalized === 45) {
-    return 'NE'
-  }
   if (normalized === 90) {
     return 'E'
-  }
-  if (normalized === 135) {
-    return 'SE'
   }
   if (normalized === 180) {
     return 'S'
   }
-  if (normalized === 225) {
-    return 'SW'
-  }
   if (normalized === 270) {
     return 'W'
   }
-  if (normalized === 315) {
-    return 'NW'
-  }
-  return `${Math.round(normalized / 10)}`.padStart(2, '0')
+  return `${Math.round(normalized)}`.padStart(3, '0')
 }
 
-function compassRoseLabelTone(label: string): 'cardinal' | 'north' | 'intercardinal' | 'none' {
-  if (!label) {
-    return 'none'
-  }
-  if (label === 'N') {
+function headingTapeLabelTone(value: number): 'north' | 'cardinal' | 'numeric' {
+  const normalized = normalizeHeading(value)
+  if (normalized === 0) {
     return 'north'
   }
-  if (label === 'E' || label === 'S' || label === 'W') {
+  if (normalized === 90 || normalized === 180 || normalized === 270) {
     return 'cardinal'
   }
-  return 'intercardinal'
+  return 'numeric'
 }
 
-function polarPoint(centerX: number, centerY: number, radius: number, angleDegrees: number): { x: number; y: number } {
-  const radians = ((angleDegrees - 90) * Math.PI) / 180
-  return {
-    x: centerX + Math.cos(radians) * radius,
-    y: centerY + Math.sin(radians) * radius
-  }
+function buildAttitudeQuaternion(rollDeg: number | undefined, pitchDeg: number | undefined, yawDeg: number | undefined): THREE.Quaternion {
+  const pitchRad = clampDegrees(pitchDeg, 70) * (Math.PI / 180)
+  const rollRad = clampDegrees(rollDeg, 70) * (Math.PI / 180)
+  const yawRad = normalizeHeading(yawDeg) * (Math.PI / 180)
+
+  const yawQuaternion = new THREE.Quaternion().setFromAxisAngle(YAW_AXIS, -yawRad)
+  const pitchQuaternion = new THREE.Quaternion().setFromAxisAngle(PITCH_AXIS, pitchRad)
+  const rollQuaternion = new THREE.Quaternion().setFromAxisAngle(ROLL_AXIS, -rollRad)
+
+  return yawQuaternion.multiply(pitchQuaternion).multiply(rollQuaternion)
+}
+
+function buildHeadingTapeMarks(headingDeg: number): Array<{
+  value: number
+  leftPercent: number
+  major: boolean
+  label?: string
+  tone: 'north' | 'cardinal' | 'numeric'
+}> {
+  const halfWindow = HEADING_TAPE_WINDOW_DEGREES / 2
+
+  return Array.from({ length: 360 / HEADING_TAPE_STEP_DEGREES }, (_, index) => index * HEADING_TAPE_STEP_DEGREES)
+    .map((value) => {
+      const delta = shortestAngleDeltaDegrees(headingDeg, value)
+      return { value, delta }
+    })
+    .filter((mark) => Math.abs(mark.delta) <= halfWindow)
+    .sort((left, right) => left.delta - right.delta)
+    .map((mark) => ({
+      value: mark.value,
+      leftPercent: 50 + (mark.delta / halfWindow) * 50,
+      major: mark.value % 10 === 0,
+      label: mark.value % 30 === 0 ? formatHeadingTapeLabel(mark.value) : undefined,
+      tone: headingTapeLabelTone(mark.value)
+    }))
 }
 
 export function FlightDeckPreview({
@@ -368,8 +385,6 @@ export function FlightDeckPreview({
   compact = false,
   testId
 }: FlightDeckPreviewProps) {
-  const attitudeClipPathId = useId().replace(/:/g, '')
-  const headingClipPathId = useId().replace(/:/g, '')
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const viewportRef = useRef<HTMLDivElement | null>(null)
   const sceneStateRef = useRef<ModelSceneState | null>(null)
@@ -377,10 +392,11 @@ export function FlightDeckPreview({
   const loaderRef = useRef<GLTFLoader | null>(null)
   const animationFrameRef = useRef<number | null>(null)
   const previousAnimationTimeRef = useRef<number | null>(null)
-  const targetTelemetryRef = useRef<TargetTelemetryState>({ ...ZERO_TELEMETRY })
-  const currentTelemetryRef = useRef<CurrentTelemetryState>({ ...ZERO_TELEMETRY })
+  const targetTelemetryRef = useRef<TargetTelemetryState>(createTelemetryState())
+  const currentTelemetryRef = useRef<CurrentTelemetryState>(createTelemetryState())
   const telemetryInitializedRef = useRef(false)
   const uiUpdateTimeRef = useRef(0)
+  const [benchHeadingOffsetDeg, setBenchHeadingOffsetDeg] = useState<number | null>(null)
   const [displayTelemetry, setDisplayTelemetry] = useState<DisplayTelemetryState>({
     pitchVisual: 0,
     rollVisual: 0,
@@ -413,6 +429,9 @@ export function FlightDeckPreview({
     camera.lookAt(0, 0, 0)
 
     const modelWrapper = new THREE.Group()
+    modelWrapper.quaternion.copy(MODEL_MOUNT_QUATERNION)
+    const attitudeGroup = new THREE.Group()
+    modelWrapper.add(attitudeGroup)
     scene.add(camera)
     scene.add(modelWrapper)
 
@@ -429,7 +448,7 @@ export function FlightDeckPreview({
     scene.add(fillLight)
     scene.add(rimLight)
 
-    sceneStateRef.current = { renderer, scene, camera, modelWrapper }
+    sceneStateRef.current = { renderer, scene, camera, modelWrapper, attitudeGroup }
     loaderRef.current = new GLTFLoader()
 
     const resize = () => {
@@ -467,18 +486,12 @@ export function FlightDeckPreview({
       const target = targetTelemetryRef.current
       const current = currentTelemetryRef.current
 
-      current.pitchRad = approachLinear(current.pitchRad, target.pitchRad, interpolationFactor)
-      current.rollRad = approachLinear(current.rollRad, target.rollRad, interpolationFactor)
-      current.yawRad = approachWrappedRadians(current.yawRad, target.yawRad, interpolationFactor)
+      current.attitudeQuaternion.slerp(target.attitudeQuaternion, interpolationFactor)
       current.pitchVisual = approachLinear(current.pitchVisual, target.pitchVisual, interpolationFactor)
       current.rollVisual = approachLinear(current.rollVisual, target.rollVisual, interpolationFactor)
       current.headingDeg = approachWrappedDegrees(current.headingDeg, target.headingDeg, interpolationFactor)
 
-      state.modelWrapper.rotation.y = -current.yawRad
-      if (state.model) {
-        state.model.rotation.x = current.pitchRad
-        state.model.rotation.z = -current.rollRad
-      }
+      state.attitudeGroup.quaternion.copy(current.attitudeQuaternion)
 
       renderScene(state)
 
@@ -505,7 +518,7 @@ export function FlightDeckPreview({
 
       const state = sceneStateRef.current
       if (state?.model) {
-        state.modelWrapper.remove(state.model)
+        state.attitudeGroup.remove(state.model)
       }
       state?.renderer.dispose()
       sceneStateRef.current = null
@@ -547,19 +560,29 @@ export function FlightDeckPreview({
   }, [compact, modelFile])
 
   useEffect(() => {
+    const headingOffsetDeg = benchHeadingOffsetDeg ?? 0
+    const adjustedYawDeg = offsetHeading(yawDeg, headingOffsetDeg)
     const nextTelemetry = {
-      pitchRad: clampDegrees(pitchDeg, 70) * (Math.PI / 180),
-      rollRad: clampDegrees(rollDeg, 70) * (Math.PI / 180),
-      yawRad: normalizeHeading(yawDeg) * (Math.PI / 180),
+      attitudeQuaternion: buildAttitudeQuaternion(rollDeg, pitchDeg, adjustedYawDeg),
       pitchVisual: clampDegrees(pitchDeg, 28),
       rollVisual: clampDegrees(rollDeg, 50),
-      headingDeg: normalizeHeading(yawDeg)
+      headingDeg: normalizeHeading(adjustedYawDeg)
     }
 
-    targetTelemetryRef.current = nextTelemetry
+    targetTelemetryRef.current = {
+      attitudeQuaternion: nextTelemetry.attitudeQuaternion.clone(),
+      pitchVisual: nextTelemetry.pitchVisual,
+      rollVisual: nextTelemetry.rollVisual,
+      headingDeg: nextTelemetry.headingDeg
+    }
 
     if (!telemetryInitializedRef.current) {
-      currentTelemetryRef.current = { ...nextTelemetry }
+      currentTelemetryRef.current = {
+        attitudeQuaternion: nextTelemetry.attitudeQuaternion.clone(),
+        pitchVisual: nextTelemetry.pitchVisual,
+        rollVisual: nextTelemetry.rollVisual,
+        headingDeg: nextTelemetry.headingDeg
+      }
       telemetryInitializedRef.current = true
       setDisplayTelemetry({
         pitchVisual: nextTelemetry.pitchVisual,
@@ -567,37 +590,51 @@ export function FlightDeckPreview({
         headingDeg: nextTelemetry.headingDeg
       })
     }
-  }, [pitchDeg, rollDeg, yawDeg])
+  }, [benchHeadingOffsetDeg, pitchDeg, rollDeg, yawDeg])
 
   const heading = normalizeHeading(displayTelemetry.headingDeg)
-  const compassRoseMarks = useMemo(
-    () =>
-      Array.from({ length: 24 }, (_, index) => {
-        const value = index * 15
-        const outer = polarPoint(120, 104, 70, value)
-        const labeled = value % 45 === 0
-        const inner = polarPoint(120, 104, labeled ? 52 : value % 30 === 0 ? 57 : 61, value)
-        const labelPoint = polarPoint(120, 104, 42, value)
-        const label = labeled ? formatCompassRoseLabel(value) : ''
-        return {
-          value,
-          major: labeled || value % 30 === 0,
-          label,
-          tone: compassRoseLabelTone(label),
-          inner,
-          outer,
-          labelPoint
-        }
-      }),
-    []
-  )
+  const headingTapeMarks = useMemo(() => buildHeadingTapeMarks(heading), [heading])
   const digitalHeading = formatHeadingValue(heading)
+  const headingStatusLabel = benchHeadingOffsetDeg === null ? 'Absolute heading' : 'Bench-forward zeroed'
+
+  function handleSetBenchForward(): void {
+    const sourceHeading = yawDeg !== undefined && !Number.isNaN(yawDeg) ? normalizeHeading(yawDeg) : normalizeHeading(displayTelemetry.headingDeg)
+    setBenchHeadingOffsetDeg(sourceHeading)
+  }
+
+  function handleClearBenchForward(): void {
+    setBenchHeadingOffsetDeg(null)
+  }
 
   return (
     <div className={`flight-deck${compact ? ' flight-deck--compact' : ''}`} data-testid={testId}>
       <div className="flight-deck__model-shell">
         <div className={`flight-deck__model-frame${!verified ? ' is-standby' : ''}`} ref={viewportRef}>
           <canvas ref={canvasRef} className="flight-deck__canvas" />
+          <div className="flight-deck__heading-tape" aria-hidden="true">
+            <div className="flight-deck__heading-window">
+              <div className="flight-deck__heading-ruler">
+                {headingTapeMarks.map((mark) => (
+                  <div
+                    key={mark.value}
+                    className={`flight-deck__heading-mark${mark.major ? ' is-major' : ''}${mark.tone === 'north' ? ' is-north' : mark.tone === 'cardinal' ? ' is-cardinal' : ''}`}
+                    style={{ left: `${mark.leftPercent}%` }}
+                  >
+                    <span className="flight-deck__heading-mark-tick" />
+                    {mark.label ? <span className="flight-deck__heading-mark-label">{mark.label}</span> : null}
+                  </div>
+                ))}
+              </div>
+              <div className="flight-deck__heading-cursor">
+                <span>{digitalHeading}°</span>
+              </div>
+            </div>
+          </div>
+          <div className="flight-deck__reticle" aria-hidden="true">
+            <span className="flight-deck__reticle-wing flight-deck__reticle-wing--left" />
+            <span className="flight-deck__reticle-core" />
+            <span className="flight-deck__reticle-wing flight-deck__reticle-wing--right" />
+          </div>
           {!verified ? (
             <div className="flight-deck__standby">
               <strong>Preview staged</strong>
@@ -608,149 +645,61 @@ export function FlightDeckPreview({
             <div className="flight-deck__hud">
               <span>ROLL {formatDegrees(rollDeg)}</span>
               <span>PITCH {formatDegrees(pitchDeg)}</span>
-              <span>YAW {formatDegrees(yawDeg)}</span>
+              <span>HDG {formatDegrees(heading)}</span>
             </div>
           ) : null}
         </div>
         <div className="flight-deck__caption">
-          <span>{verified ? 'Live craft preview' : 'Preview waiting on attitude telemetry'}</span>
-          <strong>{flightMode ?? 'No active mode'}</strong>
-        </div>
-      </div>
-
-      <div className="flight-deck__instruments">
-        <div className="flight-instrument flight-instrument--attitude">
-          <div className="flight-instrument__header-row">
-            <div className="flight-instrument__title">Attitude</div>
-            <span className={`flight-instrument__status${verified ? ' is-live' : ''}`}>{verified ? 'Live' : 'Standby'}</span>
+          <div className="flight-deck__caption-copy">
+            <span>{verified ? 'Quaternion-synced craft preview with integrated heading tape' : 'Preview waiting on attitude telemetry'}</span>
+            <strong>{flightMode ?? 'No active mode'}</strong>
           </div>
-          <div className="flight-instrument__frame flight-instrument__frame--attitude">
-            <svg className="flight-instrument__svg" viewBox="0 0 240 200" aria-hidden="true">
-              <defs>
-                <clipPath id={attitudeClipPathId}>
-                  <rect x="26" y="38" width="188" height="124" rx="18" ry="18" />
-                </clipPath>
-              </defs>
-
-              <rect className="flight-instrument__bezel" x="12" y="20" width="216" height="156" rx="24" ry="24" />
-              <rect className="flight-instrument__screen" x="26" y="38" width="188" height="124" rx="18" ry="18" />
-
-              <g clipPath={`url(#${attitudeClipPathId})`}>
-                <g transform={`translate(120 100) rotate(${displayTelemetry.rollVisual}) translate(0 ${displayTelemetry.pitchVisual * 2.35})`}>
-                  <rect className="flight-instrument__horizon-sky" x="-190" y="-200" width="380" height="200" />
-                  <rect className="flight-instrument__horizon-ground" x="-190" y="0" width="380" height="200" />
-                  <line className="flight-instrument__horizon-line" x1="-210" y1="0" x2="210" y2="0" />
-
-                  {ATTITUDE_PITCH_MARKS.map((mark) => {
-                    const y = -mark * 2.65
-                    const longMark = Math.abs(mark) % 10 === 0
-                    const halfWidth = longMark ? 34 : 18
-                    return (
-                      <g key={mark} className="flight-instrument__pitch-mark" transform={`translate(0 ${y})`}>
-                        <line x1={-halfWidth} y1="0" x2={halfWidth} y2="0" />
-                        <text x={-halfWidth - 10} y="4" textAnchor="end">
-                          {Math.abs(mark)}
-                        </text>
-                        <text x={halfWidth + 10} y="4" textAnchor="start">
-                          {Math.abs(mark)}
-                        </text>
-                      </g>
-                    )
-                  })}
-                </g>
-              </g>
-
-              <path className="flight-instrument__reticle-wing" d="M 52 104 H 94 L 104 112 H 116" />
-              <path className="flight-instrument__reticle-wing" d="M 188 104 H 146 L 136 112 H 124" />
-              <rect className="flight-instrument__reticle-box" x="110" y="106" width="20" height="8" rx="2" ry="2" />
-              <line className="flight-instrument__reticle-centerline" x1="120" y1="100" x2="120" y2="118" />
-            </svg>
-          </div>
-          <div className="flight-instrument__readout-strip">
-            <div className="flight-instrument__readout">
-              <span>Roll</span>
-              <strong>{formatDegrees(rollDeg)}</strong>
+          <div className="flight-deck__caption-actions">
+            <span className={`flight-deck__heading-reference${benchHeadingOffsetDeg !== null ? ' is-relative' : ''}`}>{headingStatusLabel}</span>
+            <div className="flight-deck__heading-actions">
+              <button
+                type="button"
+                className="flight-deck__heading-button"
+                disabled={!verified}
+                onClick={handleSetBenchForward}
+                data-testid="flight-deck-zero-heading-button"
+              >
+                Set Bench Forward
+              </button>
+              {benchHeadingOffsetDeg !== null ? (
+                <button
+                  type="button"
+                  className="flight-deck__heading-button is-secondary"
+                  onClick={handleClearBenchForward}
+                  data-testid="flight-deck-clear-heading-button"
+                >
+                  Clear
+                </button>
+              ) : null}
             </div>
-            <div className="flight-instrument__readout">
-              <span>Pitch</span>
-              <strong>{formatDegrees(pitchDeg)}</strong>
-            </div>
-          </div>
-          <div className="flight-deck__caption">
-            <span>{verified ? 'Pitch / roll live' : 'No live ATTITUDE stream'}</span>
-            <strong>{verified ? 'Synced' : 'Waiting'}</strong>
           </div>
         </div>
-
-        <div className="flight-instrument flight-instrument--heading">
-          <div className="flight-instrument__header-row">
-            <div className="flight-instrument__title">Heading</div>
-            <span className={`flight-instrument__status${verified ? ' is-live' : ''}`}>{verified ? 'Live' : 'Standby'}</span>
-          </div>
-          <div className="flight-instrument__frame flight-instrument__frame--heading">
-            <svg className="flight-instrument__svg" viewBox="0 0 240 196" aria-hidden="true">
-              <defs>
-                <clipPath id={headingClipPathId}>
-                  <circle cx="120" cy="104" r="72" />
-                </clipPath>
-              </defs>
-
-              <rect className="flight-instrument__bezel" x="28" y="28" width="184" height="152" rx="34" ry="34" />
-              <circle className="flight-instrument__compass-screen" cx="120" cy="104" r="72" />
-              <circle className="flight-instrument__compass-ring" cx="120" cy="104" r="62" />
-
-              <g clipPath={`url(#${headingClipPathId})`}>
-                <g transform={`rotate(${-displayTelemetry.headingDeg} 120 104)`}>
-                  {compassRoseMarks.map((mark) => (
-                    <g key={mark.value}>
-                      <line
-                        className={`flight-instrument__compass-tick${mark.major ? ' is-major' : ''}`}
-                        x1={mark.inner.x}
-                        y1={mark.inner.y}
-                        x2={mark.outer.x}
-                        y2={mark.outer.y}
-                      />
-                      {mark.label ? (
-                        <text
-                          className={`flight-instrument__compass-label${mark.tone !== 'none' ? ` is-${mark.tone}` : ''}`}
-                          x={mark.labelPoint.x}
-                          y={mark.labelPoint.y}
-                          textAnchor="middle"
-                          dominantBaseline="middle"
-                          transform={`rotate(${displayTelemetry.headingDeg} ${mark.labelPoint.x} ${mark.labelPoint.y})`}
-                        >
-                          {mark.label}
-                        </text>
-                      ) : null}
-                    </g>
-                  ))}
-                </g>
-              </g>
-
-              <line className="flight-instrument__compass-course-line" x1="120" y1="42" x2="120" y2="140" />
-              <path className="flight-instrument__heading-pointer" d="M 120 34 L 128 48 H 112 Z" />
-              <circle className="flight-instrument__compass-center" cx="120" cy="104" r="5" />
-              <path className="flight-instrument__compass-center-marker" d="M 96 104 H 112 L 120 112 L 128 104 H 144" />
-              <rect className="flight-instrument__heading-window" x="90" y="8" width="60" height="24" rx="6" ry="6" />
-              <text className="flight-instrument__heading-window-text" x="120" y="24" textAnchor="middle">
-                {digitalHeading}
-              </text>
-            </svg>
-          </div>
-          <div className="flight-instrument__readout-strip">
-            <div className="flight-instrument__readout">
-              <span>Heading</span>
-              <strong>{Math.round(heading)}°</strong>
-            </div>
-            <div className="flight-instrument__readout">
-              <span>Status</span>
-              <strong>{verified ? 'Synced' : 'Waiting'}</strong>
-            </div>
-          </div>
-          <div className="flight-deck__caption">
-            <span>Current yaw heading</span>
+        <div className="flight-deck__readout-grid">
+          <article className={`flight-deck__readout-card${verified ? ' is-live' : ''}`}>
+            <span>Roll</span>
+            <strong>{formatDegrees(rollDeg)}</strong>
+            <small>Live bank attitude from the 3D craft view.</small>
+          </article>
+          <article className={`flight-deck__readout-card${verified ? ' is-live' : ''}`}>
+            <span>Pitch</span>
+            <strong>{formatDegrees(pitchDeg)}</strong>
+            <small>Forward / aft tilt with quaternion interpolation.</small>
+          </article>
+          <article className={`flight-deck__readout-card${verified ? ' is-live' : ''}`}>
+            <span>Heading</span>
             <strong>{Math.round(heading)}°</strong>
-          </div>
+            <small>{benchHeadingOffsetDeg === null ? 'Centered on the HUD heading tape.' : 'Relative to the saved bench-forward heading.'}</small>
+          </article>
+          <article className={`flight-deck__readout-card${verified ? ' is-live' : ''}`}>
+            <span>Link State</span>
+            <strong>{verified ? 'Synced' : 'Waiting'}</strong>
+            <small>{verified ? 'ATTITUDE stream active.' : 'Preview is holding the staged pose.'}</small>
+          </article>
         </div>
       </div>
     </div>

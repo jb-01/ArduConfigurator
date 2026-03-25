@@ -15,6 +15,43 @@ export interface VehicleIdentity {
   flightMode: string
 }
 
+export interface HardwareBoardState {
+  boardVersion: number
+  boardType: number
+  vendorId: number
+  productId: number
+  uid?: string
+  ftpSupported: boolean
+  lastUpdatedAtMs: number
+}
+
+export interface BoardSerialPortMapping {
+  serialPortNumber: number
+  hardwarePort: string
+  txActive: boolean
+  rxActive: boolean
+  txBytes?: number
+  rxBytes?: number
+  txBufferDrops?: number
+  rxBufferDrops?: number
+}
+
+export type BoardFileStatus = 'idle' | 'loading' | 'ready' | 'unsupported' | 'missing' | 'error'
+
+export interface BoardFileState {
+  status: BoardFileStatus
+  path: string
+  mappings: BoardSerialPortMapping[]
+  rawText?: string
+  error?: string
+  fetchedAtMs?: number
+}
+
+export interface HardwareState {
+  board?: HardwareBoardState
+  uartsFile: BoardFileState
+}
+
 export interface StatusTextEntry {
   severity: 'info' | 'warning' | 'error'
   text: string
@@ -166,6 +203,7 @@ export interface ConfiguratorSnapshot {
   connection: TransportStatus
   sessionProfile: SessionProfile
   vehicle?: VehicleIdentity
+  hardware: HardwareState
   parameterStats: {
     downloaded: number
     total: number

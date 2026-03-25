@@ -57,6 +57,65 @@ test('mock SITL exposes live global position telemetry for map surfaces', async 
   }
 })
 
+test('mock SITL exposes board identity and UART mapping via AUTOPILOT_VERSION and MAVFTP', async () => {
+  const sitl = createMockSITL()
+
+  try {
+    await sitl.connectAndSync({
+      heartbeatTimeoutMs: 2000,
+      parameterTimeoutMs: 5000
+    })
+
+    await waitFor(() => sitl.runtime.getSnapshot().hardware.uartsFile.status === 'ready', 1000)
+
+    const snapshot = sitl.runtime.getSnapshot()
+    assert.equal(snapshot.hardware.board?.boardType, 59)
+    assert.equal(snapshot.hardware.board?.ftpSupported, true)
+    assert.equal(snapshot.hardware.uartsFile.status, 'ready')
+    assert.equal(snapshot.hardware.uartsFile.mappings.find((mapping) => mapping.serialPortNumber === 1)?.hardwarePort, 'UART7')
+  } finally {
+    await sitl.disconnect().catch(() => {})
+    sitl.destroy()
+  }
+})
+
+test('mock SITL supports MAVFTP directory browse, upload, download, and delete operations under @SYS', async () => {
+  const sitl = createMockSITL()
+
+  try {
+    await sitl.connectAndSync({
+      heartbeatTimeoutMs: 2000,
+      parameterTimeoutMs: 5000
+    })
+
+    const initialEntries = await sitl.runtime.listRemoteDirectory('@SYS')
+    assert.deepEqual(
+      initialEntries.map((entry) => `${entry.kind}:${entry.name}`),
+      ['directory:scripts', 'file:timers.txt', 'file:uarts.txt']
+    )
+
+    const scriptBytes = await sitl.runtime.downloadRemoteFile('@SYS/scripts/hello.lua')
+    assert.match(new TextDecoder().decode(scriptBytes), /hello from @SYS\/scripts\/hello\.lua/)
+
+    const uploadPath = '@SYS/scripts/upload-test.lua'
+    await sitl.runtime.uploadRemoteFile(uploadPath, new TextEncoder().encode("return 'uploaded from test'\n"))
+
+    const scriptDirectoryEntries = await sitl.runtime.listRemoteDirectory('@SYS/scripts')
+    assert.ok(scriptDirectoryEntries.some((entry) => entry.kind === 'file' && entry.name === 'upload-test.lua'))
+
+    const uploadedBytes = await sitl.runtime.downloadRemoteFile(uploadPath)
+    assert.equal(new TextDecoder().decode(uploadedBytes), "return 'uploaded from test'\n")
+
+    await sitl.runtime.deleteRemotePath(uploadPath)
+
+    const afterDeleteEntries = await sitl.runtime.listRemoteDirectory('@SYS/scripts')
+    assert.ok(!afterDeleteEntries.some((entry) => entry.path === uploadPath))
+  } finally {
+    await sitl.disconnect().catch(() => {})
+    sitl.destroy()
+  }
+})
+
 test('verified parameter writes resolve on PARAM_VALUE readback', async () => {
   const sitl = createMockSITL()
 

@@ -139,42 +139,42 @@ export const ARDUCOPTER_SERIAL_PROTOCOL_LABELS: Record<number, string> = {
   5: 'GPS',
   7: 'AlexMos Gimbal',
   8: 'SToRM32 Gimbal',
-  9: 'Lidar',
-  10: 'FrSky Passthrough',
+  9: 'Lidar360',
+  10: 'OpticalFlow',
+  11: 'FrSky SPort Passthrough',
   13: 'Beacon',
   14: 'Volz',
-  15: 'SBUS Servo Out',
+  15: 'SBus1 Out',
   16: 'ESC Telemetry',
   17: 'Devo Telemetry',
-  18: 'OpticalFlow',
-  19: 'Robotis',
-  20: 'MSP',
-  21: 'IMU MSP',
-  22: 'DisplayPort',
-  23: 'CRSF',
-  24: 'FrSky FPort',
-  25: 'FrSky SPort',
-  26: 'LTM',
-  27: 'RunCam',
-  28: 'HOTT',
-  29: 'Scripting',
-  30: 'Crossfire VTX',
+  18: 'SBus1',
+  19: 'DataFlash',
+  20: 'NMEA Output',
+  21: 'LTM',
+  22: 'SLCAN',
+  23: 'RCIN',
+  24: 'EFI Serial',
+  25: 'LTM (no forward)',
+  26: 'RunCam',
+  27: 'HotTelemetry',
+  28: 'Scripting',
+  29: 'Crossfire VTX',
+  30: 'DJI FPV',
   31: 'Generator',
-  32: 'Winch',
-  33: 'SBus Servo In',
-  34: 'DJI FPV',
-  35: 'Airspeed',
+  32: 'MSP',
+  33: 'DJI FPV UART',
+  34: 'Airspeed',
   36: 'ADSB',
-  37: 'AHRS',
-  38: 'SmartAudio',
-  39: 'FrSky SPort With Passthrough',
+  37: 'SmartAudio',
+  38: 'FETtec OneWire',
+  39: 'FPVTramp',
   40: 'IRC Tramp',
   41: 'RangeFinder',
-  42: 'Vision Position',
-  43: 'Audio VTX',
-  44: 'HoTT Telemetry',
-  45: 'DDS XRCE',
-  46: 'IMU Data',
+  42: 'DisplayPort',
+  43: 'Telemetry Radio',
+  44: 'Viso',
+  45: 'ALE',
+  46: 'DDS XRCE',
   48: 'PPP',
   49: 'i-BUS Telemetry',
   50: 'IOMCU'
@@ -204,6 +204,22 @@ export const ARDUCOPTER_SERIAL_RTSCTS_LABELS: Record<number, string> = {
   1: 'Enabled',
   2: 'Auto',
   3: 'RS-485 RTS'
+}
+
+export const ARDUCOPTER_SERIAL_OPTION_BIT_LABELS: Record<number, string> = {
+  0: 'Half Duplex',
+  1: 'Invert RX',
+  2: 'Invert TX',
+  3: 'Swap RX/TX',
+  4: 'RX Pull-down',
+  5: 'RX No DMA',
+  6: 'TX No DMA',
+  7: 'Disable MAVLink Forwarding',
+  8: 'Disable MAVLink on RX',
+  9: 'Disable FIFO',
+  10: 'Ignore Streamrate',
+  11: 'Disable ADS-B Forwarding',
+  12: 'Skip SDI-12 CRC'
 }
 
 export const ARDUCOPTER_GPS_TYPE_LABELS: Record<number, string> = {
@@ -566,9 +582,82 @@ export function arducopterSerialBaudLabel(value: number | undefined): string | u
   return ARDUCOPTER_SERIAL_BAUD_LABELS[value]
 }
 
+export function arducopterSerialBaudRate(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isFinite(value)) {
+    return undefined
+  }
+
+  const normalized = Math.round(value)
+  switch (normalized) {
+    case 1:
+      return 1200
+    case 2:
+      return 2400
+    case 4:
+      return 4800
+    case 9:
+      return 9600
+    case 19:
+      return 19200
+    case 38:
+      return 38400
+    case 57:
+      return 57600
+    case 100:
+      return 100000
+    case 111:
+      return 111100
+    case 115:
+      return 115200
+    case 230:
+      return 230400
+    case 256:
+      return 256000
+    case 460:
+      return 460800
+    case 500:
+      return 500000
+    case 921:
+      return 921600
+    case 1500:
+      return 1500000
+    case 2000:
+      return 2000000
+    default:
+      if (normalized > 2000) {
+        return normalized
+      }
+
+      return normalized * 1000
+  }
+}
+
+export function encodeArducopterSerialBaud(baudRate: number | undefined): number | undefined {
+  if (baudRate === undefined || !Number.isFinite(baudRate)) {
+    return undefined
+  }
+
+  const normalized = Math.max(1, Math.round(baudRate))
+  const exactMatch = Object.keys(ARDUCOPTER_SERIAL_BAUD_LABELS).find(
+    (encodedValue) => arducopterSerialBaudRate(Number(encodedValue)) === normalized
+  )
+  if (exactMatch !== undefined) {
+    return Number(exactMatch)
+  }
+
+  if (normalized % 1000 === 0) {
+    const kbaudValue = normalized / 1000
+    if (kbaudValue >= 1 && kbaudValue <= 2000) {
+      return kbaudValue
+    }
+  }
+
+  return normalized
+}
+
 export function formatArducopterSerialBaud(value: number | undefined): string {
-  const label = arducopterSerialBaudLabel(value)
-  return label ? `${label} baud` : value === undefined ? 'Unknown' : `${value} baud`
+  const baudRate = arducopterSerialBaudRate(value)
+  return baudRate === undefined ? 'Unknown' : `${baudRate.toLocaleString()} baud`
 }
 
 export function arducopterSerialRtsctsLabel(value: number | undefined): string | undefined {

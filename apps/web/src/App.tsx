@@ -13,6 +13,7 @@ import {
   createIdleRcRangeExerciseState,
   createModeSwitchExerciseState,
   createRcRangeExerciseState,
+  deriveCompassSetupAvailability,
   deriveEscSetupSummary,
   deriveDraftValuesFromParameterBackup,
   deriveDraftValuesFromParameterPreset,
@@ -34,13 +35,17 @@ import {
   formatModeSlotLabel,
   formatRcAxisLabel,
   groupParameterDraftEntries,
+  joinMavftpPath,
+  normalizeMavftpPath,
   parseParameterBackup,
   parseParameterSnapshotInput,
+  parentMavftpPath,
   serializeParameterBackup,
   serializeParameterSnapshotLibrary,
   sortParameterSnapshots,
   summarizeParameterDraftEntries,
   type ConfiguratorSnapshot,
+  type MavftpDirectoryEntry,
   type MotorTestRequest,
   type ParameterDraftEntry,
   type ParameterDraftStatus,
@@ -51,10 +56,14 @@ import {
   type ServoOutputKind,
 } from '@arduconfig/ardupilot-core'
 import {
+  ARDUCOPTER_SERIAL_OPTION_BIT_LABELS,
   ARDUCOPTER_MSP_OPTION_BIT_LABELS,
   ARDUCOPTER_NOTIFICATION_BUZZER_TYPE_BIT_LABELS,
   ARDUCOPTER_NOTIFICATION_LED_TYPE_BIT_LABELS,
   arducopterMetadata,
+  arducopterSerialBaudRate,
+  encodeArducopterSerialBaud,
+  findBoardCatalogEntry,
   formatArducopterBatteryMonitor,
   formatArducopterBatteryFailsafeAction,
   formatArducopterBatteryVoltageSource,
@@ -79,6 +88,8 @@ import {
   formatArducopterVtxEnable,
   normalizeFirmwareMetadata,
   type AppViewId,
+  type BoardCatalogEntry,
+  type BoardMediaAsset,
   type NormalizedFirmwareMetadataBundle,
   type NormalizedPresetDefinition,
   type ParameterDefinition,
@@ -86,7 +97,15 @@ import {
   type SessionProfile,
 } from '@arduconfig/param-metadata'
 import { MavlinkSession, MavlinkV2Codec, createArduCopterMockScenario } from '@arduconfig/protocol-mavlink'
-import { MockTransport, WebSerialTransport, WebSocketTransport } from '@arduconfig/transport'
+import {
+  MockTransport,
+  WebSerialTransport,
+  WebSocketTransport,
+  getAvailableWebSerialPorts,
+  getWebSerialPortInfo,
+  type WebSerialPortInfo,
+  type WebSerialPortLike,
+} from '@arduconfig/transport'
 import { Panel, StatusBadge, buttonStyle } from '@arduconfig/ui-kit'
 
 import { getDesktopBridge } from './desktop-bridge'
@@ -110,6 +129,9 @@ const actionLabels = {
   'calibrate-compass': 'Calibrate Compass',
   'reboot-autopilot': 'Request Reboot'
 } as const
+const UI_PARAMETER_WRITE_OPTIONS = {
+  verifyTimeoutMs: 15000
+} as const
 
 const OUTPUT_REVIEW_PARAM_IDS = ['MOT_PWM_TYPE', 'MOT_PWM_MIN', 'MOT_PWM_MAX', 'MOT_SPIN_ARM', 'MOT_SPIN_MIN', 'MOT_SPIN_MAX'] as const
 const OUTPUT_NOTIFICATION_PARAM_IDS = [
@@ -120,18 +142,22 @@ const OUTPUT_NOTIFICATION_PARAM_IDS = [
   'NTF_BUZZ_TYPES',
   'NTF_BUZZ_VOLUME'
 ] as const
-const PORTS_PERIPHERAL_PARAM_IDS = [
+const GPS_PARAM_IDS = [
   'GPS_TYPE',
   'GPS_TYPE2',
   'GPS_AUTO_CONFIG',
   'GPS_AUTO_SWITCH',
   'GPS_PRIMARY',
-  'GPS_RATE_MS',
+  'GPS_RATE_MS'
+] as const
+const OSD_PARAM_IDS = [
   'OSD_TYPE',
   'OSD_CHAN',
   'OSD_SW_METHOD',
   'MSP_OPTIONS',
-  'MSP_OSD_NCELLS',
+  'MSP_OSD_NCELLS'
+] as const
+const VTX_PARAM_IDS = [
   'VTX_ENABLE',
   'VTX_FREQ',
   'VTX_POWER',
@@ -159,6 +185,7 @@ const TUNING_ACRO_PARAM_IDS = ['ACRO_RP_RATE', 'ACRO_Y_RATE', 'ACRO_RP_EXPO', 'A
 const TUNING_PARAM_IDS = [...TUNING_FLIGHT_FEEL_PARAM_IDS, ...TUNING_ACRO_PARAM_IDS] as const
 const PRESET_AUTO_BACKUP_TAGS = ['auto-backup', 'preset'] as const
 const DEFAULT_WEBSOCKET_URL = 'ws://127.0.0.1:14550'
+const SERIAL_BAUD_PRESET_RATES = [9600, 19200, 38400, 57600, 100000, 111100, 115200, 230400, 256000, 460800, 500000, 921600, 1200000, 1500000, 2000000] as const
 
 type TransportMode = 'demo' | 'web-serial' | 'websocket'
 type ProductMode = 'basic' | 'expert'
@@ -167,6 +194,9 @@ type StatusTone = 'neutral' | 'success' | 'warning' | 'danger'
 type ModeSwitchExerciseStatus = 'idle' | 'running' | 'passed' | 'failed'
 
 const PRODUCT_MODE_STORAGE_KEY = 'arduconfig:product-mode'
+const TRANSPORT_MODE_STORAGE_KEY = 'arduconfig:transport-mode'
+const WEBSOCKET_URL_STORAGE_KEY = 'arduconfig:websocket-url'
+const SERIAL_PORT_INFO_STORAGE_KEY = 'arduconfig:web-serial-port'
 
 interface AppViewDescriptor {
   id: AppViewId
@@ -210,14 +240,21 @@ interface ModeSwitchActivity {
 interface SerialPortViewModel {
   portNumber: number
   label: string
+  hardwarePort?: string
+  boardConnectorLabel?: string
+  boardTrafficSummary?: string
   protocolParameter?: ParameterState
   baudParameter?: ParameterState
+  optionsParameter?: ParameterState
   flowControlParameter?: ParameterState
   protocolValue?: number
   baudValue?: number
+  actualBaudRate?: number
+  optionsValue?: number
   flowControlValue?: number
   protocolLabel: string
   baudLabel: string
+  optionsLabel: string
   flowControlLabel?: string
   usageSummary: string
   notes: string[]
@@ -324,6 +361,16 @@ interface ParameterFollowUp {
   text: string
 }
 
+type MavftpBrowserStatus = 'idle' | 'loading' | 'ready' | 'error'
+
+interface MavftpBrowserState {
+  status: MavftpBrowserStatus
+  path: string
+  entries: MavftpDirectoryEntry[]
+  error?: string
+  refreshedAtMs?: number
+}
+
 interface SetupFlowCriterion {
   label: string
   met: boolean
@@ -334,7 +381,10 @@ type SetupFlowSequenceState = 'locked' | 'current' | 'complete'
 interface SetupConfirmationRecord {
   signature: string
   confirmedAtMs: number
+  outcome: SetupSectionOutcome
 }
+
+type SetupSectionOutcome = 'complete' | 'not-applicable' | 'already-done' | 'deferred'
 
 interface SetupFlowActionDescriptor {
   kind:
@@ -353,6 +403,7 @@ interface SetupFlowActionDescriptor {
   label: string
   tone?: 'primary' | 'secondary'
   disabled?: boolean
+  confirmationOutcome?: SetupSectionOutcome
   actionId?: keyof typeof actionLabels
   panelId?: string
   targetElementId?: string
@@ -372,6 +423,7 @@ interface SetupFlowSectionDescriptor {
   panelId: string
   panelLabel: string
   actions: SetupFlowActionDescriptor[]
+  confirmationOutcome?: SetupSectionOutcome
   blockingReason?: string
 }
 
@@ -407,6 +459,21 @@ function formatConfirmationTime(confirmedAtMs: number | undefined): string {
   })
 }
 
+function formatSetupOutcome(outcome: SetupSectionOutcome): string {
+  switch (outcome) {
+    case 'complete':
+      return 'Complete'
+    case 'not-applicable':
+      return 'Not applicable'
+    case 'already-done':
+      return 'Already done'
+    case 'deferred':
+      return 'Deferred'
+    default:
+      return 'Resolved'
+  }
+}
+
 function formatOrientationLabel(value: number | undefined): string {
   if (value === undefined) {
     return 'Unknown orientation'
@@ -425,6 +492,10 @@ function viewMonogram(viewId: AppViewId): string {
       return 'ST'
     case 'ports':
       return 'PR'
+    case 'vtx':
+      return 'VTX'
+    case 'osd':
+      return 'OSD'
     case 'receiver':
       return 'RX'
     case 'outputs':
@@ -455,7 +526,7 @@ const WORKSPACE_NAV_SECTIONS: WorkspaceNavSectionDefinition[] = [
     id: 'bench',
     label: 'Bench Setup',
     description: 'Wire, verify, and harden the aircraft before flight.',
-    viewIds: ['ports', 'receiver', 'outputs', 'power']
+    viewIds: ['ports', 'vtx', 'osd', 'receiver', 'outputs', 'power']
   },
   {
     id: 'change',
@@ -477,6 +548,10 @@ function missionTitleForView(viewId: AppViewId): string {
       return 'Flight Deck'
     case 'ports':
       return 'Ports & Peripheral Routing'
+    case 'vtx':
+      return 'Video Transmitter'
+    case 'osd':
+      return 'On-Screen Display'
     case 'receiver':
       return 'Receiver Workbench'
     case 'outputs':
@@ -849,11 +924,18 @@ function appViewForPanel(panelId: string): AppViewId {
   }
 }
 
-function createRuntime(mode: TransportMode, websocketUrl: string): ArduPilotConfiguratorRuntime {
+function createRuntime(
+  mode: TransportMode,
+  websocketUrl: string,
+  serialPort: WebSerialPortLike | undefined,
+  onSerialPortSelected?: (port: WebSerialPortLike) => void
+): ArduPilotConfiguratorRuntime {
   const transport = (() => {
     if (mode === 'web-serial') {
       return new WebSerialTransport('browser-serial', {
-        baudRate: 115200
+        baudRate: 115200,
+        port: serialPort,
+        onPortSelected: onSerialPortSelected
       })
     }
 
@@ -1097,6 +1179,144 @@ function readStoredProductMode(): ProductMode {
   }
 }
 
+function defaultTransportMode(webSerialSupported: boolean): TransportMode {
+  return webSerialSupported ? 'web-serial' : 'demo'
+}
+
+function readStoredTransportMode(webSerialSupported: boolean): TransportMode {
+  if (typeof window === 'undefined') {
+    return defaultTransportMode(webSerialSupported)
+  }
+
+  try {
+    const stored = window.localStorage.getItem(TRANSPORT_MODE_STORAGE_KEY)
+    if (stored === 'demo' || stored === 'websocket') {
+      return stored
+    }
+    if (stored === 'web-serial' && webSerialSupported) {
+      return stored
+    }
+  } catch {
+    return defaultTransportMode(webSerialSupported)
+  }
+
+  return defaultTransportMode(webSerialSupported)
+}
+
+function readStoredWebsocketUrl(): string {
+  if (typeof window === 'undefined') {
+    return DEFAULT_WEBSOCKET_URL
+  }
+
+  try {
+    const stored = window.localStorage.getItem(WEBSOCKET_URL_STORAGE_KEY)?.trim()
+    return stored ? stored : DEFAULT_WEBSOCKET_URL
+  } catch {
+    return DEFAULT_WEBSOCKET_URL
+  }
+}
+
+function readStoredSerialPortInfo(): WebSerialPortInfo | undefined {
+  if (typeof window === 'undefined') {
+    return undefined
+  }
+
+  try {
+    const stored = window.localStorage.getItem(SERIAL_PORT_INFO_STORAGE_KEY)
+    if (!stored) {
+      return undefined
+    }
+
+    const parsed = JSON.parse(stored) as WebSerialPortInfo
+    return typeof parsed === 'object' && parsed !== null ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function persistTransportMode(value: TransportMode): void {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(TRANSPORT_MODE_STORAGE_KEY, value)
+  } catch {}
+}
+
+function persistWebsocketUrl(value: string): void {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(WEBSOCKET_URL_STORAGE_KEY, value)
+  } catch {}
+}
+
+function persistSerialPortInfo(portInfo: WebSerialPortInfo | undefined): void {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    if (portInfo && (portInfo.usbVendorId !== undefined || portInfo.usbProductId !== undefined)) {
+      window.localStorage.setItem(SERIAL_PORT_INFO_STORAGE_KEY, JSON.stringify(portInfo))
+    } else {
+      window.localStorage.removeItem(SERIAL_PORT_INFO_STORAGE_KEY)
+    }
+  } catch {}
+}
+
+function sameSerialPortInfo(left: WebSerialPortInfo | undefined, right: WebSerialPortInfo | undefined): boolean {
+  if (!left || !right) {
+    return false
+  }
+
+  return left.usbVendorId === right.usbVendorId && left.usbProductId === right.usbProductId
+}
+
+function describeRememberedSerialPort(portInfo: WebSerialPortInfo | undefined): string | undefined {
+  if (!portInfo) {
+    return undefined
+  }
+
+  const vendor = portInfo.usbVendorId?.toString(16).toUpperCase().padStart(4, '0')
+  const product = portInfo.usbProductId?.toString(16).toUpperCase().padStart(4, '0')
+  if (!vendor && !product) {
+    return undefined
+  }
+
+  return [vendor ? `VID ${vendor}` : undefined, product ? `PID ${product}` : undefined].filter(Boolean).join(' / ')
+}
+
+function formatBaudRate(baudRate: number | undefined): string {
+  return baudRate === undefined ? 'Unknown' : `${baudRate.toLocaleString()} baud`
+}
+
+function parseSerialBaudInput(rawValue: string): { encodedValue?: number; baudRate?: number } {
+  const parsed = Number(rawValue.trim())
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return {}
+  }
+
+  const normalized = Math.round(parsed)
+  const baudRate = arducopterSerialBaudRate(normalized > 2000 ? normalized : normalized)
+  const resolvedBaudRate = normalized > 2000 ? normalized : baudRate
+  return {
+    baudRate: resolvedBaudRate,
+    encodedValue: encodeArducopterSerialBaud(resolvedBaudRate)
+  }
+}
+
+function isPresetBaudRate(baudRate: number | undefined): boolean {
+  return baudRate !== undefined && SERIAL_BAUD_PRESET_RATES.includes(baudRate as (typeof SERIAL_BAUD_PRESET_RATES)[number])
+}
+
+function selectedBaudPresetValue(baudRate: number | undefined): string {
+  return isPresetBaudRate(baudRate) ? String(baudRate) : 'custom'
+}
+
 function readParameterValue(snapshot: ConfiguratorSnapshot, paramId: string): number | undefined {
   return snapshot.parameters.find((parameter) => parameter.id === paramId)?.value
 }
@@ -1231,10 +1451,18 @@ function isReceiverReviewParamId(paramId: string): boolean {
 
 function isPortsReviewParamId(paramId: string): boolean {
   return (
-    /^SERIAL\d+_(PROTOCOL|BAUD)$/.test(paramId) ||
+    /^SERIAL\d+_(PROTOCOL|BAUD|OPTIONS)$/.test(paramId) ||
     /^BRD_SER\d+_RTSCTS$/.test(paramId) ||
-    PORTS_PERIPHERAL_PARAM_IDS.includes(paramId as (typeof PORTS_PERIPHERAL_PARAM_IDS)[number])
+    GPS_PARAM_IDS.includes(paramId as (typeof GPS_PARAM_IDS)[number])
   )
+}
+
+function isOsdReviewParamId(paramId: string): boolean {
+  return OSD_PARAM_IDS.includes(paramId as (typeof OSD_PARAM_IDS)[number])
+}
+
+function isVtxReviewParamId(paramId: string): boolean {
+  return VTX_PARAM_IDS.includes(paramId as (typeof VTX_PARAM_IDS)[number])
 }
 
 function isPowerReviewParamId(paramId: string): boolean {
@@ -1275,21 +1503,19 @@ function describeSerialPortUsage(protocolValue: number | undefined): string {
       return 'GPS or GNSS receiver.'
     case 16:
       return 'ESC telemetry input.'
-    case 20:
-    case 21:
-      return 'MSP peripheral or sensor link.'
-    case 22:
-      return 'DisplayPort OSD / display peripheral.'
     case 23:
-    case 24:
-    case 33:
       return 'Serial receiver / RC input path.'
+    case 29:
     case 30:
-    case 34:
-    case 38:
+    case 33:
+    case 37:
+    case 39:
     case 40:
-    case 43:
-      return 'VTX control or related video peripheral.'
+      return 'VTX control or digital FPV link.'
+    case 32:
+      return 'MSP display or peripheral link.'
+    case 42:
+      return 'DisplayPort OSD / HD display link.'
     case 36:
       return 'ADS-B receiver input.'
     case 41:
@@ -1300,15 +1526,15 @@ function describeSerialPortUsage(protocolValue: number | undefined): string {
 }
 
 function isReceiverSerialProtocol(protocolValue: number | undefined): boolean {
-  return protocolValue === 23 || protocolValue === 24 || protocolValue === 33
+  return protocolValue === 18 || protocolValue === 23
 }
 
 function isVtxControlSerialProtocol(protocolValue: number | undefined): boolean {
-  return protocolValue === 30 || protocolValue === 34 || protocolValue === 38 || protocolValue === 40 || protocolValue === 43
+  return protocolValue === 29 || protocolValue === 30 || protocolValue === 33 || protocolValue === 37 || protocolValue === 39 || protocolValue === 40
 }
 
 function isOsdSerialProtocol(protocolValue: number | undefined): boolean {
-  return protocolValue === 20 || protocolValue === 22 || protocolValue === 34
+  return protocolValue === 30 || protocolValue === 32 || protocolValue === 33 || protocolValue === 42
 }
 
 function isNotificationLedServoFunction(functionValue: number | undefined): boolean {
@@ -1321,28 +1547,56 @@ function parseServoOutputChannelNumber(paramId: string): number | undefined {
 }
 
 function parseSerialPortNumber(paramId: string): number | undefined {
-  const match = paramId.match(/^SERIAL(\d+)_(PROTOCOL|BAUD)$/)
+  const match = paramId.match(/^SERIAL(\d+)_(PROTOCOL|BAUD|OPTIONS)$/)
   return match ? Number(match[1]) : undefined
 }
 
-function buildSerialPortViewModels(snapshot: ConfiguratorSnapshot): SerialPortViewModel[] {
+function describeBoardTrafficSummary(mapping: ConfiguratorSnapshot['hardware']['uartsFile']['mappings'][number] | undefined): string | undefined {
+  if (!mapping) {
+    return undefined
+  }
+
+  const notes: string[] = []
+  if (mapping.txActive) {
+    notes.push(`TX ${mapping.txBytes ?? 0}`)
+  }
+  if (mapping.rxActive) {
+    notes.push(`RX ${mapping.rxBytes ?? 0}`)
+  }
+  if ((mapping.txBufferDrops ?? 0) > 0 || (mapping.rxBufferDrops ?? 0) > 0) {
+    notes.push(`Drops ${(mapping.txBufferDrops ?? 0) + (mapping.rxBufferDrops ?? 0)}`)
+  }
+
+  return notes.length > 0 ? notes.join(' · ') : 'Idle in current `uarts.txt` snapshot.'
+}
+
+function buildSerialPortViewModels(snapshot: ConfiguratorSnapshot, boardCatalogEntry?: BoardCatalogEntry): SerialPortViewModel[] {
   const parameterById = new Map(snapshot.parameters.map((parameter) => [parameter.id, parameter]))
-  const portNumbers = [...new Set(
-    snapshot.parameters
-      .map((parameter) => {
-        const match = parameter.id.match(/^SERIAL(\d+)_(PROTOCOL|BAUD)$/)
-        return match ? Number(match[1]) : undefined
-      })
-      .filter((portNumber): portNumber is number => portNumber !== undefined)
-  )].sort((left, right) => left - right)
+  const hardwarePortBySerialPort = new Map(snapshot.hardware.uartsFile.mappings.map((mapping) => [mapping.serialPortNumber, mapping]))
+  const portNumbers = [
+    ...new Set(
+      snapshot.parameters
+        .map((parameter) => {
+          const match = parameter.id.match(/^SERIAL(\d+)_(PROTOCOL|BAUD|OPTIONS)$/)
+          return match ? Number(match[1]) : undefined
+        })
+        .filter((portNumber): portNumber is number => portNumber !== undefined)
+    )
+  ].sort((left, right) => left - right)
 
   return portNumbers.map((portNumber) => {
     const protocolParameter = parameterById.get(`SERIAL${portNumber}_PROTOCOL`)
     const baudParameter = parameterById.get(`SERIAL${portNumber}_BAUD`)
+    const optionsParameter = parameterById.get(`SERIAL${portNumber}_OPTIONS`)
     const flowControlParameter = portNumber > 0 ? parameterById.get(`BRD_SER${portNumber}_RTSCTS`) : undefined
     const protocolValue = protocolParameter?.value
     const baudValue = baudParameter?.value
+    const optionsValue = optionsParameter?.value
     const flowControlValue = flowControlParameter?.value
+    const hardwareMapping = hardwarePortBySerialPort.get(portNumber)
+    const boardConnectorLabel = hardwareMapping
+      ? boardCatalogEntry?.hardwarePortLabels[hardwareMapping.hardwarePort] ?? hardwareMapping.hardwarePort
+      : undefined
 
     const notes = portNumber === 0
       ? ['USB / console is shown for awareness. Leave it on MAVLink unless there is a specific board-level reason to change it.']
@@ -1350,15 +1604,22 @@ function buildSerialPortViewModels(snapshot: ConfiguratorSnapshot): SerialPortVi
 
     return {
       portNumber,
-      label: serialPortDisplayName(portNumber),
+      label: boardConnectorLabel ?? serialPortDisplayName(portNumber),
+      hardwarePort: hardwareMapping?.hardwarePort,
+      boardConnectorLabel,
+      boardTrafficSummary: describeBoardTrafficSummary(hardwareMapping),
       protocolParameter,
       baudParameter,
+      optionsParameter,
       flowControlParameter,
       protocolValue,
       baudValue,
+      actualBaudRate: arducopterSerialBaudRate(baudValue),
+      optionsValue,
       flowControlValue,
       protocolLabel: formatArducopterSerialProtocol(protocolValue),
       baudLabel: formatArducopterSerialBaud(baudValue),
+      optionsLabel: describeBitmaskSelections(optionsValue, ARDUCOPTER_SERIAL_OPTION_BIT_LABELS, 'No special options'),
       flowControlLabel: flowControlParameter ? formatArducopterSerialRtscts(flowControlValue) : undefined,
       usageSummary: describeSerialPortUsage(protocolValue),
       notes,
@@ -1725,15 +1986,59 @@ function downloadTextFile(filename: string, contents: string): void {
   URL.revokeObjectURL(url)
 }
 
+function downloadBinaryFile(filename: string, bytes: Uint8Array, mimeType = 'application/octet-stream'): void {
+  const blob = new Blob([bytes], { type: mimeType })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
+
+function formatByteCount(bytes: number | undefined): string {
+  if (bytes === undefined || !Number.isFinite(bytes)) {
+    return 'Unknown size'
+  }
+  if (bytes < 1024) {
+    return `${bytes} B`
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1).replace(/\.0$/, '')} KB`
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1).replace(/\.0$/, '')} MB`
+}
+
+function createIdleMavftpBrowserState(path = '@SYS'): MavftpBrowserState {
+  return {
+    status: 'idle',
+    path,
+    entries: []
+  }
+}
+
 export function App() {
   const metadataCatalog = useMemo(() => normalizeFirmwareMetadata(arducopterMetadata), [])
   const desktopBridge = getDesktopBridge()
-  const [transportMode, setTransportMode] = useState<TransportMode>('demo')
-  const [websocketUrl, setWebsocketUrl] = useState(DEFAULT_WEBSOCKET_URL)
+  const webSerialSupported = WebSerialTransport.isSupported()
+  const [transportMode, setTransportMode] = useState<TransportMode>(() => readStoredTransportMode(webSerialSupported))
+  const [websocketUrl, setWebsocketUrl] = useState(readStoredWebsocketUrl)
+  const [selectedSerialPort, setSelectedSerialPort] = useState<WebSerialPortLike | undefined>(undefined)
+  const [rememberedSerialPortInfo, setRememberedSerialPortInfo] = useState<WebSerialPortInfo | undefined>(readStoredSerialPortInfo)
+  const [autoReconnectAvailable, setAutoReconnectAvailable] = useState(false)
   const [sessionProfile, setSessionProfile] = useState<SessionProfile>('full-power')
   const [productMode, setProductMode] = useState<ProductMode>(readStoredProductMode)
   const [activeViewId, setActiveViewId] = useState<AppViewId>('setup')
-  const runtime = useMemo(() => createRuntime(transportMode, websocketUrl), [transportMode, websocketUrl])
+  const runtime = useMemo(
+    () =>
+      createRuntime(transportMode, websocketUrl, selectedSerialPort, (port) => {
+        setSelectedSerialPort(port)
+        const portInfo = getWebSerialPortInfo(port)
+        setRememberedSerialPortInfo(portInfo)
+        persistSerialPortInfo(portInfo)
+      }),
+    [selectedSerialPort, transportMode, websocketUrl]
+  )
   const initialSnapshotStorage = useMemo<SnapshotStorageLoadResult>(() => loadStoredSnapshots(), [])
   const [snapshot, setSnapshot] = useState<ConfiguratorSnapshot>(runtime.getSnapshot())
   const [savedSnapshots, setSavedSnapshots] = useState<SavedParameterSnapshot[]>(initialSnapshotStorage.snapshots)
@@ -1749,6 +2054,8 @@ export function App() {
   const [editedValues, setEditedValues] = useState<Record<string, string>>({})
   const [selectedParameterId, setSelectedParameterId] = useState<string>()
   const [parameterNotice, setParameterNotice] = useState<ParameterNotice>()
+  const [mavftpBrowser, setMavftpBrowser] = useState<MavftpBrowserState>(createIdleMavftpBrowserState)
+  const [mavftpPathInput, setMavftpPathInput] = useState('@SYS')
   const [snapshotNotice, setSnapshotNotice] = useState<ParameterNotice>()
   const [snapshotStorageNotice, setSnapshotStorageNotice] = useState<ParameterNotice | undefined>(() =>
     initialSnapshotStorage.warning
@@ -1776,17 +2083,22 @@ export function App() {
   const [testAreaAcknowledged, setTestAreaAcknowledged] = useState(false)
   const [showAllOutputAssignments, setShowAllOutputAssignments] = useState(false)
   const [showAllSerialPorts, setShowAllSerialPorts] = useState(false)
+  const [customSerialBaudInputs, setCustomSerialBaudInputs] = useState<Record<string, string>>({})
+  const [expandedSerialOptionsPortNumber, setExpandedSerialOptionsPortNumber] = useState<number>()
   const [snapshotRestoreAcknowledged, setSnapshotRestoreAcknowledged] = useState(false)
   const [presetApplyAcknowledged, setPresetApplyAcknowledged] = useState(false)
   const [selectedSetupSectionId, setSelectedSetupSectionId] = useState<string>()
   const [setupMode, setSetupMode] = useState<SetupMode>('overview')
   const [pendingSetupWizardFocusId, setPendingSetupWizardFocusId] = useState<string>()
   const [setupConfirmations, setSetupConfirmations] = useState<Record<string, SetupConfirmationRecord>>({})
+  const [selectedBoardMedia, setSelectedBoardMedia] = useState<BoardMediaAsset>()
   const parameterBackupInputRef = useRef<HTMLInputElement>(null)
+  const mavftpUploadInputRef = useRef<HTMLInputElement>(null)
   const snapshotImportInputRef = useRef<HTMLInputElement>(null)
   const previousModeSwitchRef = useRef<{ slot?: number; pwm?: number }>({})
-  const webSerialSupported = WebSerialTransport.isSupported()
+  const serialAutoReconnectAttemptedRef = useRef(false)
   const parameterSyncWidth = snapshot.parameterStats.progress === null ? 0 : snapshot.parameterStats.progress * 100
+  const boardCatalogEntry = useMemo(() => findBoardCatalogEntry(snapshot.hardware.board?.boardType), [snapshot.hardware.board?.boardType])
   const rcChannelDisplays = buildRcChannelDisplays(snapshot)
   const airframe = deriveArducopterAirframe(snapshot)
   const modeAssignments = deriveModeAssignments(snapshot)
@@ -1821,6 +2133,7 @@ export function App() {
   const batteryCriticalVoltage = readParameterValue(snapshot, 'BATT_CRT_VOLT')
   const batteryCriticalMah = readRoundedParameter(snapshot, 'BATT_CRT_MAH')
   const batteryCriticalFailsafe = readRoundedParameter(snapshot, 'BATT_FS_CRT_ACT')
+  const compassSetupAvailability = deriveCompassSetupAvailability(snapshot)
   const boardOrientation = readRoundedParameter(snapshot, 'AHRS_ORIENTATION')
   const configuredModeChannel = readRoundedParameter(snapshot, 'FLTMODE_CH') ?? readRoundedParameter(snapshot, 'MODE_CH')
   const rssiType = readRoundedParameter(snapshot, 'RSSI_TYPE')
@@ -1885,6 +2198,89 @@ export function App() {
       })
     }
   }, [runtime])
+
+  useEffect(() => {
+    persistTransportMode(transportMode)
+  }, [transportMode])
+
+  useEffect(() => {
+    persistWebsocketUrl(websocketUrl)
+  }, [websocketUrl])
+
+  useEffect(() => {
+    let cancelled = false
+
+    if (!webSerialSupported) {
+      setSelectedSerialPort(undefined)
+      setAutoReconnectAvailable(false)
+      return () => {
+        cancelled = true
+      }
+    }
+
+    void getAvailableWebSerialPorts()
+      .then((ports) => {
+        if (cancelled) {
+          return
+        }
+
+        const matchedPort = ports.find((port) => sameSerialPortInfo(getWebSerialPortInfo(port), rememberedSerialPortInfo))
+        setSelectedSerialPort(matchedPort ?? ports[0])
+        setAutoReconnectAvailable(matchedPort !== undefined)
+      })
+      .catch(() => {
+        if (cancelled) {
+          return
+        }
+
+        setSelectedSerialPort(undefined)
+        setAutoReconnectAvailable(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [rememberedSerialPortInfo, webSerialSupported])
+
+  useEffect(() => {
+    if (
+      transportMode !== 'web-serial' ||
+      !autoReconnectAvailable ||
+      !selectedSerialPort ||
+      serialAutoReconnectAttemptedRef.current ||
+      busyAction !== undefined ||
+      snapshot.connection.kind !== 'idle'
+    ) {
+      return
+    }
+
+    serialAutoReconnectAttemptedRef.current = true
+    let cancelled = false
+
+    void (async () => {
+      setBusyAction('connect:auto-serial')
+      try {
+        setSessionNotice(undefined)
+        await runtime.connect()
+        await runtime.requestParameterList()
+      } catch (error) {
+        if (!cancelled) {
+          setSessionNotice({
+            tone: 'warning',
+            text: `Auto-reconnect to the remembered serial port failed. ${describeConnectFailure('web-serial', runtime.getSnapshot().connection, error)}`
+          })
+        }
+      } finally {
+        if (!cancelled) {
+          setBusyAction(undefined)
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [autoReconnectAvailable, busyAction, runtime, selectedSerialPort, snapshot.connection.kind, transportMode])
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -2204,6 +2600,30 @@ export function App() {
     () => portsDraftEntries.filter((entry) => entry.status === 'invalid'),
     [portsDraftEntries]
   )
+  const osdDraftEntries = useMemo(
+    () => parameterDraftEntries.filter((entry) => isOsdReviewParamId(entry.id)),
+    [parameterDraftEntries]
+  )
+  const osdStagedDrafts = useMemo(
+    () => osdDraftEntries.filter((entry) => entry.status === 'staged'),
+    [osdDraftEntries]
+  )
+  const osdInvalidDrafts = useMemo(
+    () => osdDraftEntries.filter((entry) => entry.status === 'invalid'),
+    [osdDraftEntries]
+  )
+  const vtxDraftEntries = useMemo(
+    () => parameterDraftEntries.filter((entry) => isVtxReviewParamId(entry.id)),
+    [parameterDraftEntries]
+  )
+  const vtxStagedDrafts = useMemo(
+    () => vtxDraftEntries.filter((entry) => entry.status === 'staged'),
+    [vtxDraftEntries]
+  )
+  const vtxInvalidDrafts = useMemo(
+    () => vtxDraftEntries.filter((entry) => entry.status === 'invalid'),
+    [vtxDraftEntries]
+  )
   const powerDraftEntries = useMemo(
     () => parameterDraftEntries.filter((entry) => isPowerReviewParamId(entry.id)),
     [parameterDraftEntries]
@@ -2307,7 +2727,7 @@ export function App() {
         .filter((parameter): parameter is ParameterState => parameter !== undefined),
     [snapshot.parameters]
   )
-  const serialPortViewModels = useMemo(() => buildSerialPortViewModels(snapshot), [snapshot])
+  const serialPortViewModels = useMemo(() => buildSerialPortViewModels(snapshot, boardCatalogEntry), [snapshot, boardCatalogEntry])
   const prioritizedSerialPortNumbers = useMemo(() => {
     const portNumbers = new Set<number>()
 
@@ -2339,32 +2759,61 @@ export function App() {
     return visiblePorts.length > 0 ? visiblePorts : serialPortViewModels.slice(0, Math.min(serialPortViewModels.length, 4))
   }, [prioritizedSerialPortNumbers, serialPortViewModels, showAllSerialPorts])
   const hiddenSerialPortCount = serialPortViewModels.length - visibleSerialPortViewModels.length
+  const boardReferenceLinks = boardCatalogEntry?.referenceLinks ?? []
+  const boardMediaAssets = boardCatalogEntry?.mediaAssets ?? []
+  const uartsMappedPortCount = snapshot.hardware.uartsFile.mappings.length
+  const uartsStatusTone: StatusTone =
+    snapshot.hardware.uartsFile.status === 'ready'
+      ? 'success'
+      : snapshot.hardware.uartsFile.status === 'loading'
+        ? 'warning'
+        : snapshot.hardware.uartsFile.status === 'unsupported'
+          ? 'neutral'
+          : snapshot.hardware.uartsFile.status === 'missing' || snapshot.hardware.uartsFile.status === 'error'
+            ? 'warning'
+            : 'neutral'
+  const mavftpParentPath = useMemo(() => parentMavftpPath(mavftpBrowser.path), [mavftpBrowser.path])
+  const mavftpBusy = busyAction !== undefined && busyAction.startsWith('mavftp:')
+  const rememberedSerialPortLabel = describeRememberedSerialPort(rememberedSerialPortInfo)
   const gpsPeripheralViewModels = useMemo(() => buildGpsPeripheralViewModels(snapshot), [snapshot])
-  const portsPeripheralParameters = useMemo(
+  const gpsParameters = useMemo(
     () =>
-      PORTS_PERIPHERAL_PARAM_IDS.map((paramId) => snapshot.parameters.find((parameter) => parameter.id === paramId)).filter(
+      GPS_PARAM_IDS.map((paramId) => snapshot.parameters.find((parameter) => parameter.id === paramId)).filter(
         (parameter): parameter is ParameterState => parameter !== undefined
       ),
     [snapshot.parameters]
   )
-  const portsPeripheralParameterById = useMemo(
-    () => new Map(portsPeripheralParameters.map((parameter) => [parameter.id, parameter])),
-    [portsPeripheralParameters]
+  const gpsParameterById = useMemo(() => new Map(gpsParameters.map((parameter) => [parameter.id, parameter])), [gpsParameters])
+  const gpsAutoConfigParameter = gpsParameterById.get('GPS_AUTO_CONFIG')
+  const gpsAutoSwitchParameter = gpsParameterById.get('GPS_AUTO_SWITCH')
+  const gpsPrimaryParameter = gpsParameterById.get('GPS_PRIMARY')
+  const gpsRateParameter = gpsParameterById.get('GPS_RATE_MS')
+  const osdParameters = useMemo(
+    () =>
+      OSD_PARAM_IDS.map((paramId) => snapshot.parameters.find((parameter) => parameter.id === paramId)).filter(
+        (parameter): parameter is ParameterState => parameter !== undefined
+      ),
+    [snapshot.parameters]
   )
-  const gpsAutoConfigParameter = portsPeripheralParameterById.get('GPS_AUTO_CONFIG')
-  const gpsAutoSwitchParameter = portsPeripheralParameterById.get('GPS_AUTO_SWITCH')
-  const gpsPrimaryParameter = portsPeripheralParameterById.get('GPS_PRIMARY')
-  const gpsRateParameter = portsPeripheralParameterById.get('GPS_RATE_MS')
-  const osdTypeParameter = portsPeripheralParameterById.get('OSD_TYPE')
-  const osdChannelParameter = portsPeripheralParameterById.get('OSD_CHAN')
-  const osdSwitchMethodParameter = portsPeripheralParameterById.get('OSD_SW_METHOD')
-  const mspOptionsParameter = portsPeripheralParameterById.get('MSP_OPTIONS')
-  const mspOsdCellCountParameter = portsPeripheralParameterById.get('MSP_OSD_NCELLS')
-  const vtxEnableParameter = portsPeripheralParameterById.get('VTX_ENABLE')
-  const vtxFrequencyParameter = portsPeripheralParameterById.get('VTX_FREQ')
-  const vtxPowerParameter = portsPeripheralParameterById.get('VTX_POWER')
-  const vtxMaxPowerParameter = portsPeripheralParameterById.get('VTX_MAX_POWER')
-  const vtxOptionsParameter = portsPeripheralParameterById.get('VTX_OPTIONS')
+  const osdParameterById = useMemo(() => new Map(osdParameters.map((parameter) => [parameter.id, parameter])), [osdParameters])
+  const osdTypeParameter = osdParameterById.get('OSD_TYPE')
+  const osdChannelParameter = osdParameterById.get('OSD_CHAN')
+  const osdSwitchMethodParameter = osdParameterById.get('OSD_SW_METHOD')
+  const mspOptionsParameter = osdParameterById.get('MSP_OPTIONS')
+  const mspOsdCellCountParameter = osdParameterById.get('MSP_OSD_NCELLS')
+  const vtxParameters = useMemo(
+    () =>
+      VTX_PARAM_IDS.map((paramId) => snapshot.parameters.find((parameter) => parameter.id === paramId)).filter(
+        (parameter): parameter is ParameterState => parameter !== undefined
+      ),
+    [snapshot.parameters]
+  )
+  const vtxParameterById = useMemo(() => new Map(vtxParameters.map((parameter) => [parameter.id, parameter])), [vtxParameters])
+  const vtxEnableParameter = vtxParameterById.get('VTX_ENABLE')
+  const vtxFrequencyParameter = vtxParameterById.get('VTX_FREQ')
+  const vtxPowerParameter = vtxParameterById.get('VTX_POWER')
+  const vtxMaxPowerParameter = vtxParameterById.get('VTX_MAX_POWER')
+  const vtxOptionsParameter = vtxParameterById.get('VTX_OPTIONS')
   const receiverSupportParameters = useMemo(
     () =>
       RECEIVER_SUPPORT_PARAM_IDS.map((paramId) => snapshot.parameters.find((parameter) => parameter.id === paramId)).filter(
@@ -2894,7 +3343,8 @@ export function App() {
         stagedDrafts.map((entry) => ({
           paramId: entry.id,
           paramValue: entry.nextValue as number
-        }))
+        })),
+        UI_PARAMETER_WRITE_OPTIONS
       )
       appliedParamIds.push(...result.applied.map((entry) => entry.paramId))
       setParameterNotice({
@@ -2940,7 +3390,7 @@ export function App() {
 
     setBusyAction(`param:${draft.id}`)
     try {
-      const result = await runtime.setParameter(draft.id, draft.nextValue)
+      const result = await runtime.setParameter(draft.id, draft.nextValue, UI_PARAMETER_WRITE_OPTIONS)
       handleDiscardParameterDraft(draft.id)
       const confirmedParameter = snapshot.parameters.find((parameter) => parameter.id === result.paramId)
       const requiresReboot = Boolean(draft.definition?.rebootRequired)
@@ -2981,7 +3431,8 @@ export function App() {
           .map((draft) => ({
             paramId: draft.id,
             paramValue: draft.nextValue as number
-          }))
+          })),
+        UI_PARAMETER_WRITE_OPTIONS
       )
       appliedParamIds.push(...result.applied.map((entry) => entry.paramId))
       setParameterNotice({
@@ -3058,6 +3509,134 @@ export function App() {
       })
     } finally {
       event.target.value = ''
+    }
+  }
+
+  async function loadMavftpDirectory(path: string, options: { busyKey?: string; noticeOnSuccess?: boolean } = {}): Promise<void> {
+    const normalizedPath = normalizeMavftpPath(path)
+    setBusyAction(options.busyKey ?? `mavftp:list:${normalizedPath}`)
+    setMavftpBrowser((current) => ({
+      ...current,
+      status: 'loading',
+      path: normalizedPath,
+      error: undefined
+    }))
+
+    try {
+      const entries = await runtime.listRemoteDirectory(normalizedPath)
+      setMavftpBrowser({
+        status: 'ready',
+        path: normalizedPath,
+        entries,
+        refreshedAtMs: Date.now()
+      })
+      if (options.noticeOnSuccess) {
+        setParameterNotice({
+          tone: 'success',
+          text: `Loaded ${entries.length} item(s) from ${normalizedPath}.`
+        })
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load the remote directory.'
+      setMavftpBrowser({
+        status: 'error',
+        path: normalizedPath,
+        entries: [],
+        error: message
+      })
+      setParameterNotice({
+        tone: 'danger',
+        text: message
+      })
+    } finally {
+      setBusyAction(undefined)
+    }
+  }
+
+  function handleOpenMavftpUpload(): void {
+    mavftpUploadInputRef.current?.click()
+  }
+
+  async function handleImportMavftpFile(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+    const file = event.target.files?.[0]
+    if (!file) {
+      return
+    }
+
+    const targetPath = joinMavftpPath(mavftpBrowser.path, file.name)
+    setBusyAction(`mavftp:upload:${targetPath}`)
+
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer())
+      await runtime.uploadRemoteFile(targetPath, bytes)
+      const entries = await runtime.listRemoteDirectory(mavftpBrowser.path)
+      setMavftpBrowser({
+        status: 'ready',
+        path: mavftpBrowser.path,
+        entries,
+        refreshedAtMs: Date.now()
+      })
+      setParameterNotice({
+        tone: 'success',
+        text: `Uploaded ${file.name} to ${mavftpBrowser.path}.`
+      })
+    } catch (error) {
+      setParameterNotice({
+        tone: 'danger',
+        text: error instanceof Error ? error.message : 'File upload failed.'
+      })
+    } finally {
+      event.target.value = ''
+      setBusyAction(undefined)
+    }
+  }
+
+  async function handleDownloadMavftpEntry(entry: MavftpDirectoryEntry): Promise<void> {
+    setBusyAction(`mavftp:download:${entry.path}`)
+
+    try {
+      const bytes = await runtime.downloadRemoteFile(entry.path)
+      downloadBinaryFile(entry.name, bytes)
+      setParameterNotice({
+        tone: 'success',
+        text: `Downloaded ${entry.path}.`
+      })
+    } catch (error) {
+      setParameterNotice({
+        tone: 'danger',
+        text: error instanceof Error ? error.message : 'File download failed.'
+      })
+    } finally {
+      setBusyAction(undefined)
+    }
+  }
+
+  async function handleDeleteMavftpEntry(entry: MavftpDirectoryEntry): Promise<void> {
+    if (typeof window !== 'undefined' && !window.confirm(`Delete ${entry.path}?`)) {
+      return
+    }
+
+    setBusyAction(`mavftp:delete:${entry.path}`)
+    try {
+      await runtime.deleteRemotePath(entry.path, entry.kind)
+      const entries = await runtime.listRemoteDirectory(mavftpBrowser.path)
+      setMavftpBrowser({
+        status: 'ready',
+        path: mavftpBrowser.path,
+        entries,
+        refreshedAtMs: Date.now()
+      })
+      setParameterNotice({
+        tone: 'success',
+        text: `Deleted ${entry.path}.`
+      })
+    } catch (error) {
+      setParameterNotice({
+        tone: 'danger',
+        text: error instanceof Error ? error.message : 'Delete failed.'
+      })
+    } finally {
+      setBusyAction(undefined)
     }
   }
 
@@ -3435,7 +4014,8 @@ export function App() {
           .map((entry) => ({
             paramId: entry.id,
             paramValue: entry.nextValue as number
-          }))
+          })),
+        UI_PARAMETER_WRITE_OPTIONS
       )
       setPresetNotice({
         tone: 'success',
@@ -4063,7 +4643,10 @@ export function App() {
       }),
       compass: JSON.stringify({
         status: snapshot.guidedActions['calibrate-compass'].status,
-        completedAtMs: snapshot.guidedActions['calibrate-compass'].completedAtMs
+        completedAtMs: snapshot.guidedActions['calibrate-compass'].completedAtMs,
+        gpsConfigured: compassSetupAvailability.gpsConfigured,
+        enabledCompassCount: compassSetupAvailability.enabledCompassCount,
+        canSkipCalibration: compassSetupAvailability.canSkipCalibration
       }),
       radio: JSON.stringify({
         rcMap: currentRcAxisChannelMap,
@@ -4106,6 +4689,9 @@ export function App() {
       batteryCapacity,
       batteryFailsafe,
       batteryMonitor,
+      compassSetupAvailability.canSkipCalibration,
+      compassSetupAvailability.enabledCompassCount,
+      compassSetupAvailability.gpsConfigured,
       currentRcAxisChannelMap,
       escSetup.calibrationPath,
       escSetup.notes,
@@ -4137,7 +4723,7 @@ export function App() {
 
   const escReviewConfirmation = getSetupConfirmationRecord('esc-range')
 
-  function confirmSetupSection(sectionId: string): void {
+  function confirmSetupSection(sectionId: string, outcome: SetupSectionOutcome = 'complete'): void {
     const signature = setupConfirmationSignatures[sectionId]
     if (signature === undefined) {
       return
@@ -4147,7 +4733,8 @@ export function App() {
       ...current,
       [sectionId]: {
         signature,
-        confirmedAtMs: Date.now()
+        confirmedAtMs: Date.now(),
+        outcome
       }
     }))
   }
@@ -4174,7 +4761,7 @@ export function App() {
         ? 'Pending sidebar reboot before later setup steps unlock'
         : 'Pending sidebar refresh before later setup steps unlock',
       tone: parameterFollowUp.requiresReboot ? 'warning' : 'neutral',
-      text: `${parameterFollowUp.text} Use the sidebar session controls to continue this setup session.`,
+      text: `${parameterFollowUp.text} Use the header session strip to continue this setup session.`,
       actions: []
     }
   }, [parameterFollowUp])
@@ -4196,6 +4783,7 @@ export function App() {
       let detail = section.notes[0] ?? `Use the ${panel.panelLabel} panel to continue this part of setup.`
       let evidence: string[] = []
       let criteria: SetupFlowCriterion[] = []
+      let confirmationOutcome: SetupSectionOutcome | undefined
 
       switch (section.id) {
         case 'link':
@@ -4224,7 +4812,7 @@ export function App() {
                 : formatParameterSync(snapshot)
           detail = parameterFollowUp?.text
             ?? (snapshot.connection.kind !== 'connected'
-              ? 'Use the sidebar session controls first, then wait for heartbeat and the initial parameter sync.'
+              ? 'Use the header session strip first, then wait for heartbeat and the initial parameter sync.'
               : 'Re-run parameter sync whenever you need a fresh snapshot before continuing guided setup.')
           evidence = [
             `Link: ${snapshot.connection.kind}`,
@@ -4415,78 +5003,284 @@ export function App() {
           break
         case 'accelerometer': {
           const actionState = snapshot.guidedActions['calibrate-accelerometer']
-          criteria = [
-            {
-              label: 'Accelerometer calibration completed successfully',
-              met: actionState.status === 'succeeded' || section.status === 'complete'
-            },
-            {
-              label: 'Operator confirmed the posture prompts were completed cleanly',
-              met: accelerometerConfirmation !== undefined
+          confirmationOutcome = accelerometerConfirmation?.outcome
+          if (accelerometerConfirmation?.outcome === 'already-done') {
+            criteria = [
+              {
+                label: 'Operator marked accelerometer calibration as already completed externally',
+                met: true
+              }
+            ]
+            summary = 'Accelerometer calibration marked as already completed outside the configurator.'
+            detail = 'This step was resolved from known-good external setup rather than rerun here. Re-run the calibration in ArduConfigurator any time you want to reconfirm it in-app.'
+            evidence = [
+              `Outcome: ${formatSetupOutcome(accelerometerConfirmation.outcome)}`,
+              `Review: confirmed at ${formatConfirmationTime(accelerometerConfirmation.confirmedAtMs)}`,
+              ...section.notes
+            ].slice(0, 4)
+            actions.unshift({
+              kind: 'clear-confirmation',
+              label: 'Clear External Calibration Confirmation',
+              tone: 'primary',
+              sectionId: 'accelerometer'
+            })
+            actions.splice(1, 0, {
+              kind: 'guided',
+              label: actionState.status === 'idle' ? 'Run Calibration Instead' : guidedActionButtonLabel('calibrate-accelerometer', snapshot, busyAction),
+              tone: 'secondary',
+              actionId: 'calibrate-accelerometer',
+              disabled: busyAction !== undefined || !canRunGuidedAction(snapshot, 'calibrate-accelerometer')
+            })
+          } else {
+            criteria = [
+              {
+                label: 'Accelerometer calibration completed successfully',
+                met: actionState.status === 'succeeded' || section.status === 'complete'
+              },
+              {
+                label: 'Operator confirmed the posture prompts were completed cleanly',
+                met: accelerometerConfirmation !== undefined
+              }
+            ]
+            summary = actionState.summary
+            detail =
+              actionState.status === 'succeeded'
+                ? 'Accelerometer calibration completed successfully in the shared runtime. Confirm that all posture prompts were completed cleanly before proceeding.'
+                : actionState.instructions[0] ?? 'Run the accelerometer calibration and follow each posture prompt in order.'
+            evidence = [
+              ...actionState.statusTexts.slice(-2),
+              ...section.notes,
+              `Review: ${accelerometerConfirmation ? `confirmed at ${formatConfirmationTime(accelerometerConfirmation.confirmedAtMs)}` : 'pending operator confirmation'}`
+            ].slice(0, 4)
+            actions.unshift({
+              kind: 'guided',
+              label: guidedActionButtonLabel('calibrate-accelerometer', snapshot, busyAction),
+              tone: 'primary',
+              actionId: 'calibrate-accelerometer',
+              disabled: busyAction !== undefined || !canRunGuidedAction(snapshot, 'calibrate-accelerometer')
+            })
+            actions.splice(1, 0, {
+              kind: accelerometerConfirmation ? 'clear-confirmation' : 'confirm-step',
+              label: accelerometerConfirmation ? 'Clear Calibration Confirmation' : 'Confirm Calibration Complete',
+              tone: 'secondary',
+              sectionId: 'accelerometer',
+              confirmationOutcome: 'complete',
+              disabled: actionState.status !== 'succeeded'
+            })
+            if (!accelerometerConfirmation) {
+              actions.push({
+                kind: 'confirm-step',
+                label: 'Already Calibrated — Continue',
+                tone: 'secondary',
+                sectionId: 'accelerometer',
+                confirmationOutcome: 'already-done',
+                disabled: busyAction !== undefined
+              })
             }
-          ]
-          summary = actionState.summary
-          detail =
-            actionState.status === 'succeeded'
-              ? 'Accelerometer calibration completed successfully in the shared runtime. Confirm that all posture prompts were completed cleanly before proceeding.'
-              : actionState.instructions[0] ?? 'Run the accelerometer calibration and follow each posture prompt in order.'
-          evidence = [
-            ...actionState.statusTexts.slice(-2),
-            ...section.notes,
-            `Review: ${accelerometerConfirmation ? `confirmed at ${formatConfirmationTime(accelerometerConfirmation.confirmedAtMs)}` : 'pending operator confirmation'}`
-          ].slice(0, 4)
-          actions.unshift({
-            kind: 'guided',
-            label: guidedActionButtonLabel('calibrate-accelerometer', snapshot, busyAction),
-            tone: 'primary',
-            actionId: 'calibrate-accelerometer',
-            disabled: busyAction !== undefined || !canRunGuidedAction(snapshot, 'calibrate-accelerometer')
-          })
-          actions.splice(1, 0, {
-            kind: accelerometerConfirmation ? 'clear-confirmation' : 'confirm-step',
-            label: accelerometerConfirmation ? 'Clear Calibration Confirmation' : 'Confirm Calibration Complete',
-            tone: 'secondary',
-            sectionId: 'accelerometer',
-            disabled: actionState.status !== 'succeeded'
-          })
+          }
           break
         }
         case 'compass': {
           const actionState = snapshot.guidedActions['calibrate-compass']
-          criteria = [
-            {
-              label: 'Compass calibration completed successfully',
-              met: actionState.status === 'succeeded' || section.status === 'complete'
-            },
-            {
-              label: 'Operator confirmed the full rotation workflow completed cleanly',
-              met: compassConfirmation !== undefined
+          confirmationOutcome = compassConfirmation?.outcome
+          if (compassConfirmation?.outcome === 'not-applicable') {
+            criteria = [
+              {
+                label: 'GPS is configured on this build',
+                met: compassSetupAvailability.gpsConfigured
+              },
+              {
+                label: 'No enabled compass was detected on COMPASS_USE settings',
+                met: compassSetupAvailability.enabledCompassCount === 0
+              },
+              {
+                label: 'Operator confirmed this aircraft has no compass and can skip this step',
+                met: true
+              }
+            ]
+            summary = 'Compass step skipped because this aircraft is configured without an enabled compass.'
+            detail = 'The guided flow will not block on compass calibration for this build. If compass hardware is added later, enable it and return to this step.'
+            evidence = [
+              `Outcome: ${formatSetupOutcome(compassConfirmation.outcome)}`,
+              `GPS: ${compassSetupAvailability.gpsConfigured ? 'configured' : 'not detected'}`,
+              `Enabled compasses: ${compassSetupAvailability.enabledCompassCount}`,
+              `Review: confirmed at ${formatConfirmationTime(compassConfirmation.confirmedAtMs)}`
+            ].slice(0, 4)
+            actions.unshift({
+              kind: 'clear-confirmation',
+              label: 'Clear No-Compass Confirmation',
+              tone: 'primary',
+              sectionId: 'compass'
+            })
+            actions.splice(1, 0, {
+              kind: 'guided',
+              label: actionState.status === 'idle' ? 'Run Compass Calibration Instead' : guidedActionButtonLabel('calibrate-compass', snapshot, busyAction),
+              tone: 'secondary',
+              actionId: 'calibrate-compass',
+              disabled: busyAction !== undefined || !canRunGuidedAction(snapshot, 'calibrate-compass')
+            })
+          } else if (compassConfirmation?.outcome === 'already-done') {
+            criteria = [
+              {
+                label: 'Operator marked compass calibration as already completed externally',
+                met: true
+              }
+            ]
+            summary = 'Compass calibration marked as already completed outside the configurator.'
+            detail = 'This step was resolved from known-good external setup rather than rerun here. Re-run compass calibration here any time you want to reconfirm it in-app.'
+            evidence = [
+              `Outcome: ${formatSetupOutcome(compassConfirmation.outcome)}`,
+              `Review: confirmed at ${formatConfirmationTime(compassConfirmation.confirmedAtMs)}`,
+              ...section.notes
+            ].slice(0, 4)
+            actions.unshift({
+              kind: 'clear-confirmation',
+              label: 'Clear External Compass Confirmation',
+              tone: 'primary',
+              sectionId: 'compass'
+            })
+            actions.splice(1, 0, {
+              kind: 'guided',
+              label: actionState.status === 'idle' ? 'Run Compass Calibration Instead' : guidedActionButtonLabel('calibrate-compass', snapshot, busyAction),
+              tone: 'secondary',
+              actionId: 'calibrate-compass',
+              disabled: busyAction !== undefined || !canRunGuidedAction(snapshot, 'calibrate-compass')
+            })
+          } else if (compassConfirmation?.outcome === 'deferred') {
+            criteria = [
+              {
+                label: 'Compass calibration is intentionally deferred for a later full-power session',
+                met: true
+              }
+            ]
+            summary = 'Compass calibration deferred for later.'
+            detail = 'This step will not block the guided flow right now, but the deferred compass calibration should be completed before relying on compass-guided flight modes.'
+            evidence = [
+              `Outcome: ${formatSetupOutcome(compassConfirmation.outcome)}`,
+              `Review: confirmed at ${formatConfirmationTime(compassConfirmation.confirmedAtMs)}`,
+              ...section.notes
+            ].slice(0, 4)
+            actions.unshift({
+              kind: 'clear-confirmation',
+              label: 'Clear Deferred Compass Review',
+              tone: 'primary',
+              sectionId: 'compass'
+            })
+            actions.splice(1, 0, {
+              kind: 'guided',
+              label: actionState.status === 'idle' ? 'Run Compass Calibration Instead' : guidedActionButtonLabel('calibrate-compass', snapshot, busyAction),
+              tone: 'secondary',
+              actionId: 'calibrate-compass',
+              disabled: busyAction !== undefined || !canRunGuidedAction(snapshot, 'calibrate-compass')
+            })
+          } else if (compassSetupAvailability.canSkipCalibration && actionState.status !== 'succeeded') {
+            criteria = [
+              {
+                label: 'GPS is configured on this build',
+                met: compassSetupAvailability.gpsConfigured
+              },
+              {
+                label: 'No enabled compass was detected on COMPASS_USE settings',
+                met: compassSetupAvailability.enabledCompassCount === 0
+              },
+              {
+                label: 'Operator confirmed this aircraft has no compass and can skip this step',
+                met: compassConfirmation !== undefined
+              }
+            ]
+            summary = compassConfirmation
+              ? 'Compass step skipped for a GPS build with no enabled compass.'
+              : 'GPS is configured, but no enabled compass was detected on this build.'
+            detail = compassConfirmation
+              ? 'The guided flow will skip compass calibration for this aircraft unless compass hardware is later added or enabled.'
+              : 'If this aircraft truly has no compass, confirm that here and move on. If a compass is fitted, enable it and run calibration instead.'
+            evidence = [
+              `GPS: ${compassSetupAvailability.gpsConfigured ? 'configured' : 'not detected'}`,
+              `Enabled compasses: ${compassSetupAvailability.enabledCompassCount}`,
+              ...section.notes,
+              `Review: ${compassConfirmation ? `confirmed at ${formatConfirmationTime(compassConfirmation.confirmedAtMs)}` : 'pending no-compass confirmation'}`
+            ].slice(0, 4)
+            actions.unshift({
+              kind: compassConfirmation ? 'clear-confirmation' : 'confirm-step',
+              label: compassConfirmation ? 'Clear No-Compass Confirmation' : 'No Compass On This Drone — Skip Forward',
+              tone: 'primary',
+              sectionId: 'compass',
+              confirmationOutcome: 'not-applicable',
+              disabled: busyAction !== undefined
+            })
+            actions.splice(1, 0, {
+              kind: 'guided',
+              label:
+                actionState.status === 'idle'
+                  ? 'Run Compass Calibration Instead'
+                  : guidedActionButtonLabel('calibrate-compass', snapshot, busyAction),
+              tone: 'secondary',
+              actionId: 'calibrate-compass',
+              disabled: busyAction !== undefined || !canRunGuidedAction(snapshot, 'calibrate-compass')
+            })
+            actions.push({
+              kind: 'confirm-step',
+              label: 'Already Calibrated — Continue',
+              tone: 'secondary',
+              sectionId: 'compass',
+              confirmationOutcome: 'already-done',
+              disabled: busyAction !== undefined
+            })
+          } else {
+            criteria = [
+              {
+                label: 'Compass calibration completed successfully',
+                met: actionState.status === 'succeeded' || section.status === 'complete'
+              },
+              {
+                label: 'Operator confirmed the full rotation workflow completed cleanly',
+                met: compassConfirmation !== undefined
+              }
+            ]
+            summary = actionState.summary
+            detail =
+              actionState.status === 'succeeded'
+                ? 'Compass calibration completed successfully in the shared runtime. Confirm that the full rotation workflow completed cleanly before proceeding.'
+                : actionState.instructions[0] ?? 'Run compass calibration when the vehicle is fully powered and magnetometer hardware is available.'
+            evidence = [
+              ...actionState.statusTexts.slice(-2),
+              ...section.notes,
+              `Review: ${compassConfirmation ? `confirmed at ${formatConfirmationTime(compassConfirmation.confirmedAtMs)}` : 'pending operator confirmation'}`
+            ].slice(0, 4)
+            actions.unshift({
+              kind: 'guided',
+              label: guidedActionButtonLabel('calibrate-compass', snapshot, busyAction),
+              tone: 'primary',
+              actionId: 'calibrate-compass',
+              disabled: busyAction !== undefined || !canRunGuidedAction(snapshot, 'calibrate-compass')
+            })
+            actions.splice(1, 0, {
+              kind: compassConfirmation ? 'clear-confirmation' : 'confirm-step',
+              label: compassConfirmation ? 'Clear Calibration Confirmation' : 'Confirm Calibration Complete',
+              tone: 'secondary',
+              sectionId: 'compass',
+              confirmationOutcome: 'complete',
+              disabled: actionState.status !== 'succeeded'
+            })
+            if (!compassConfirmation) {
+              actions.push({
+                kind: 'confirm-step',
+                label: 'Already Calibrated — Continue',
+                tone: 'secondary',
+                sectionId: 'compass',
+                confirmationOutcome: 'already-done',
+                disabled: busyAction !== undefined
+              })
+              actions.push({
+                kind: 'confirm-step',
+                label: 'Defer Until Full Power',
+                tone: 'secondary',
+                sectionId: 'compass',
+                confirmationOutcome: 'deferred',
+                disabled: busyAction !== undefined
+              })
             }
-          ]
-          summary = actionState.summary
-          detail =
-            actionState.status === 'succeeded'
-              ? 'Compass calibration completed successfully in the shared runtime. Confirm that the full rotation workflow completed cleanly before proceeding.'
-              : actionState.instructions[0] ?? 'Run compass calibration when the vehicle is fully powered and magnetometer hardware is available.'
-          evidence = [
-            ...actionState.statusTexts.slice(-2),
-            ...section.notes,
-            `Review: ${compassConfirmation ? `confirmed at ${formatConfirmationTime(compassConfirmation.confirmedAtMs)}` : 'pending operator confirmation'}`
-          ].slice(0, 4)
-          actions.unshift({
-            kind: 'guided',
-            label: guidedActionButtonLabel('calibrate-compass', snapshot, busyAction),
-            tone: 'primary',
-            actionId: 'calibrate-compass',
-            disabled: busyAction !== undefined || !canRunGuidedAction(snapshot, 'calibrate-compass')
-          })
-          actions.splice(1, 0, {
-            kind: compassConfirmation ? 'clear-confirmation' : 'confirm-step',
-            label: compassConfirmation ? 'Clear Calibration Confirmation' : 'Confirm Calibration Complete',
-            tone: 'secondary',
-            sectionId: 'compass',
-            disabled: actionState.status !== 'succeeded'
-          })
+          }
           break
         }
         case 'radio':
@@ -4728,6 +5522,7 @@ export function App() {
         criteriaMetCount,
         panelId: panel.panelId,
         panelLabel: panel.panelLabel,
+        confirmationOutcome,
         actions
       }
     })
@@ -4827,6 +5622,38 @@ export function App() {
   const completedSetupSectionCount = setupFlowSections.filter((section) => section.status === 'complete').length
   const setupFlowProgress = setupFlowSections.length === 0 ? 0 : (completedSetupSectionCount / setupFlowSections.length) * 100
   const guidedSetupComplete = setupFlowSections.length > 0 && completedSetupSectionCount === setupFlowSections.length
+  const setupOutcomeCounts = setupFlowSections.reduce(
+    (counts, section) => {
+      switch (section.confirmationOutcome) {
+        case 'not-applicable':
+          counts.notApplicable += 1
+          break
+        case 'already-done':
+          counts.alreadyDone += 1
+          break
+        case 'deferred':
+          counts.deferred += 1
+          break
+        default:
+          break
+      }
+      return counts
+    },
+    {
+      notApplicable: 0,
+      alreadyDone: 0,
+      deferred: 0
+    }
+  )
+  const guidedSetupHasExceptions =
+    setupOutcomeCounts.notApplicable > 0 || setupOutcomeCounts.alreadyDone > 0 || setupOutcomeCounts.deferred > 0
+  const guidedSetupOutcomeSummary = [
+    setupOutcomeCounts.notApplicable > 0 ? `${setupOutcomeCounts.notApplicable} not applicable` : undefined,
+    setupOutcomeCounts.alreadyDone > 0 ? `${setupOutcomeCounts.alreadyDone} already done` : undefined,
+    setupOutcomeCounts.deferred > 0 ? `${setupOutcomeCounts.deferred} deferred` : undefined
+  ]
+    .filter((item): item is string => item !== undefined)
+    .join(' • ')
   const guidedSetupTaskAction =
     selectedSetupSection?.actions.find((action) =>
       ['orientation-exercise', 'motor-verification-start', 'motor-test-current', 'motor-verification-confirm', 'motor-verification-reset'].includes(action.kind)
@@ -4941,6 +5768,36 @@ export function App() {
                     ? 'warning'
                     : 'neutral'
             }
+          case 'vtx':
+            return {
+              id: view.id,
+              label: view.label,
+              description: view.description,
+              badge:
+                vtxInvalidDrafts.length > 0
+                  ? `${vtxInvalidDrafts.length} invalid`
+                  : vtxStagedDrafts.length > 0
+                    ? `${vtxStagedDrafts.length} staged`
+                    : vtxLinkPorts.length > 0
+                      ? `${vtxLinkPorts.length} linked`
+                      : 'ready',
+              tone: vtxInvalidDrafts.length > 0 ? 'danger' : vtxStagedDrafts.length > 0 ? 'warning' : 'neutral'
+            }
+          case 'osd':
+            return {
+              id: view.id,
+              label: view.label,
+              description: view.description,
+              badge:
+                osdInvalidDrafts.length > 0
+                  ? `${osdInvalidDrafts.length} invalid`
+                  : osdStagedDrafts.length > 0
+                    ? `${osdStagedDrafts.length} staged`
+                    : osdLinkPorts.length > 0
+                      ? `${osdLinkPorts.length} linked`
+                      : 'ready',
+              tone: osdInvalidDrafts.length > 0 ? 'danger' : osdStagedDrafts.length > 0 ? 'warning' : 'neutral'
+            }
           case 'outputs':
             return {
               id: view.id,
@@ -5041,6 +5898,9 @@ export function App() {
       metadataCatalog.appViews,
       outputAssignmentInvalidDrafts.length,
       outputAssignmentStagedDrafts.length,
+      osdInvalidDrafts.length,
+      osdLinkPorts.length,
+      osdStagedDrafts.length,
       outputMapping.motorOutputs.length,
       portsAdditionalInvalidDrafts.length,
       portsAdditionalStagedDrafts.length,
@@ -5071,6 +5931,9 @@ export function App() {
       tuningInvalidDrafts.length,
       tuningParameters.length,
       tuningStagedDrafts.length,
+      vtxInvalidDrafts.length,
+      vtxLinkPorts.length,
+      vtxStagedDrafts.length,
       stagedParameterDrafts.length
     ]
   )
@@ -5095,6 +5958,8 @@ export function App() {
     workspaceNavSections.find((section) => section.views.some((view) => view.id === activeViewId)) ?? workspaceNavSections[0]
   const totalWorkbenchStagedChanges =
     portsStagedDrafts.length +
+    vtxStagedDrafts.length +
+    osdStagedDrafts.length +
     receiverStagedDrafts.length +
     outputReviewStagedDrafts.length +
     outputAssignmentStagedDrafts.length +
@@ -5103,6 +5968,8 @@ export function App() {
     tuningStagedDrafts.length
   const totalWorkbenchInvalidChanges =
     portsInvalidDrafts.length +
+    vtxInvalidDrafts.length +
+    osdInvalidDrafts.length +
     receiverInvalidDrafts.length +
     outputReviewInvalidDrafts.length +
     outputAssignmentInvalidDrafts.length +
@@ -5389,6 +6256,47 @@ export function App() {
   }, [savedSnapshots])
 
   useEffect(() => {
+    setMavftpPathInput(mavftpBrowser.path)
+  }, [mavftpBrowser.path])
+
+  useEffect(() => {
+    if (snapshot.connection.kind === 'connected') {
+      return
+    }
+
+    setMavftpBrowser(createIdleMavftpBrowserState())
+  }, [snapshot.connection.kind])
+
+  useEffect(() => {
+    if (!isExpertMode || activeViewId !== 'parameters' || snapshot.connection.kind !== 'connected') {
+      return
+    }
+
+    if (mavftpBrowser.status !== 'idle') {
+      return
+    }
+
+    void loadMavftpDirectory(mavftpBrowser.path)
+  }, [activeViewId, isExpertMode, mavftpBrowser.path, mavftpBrowser.status, snapshot.connection.kind])
+
+  useEffect(() => {
+    if (!selectedBoardMedia || typeof window === 'undefined') {
+      return
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setSelectedBoardMedia(undefined)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [selectedBoardMedia])
+
+  useEffect(() => {
     if (savedSnapshots.length === 0) {
       if (selectedSnapshotId !== undefined) {
         setSelectedSnapshotId(undefined)
@@ -5510,7 +6418,7 @@ export function App() {
         return
       case 'confirm-step':
         if (action.sectionId) {
-          confirmSetupSection(action.sectionId)
+          confirmSetupSection(action.sectionId, action.confirmationOutcome ?? 'complete')
         }
         return
       case 'clear-confirmation':
@@ -5550,12 +6458,12 @@ export function App() {
               </span>
             </div>
             <div className="app-header__status-group">
-              <span className="app-header__status-item is-live">{snapshot.vehicle?.vehicle ?? 'No vehicle'}</span>
+              <span className="app-header__status-item is-live" data-testid="session-vehicle-name">{snapshot.vehicle?.vehicle ?? 'No vehicle'}</span>
               <span className="app-header__status-item">{snapshot.vehicle?.flightMode ?? '—'}</span>
               <span className="app-header__status-item">{snapshot.vehicle?.armed ? 'ARMED' : 'DISARMED'}</span>
             </div>
             <div className="app-header__status-group">
-              <span className="app-header__status-item">
+              <span className="app-header__status-item" data-testid="session-parameter-summary">
                 {snapshot.parameterStats.status === 'complete' ? `${snapshot.parameterStats.downloaded} params` : formatParameterSync(snapshot)}
               </span>
               <span className="app-header__status-item">{snapshot.sessionProfile === 'usb-bench' ? 'USB' : 'Full'}</span>
@@ -5563,7 +6471,65 @@ export function App() {
             </div>
           </div>
           <div className="app-header__actions">
-            <StatusBadge tone={toneForConnection(snapshot.connection.kind)}>{snapshot.connection.kind}</StatusBadge>
+            <div className="session-strip" data-testid="header-session-strip">
+              <div className="session-strip__controls">
+                <select
+                  data-testid="transport-mode-select"
+                  value={transportMode}
+                  onChange={(event) => setTransportMode(event.target.value as TransportMode)}
+                  disabled={busyAction !== undefined || snapshot.connection.kind === 'connected'}
+                >
+                  <option value="demo">Demo</option>
+                  <option value="web-serial" disabled={!webSerialSupported}>
+                    Serial{webSerialSupported ? '' : ' (n/a)'}
+                  </option>
+                  <option value="websocket">WebSocket</option>
+                </select>
+                {transportMode === 'websocket' ? (
+                  <input
+                    data-testid="websocket-url-input"
+                    className="session-strip__input"
+                    type="text"
+                    value={websocketUrl}
+                    onChange={(event) => setWebsocketUrl(event.target.value)}
+                    disabled={busyAction !== undefined || snapshot.connection.kind === 'connected'}
+                    spellCheck={false}
+                    placeholder={DEFAULT_WEBSOCKET_URL}
+                  />
+                ) : null}
+                <select
+                  data-testid="session-profile-select"
+                  value={sessionProfile}
+                  onChange={(event) => setSessionProfile(event.target.value as SessionProfile)}
+                >
+                  <option value="full-power">Full power</option>
+                  <option value="usb-bench">USB bench</option>
+                </select>
+                <button
+                  data-testid="connect-button"
+                  className="session-strip__button session-strip__button--connect"
+                  style={buttonStyle('primary')}
+                  onClick={() => void handleConnect()}
+                  disabled={busyAction !== undefined || snapshot.connection.kind === 'connected'}
+                >
+                  {connectButtonLabel(snapshot, parameterFollowUp)}
+                </button>
+                <button
+                  data-testid="disconnect-button"
+                  className="session-strip__button session-strip__button--disconnect"
+                  style={buttonStyle()}
+                  onClick={() => void handleDisconnect()}
+                  disabled={busyAction !== undefined || snapshot.connection.kind !== 'connected'}
+                >
+                  Disconnect
+                </button>
+              </div>
+              <div className="session-strip__status">
+                <StatusBadge tone={toneForConnection(snapshot.connection.kind)}>{snapshot.connection.kind}</StatusBadge>
+                {transportMode === 'web-serial' && rememberedSerialPortLabel ? <span>{rememberedSerialPortLabel}</span> : null}
+                {transportMode === 'web-serial' && autoReconnectAvailable ? <span>auto reconnect ready</span> : null}
+              </div>
+            </div>
           </div>
 	      </header>
 
@@ -5575,71 +6541,25 @@ export function App() {
                 <strong>Session</strong>
               </div>
 
-              <div className="button-row" style={{ padding: '0 4px' }}>
-                <select
-                  data-testid="transport-mode-select"
-                  value={transportMode}
-                  onChange={(event) => setTransportMode(event.target.value as TransportMode)}
-                  disabled={busyAction !== undefined || snapshot.connection.kind === 'connected'}
-                  style={{ flex: 1 }}
-                >
-                  <option value="demo">Demo</option>
-                  <option value="web-serial" disabled={!webSerialSupported}>
-                    Serial{webSerialSupported ? '' : ' (n/a)'}
-                  </option>
-                  <option value="websocket">WebSocket</option>
-                </select>
-                <select
-                  data-testid="session-profile-select"
-                  value={sessionProfile}
-                  onChange={(event) => setSessionProfile(event.target.value as SessionProfile)}
-                  style={{ flex: 1 }}
-                >
-                  <option value="full-power">Full power</option>
-                  <option value="usb-bench">USB bench</option>
-                </select>
-              </div>
-              {transportMode === 'websocket' ? (
-                <label className="scoped-editor-field scoped-editor-field--compact" style={{ margin: '0 4px' }}>
-                  <span>WebSocket URL</span>
-                  <input
-                    data-testid="websocket-url-input"
-                    type="text"
-                    value={websocketUrl}
-                    onChange={(event) => setWebsocketUrl(event.target.value)}
-                    disabled={busyAction !== undefined || snapshot.connection.kind === 'connected'}
-                    spellCheck={false}
-                    placeholder={DEFAULT_WEBSOCKET_URL}
-                  />
-                </label>
-              ) : null}
-              <div className="button-row" style={{ padding: '0 4px' }}>
-                <button
-                  data-testid="connect-button"
-                  style={buttonStyle('primary')}
-                  onClick={() => void handleConnect()}
-                  disabled={busyAction !== undefined || snapshot.connection.kind === 'connected'}
-                >
-                  {connectButtonLabel(snapshot, parameterFollowUp)}
-                </button>
-                <button
-                  data-testid="disconnect-button"
-                  style={buttonStyle()}
-                  onClick={() => void handleDisconnect()}
-                  disabled={busyAction !== undefined || snapshot.connection.kind !== 'connected'}
-                >
-                  Disconnect
-                </button>
-              </div>
-
               <div className="workspace-sidebar__meta">
-                <strong data-testid="session-vehicle-name">{snapshot.vehicle?.vehicle ?? 'No vehicle'}</strong>
+                <strong>{snapshot.vehicle?.vehicle ?? 'No vehicle'}</strong>
+                <small>
+                  {transportMode === 'demo'
+                    ? 'Demo transport selected'
+                    : transportMode === 'websocket'
+                      ? websocketUrl
+                      : selectedSerialPort
+                        ? rememberedSerialPortLabel ?? 'Previously approved serial port selected'
+                        : webSerialSupported
+                          ? 'Serial transport ready; connect from the header strip'
+                          : 'Serial transport unavailable in this browser'}
+                </small>
               </div>
 
               <div className="config-pills" style={{ padding: '0 4px' }}>
-                <span data-testid="session-parameter-summary">
-                  {snapshot.parameterStats.status === 'complete' ? `${snapshot.parameterStats.downloaded} params` : formatParameterSync(snapshot)}
-                </span>
+                <span>{snapshot.parameterStats.status === 'complete' ? `${snapshot.parameterStats.downloaded} params` : formatParameterSync(snapshot)}</span>
+                {transportMode === 'web-serial' && autoReconnectAvailable ? <span>auto reconnect ready</span> : null}
+                {transportMode === 'web-serial' && rememberedSerialPortLabel ? <span>{rememberedSerialPortLabel}</span> : null}
               </div>
               <div className="sync-meter" aria-hidden="true" style={{ margin: '0 4px' }}>
                 <div className="sync-meter__fill" style={{ width: `${parameterSyncWidth}%` }} />
@@ -5664,7 +6584,7 @@ export function App() {
                   <p>
                     {snapshot.connection.kind === 'connected'
                       ? parameterFollowUp.text
-                      : `${parameterFollowUp.text} Reconnect from the session controls above to continue.`}
+                      : `${parameterFollowUp.text} Reconnect from the header session strip to continue.`}
                   </p>
                   {snapshot.connection.kind === 'connected' ? (
                     <div className="button-row">
@@ -5854,7 +6774,7 @@ export function App() {
                   <span className="workspace-main__eyebrow">{activeWorkspaceSection?.label ?? missionSectionLabelForView(activeViewDescriptor.id)}</span>
                   <StatusBadge tone={activeViewDescriptor.tone}>{activeViewDescriptor.badge}</StatusBadge>
                 </div>
-                <h2>{missionTitleForView(activeViewDescriptor.id)}</h2>
+                <h2 data-testid="workspace-view-title">{missionTitleForView(activeViewDescriptor.id)}</h2>
                 <p>{activeViewDescriptor.description}</p>
               </div>
               <div className="workspace-main__summary">
@@ -6003,11 +6923,16 @@ export function App() {
                         <strong>{guidedSetupComplete ? 'Setup complete' : `Setup ${completedSetupSectionCount}/${setupFlowSections.length}`}</strong>
                         <p>
                           {guidedSetupComplete
-                            ? 'All steps verified. Use navigation for refinement.'
+                            ? guidedSetupHasExceptions
+                              ? 'All setup steps were resolved. Review deferred or skipped items before flight.'
+                              : 'All steps verified. Use navigation for refinement.'
                             : selectedSetupSection
                               ? `Next: ${selectedSetupSection.title}`
                               : 'Start guided setup to begin.'}
                         </p>
+                        {guidedSetupComplete && guidedSetupOutcomeSummary ? (
+                          <p className="flight-deck-command__guided-summary-notes">{guidedSetupOutcomeSummary}</p>
+                        ) : null}
                         <button
                           className="setup-launch-button"
                           style={buttonStyle('hero')}
@@ -6042,6 +6967,9 @@ export function App() {
                       <StatusBadge tone={toneForSetup(selectedSetupSection.status)}>
                         {selectedSetupSection.criteriaMetCount}/{selectedSetupSection.criteria.length} criteria
                       </StatusBadge>
+                      {selectedSetupSection.confirmationOutcome && selectedSetupSection.confirmationOutcome !== 'complete' ? (
+                        <StatusBadge tone="warning">{formatSetupOutcome(selectedSetupSection.confirmationOutcome)}</StatusBadge>
+                      ) : null}
                     </div>
                   </div>
 
@@ -6651,24 +7579,55 @@ export function App() {
                       </button>
                     ) : null}
                   </div>
-	              <div className="port-card-grid">
-	                {visibleSerialPortViewModels.map((port) => (
-	                  <article key={port.portNumber} className="port-card">
-	                    <div className="port-card__header">
-	                      <div>
-	                        <strong>{port.label}</strong>
-	                        <small>{port.protocolLabel}</small>
-	                      </div>
+	              <div className="port-row-list">
+	                {visibleSerialPortViewModels.map((port) => {
+                    const protocolParameter = port.protocolParameter
+                    const baudParameter = port.baudParameter
+                    const optionsParameter = port.optionsParameter
+                    const flowControlParameter = port.flowControlParameter
+                    const editedBaudValue = baudParameter ? editedValues[baudParameter.id] : undefined
+                    const currentEncodedBaud = editedBaudValue !== undefined && editedBaudValue !== '' ? Number(editedBaudValue) : port.baudValue
+                    const currentBaudRate = arducopterSerialBaudRate(currentEncodedBaud)
+                    const customBaudInputValue =
+                      baudParameter && customSerialBaudInputs[baudParameter.id] !== undefined
+                        ? customSerialBaudInputs[baudParameter.id]
+                        : currentBaudRate !== undefined
+                          ? String(currentBaudRate)
+                          : ''
+                    const showCustomBaudInput =
+                      baudParameter !== undefined &&
+                      (customSerialBaudInputs[baudParameter.id] !== undefined || !isPresetBaudRate(currentBaudRate))
+                    const editedOptionsValue = optionsParameter
+                      ? normalizeBitmaskValue(editedValues[optionsParameter.id], port.optionsValue)
+                      : undefined
+                    const serialOptionsSummary = optionsParameter
+                      ? describeBitmaskSelections(
+                          parameterDraftById.get(optionsParameter.id)?.status === 'staged'
+                            ? parameterDraftById.get(optionsParameter.id)?.nextValue
+                            : editedOptionsValue,
+                          ARDUCOPTER_SERIAL_OPTION_BIT_LABELS,
+                          'No special options'
+                        )
+                      : port.optionsLabel
+
+                    return (
+	                  <article key={port.portNumber} className="port-row">
+	                    <div className="port-row__identity">
+                        <div className="port-row__title">
+                          <strong>{port.label}</strong>
+                          <small>
+                            {`SERIAL${port.portNumber}`}
+                            {port.hardwarePort ? ` -> ${port.hardwarePort}` : ''}
+                            {` · ${port.usageSummary}`}
+                          </small>
+                        </div>
 	                      <StatusBadge tone={port.editable ? 'neutral' : 'warning'}>
 	                        {port.editable ? `Port ${port.portNumber}` : 'read only'}
 	                      </StatusBadge>
 	                    </div>
-	                    <p>{port.usageSummary}</p>
 
-	                    <div className="port-card__fields">
-	                      {port.protocolParameter ? (() => {
-	                        const protocolParameter = port.protocolParameter
-	                        return (
+	                    <div className="port-row__controls">
+	                      {protocolParameter ? (
 	                        <label className="scoped-editor-field scoped-editor-field--compact">
 	                          <span>Protocol</span>
 	                          <select
@@ -6683,42 +7642,84 @@ export function App() {
 	                          >
 	                            {(protocolParameter.definition?.options ?? []).map((valueOption) => (
 	                              <option key={`${protocolParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-	                                {valueOption.label} ({valueOption.value})
+	                                {valueOption.label}
 	                              </option>
 	                            ))}
 	                          </select>
 	                        </label>
-	                        )
-	                      })() : null}
+	                      ) : null}
 
-	                      {port.baudParameter ? (() => {
-	                        const baudParameter = port.baudParameter
-	                        return (
-	                        <label className="scoped-editor-field scoped-editor-field--compact">
-	                          <span>Baud</span>
-	                          <select
-	                            value={editedValues[baudParameter.id] ?? String(port.baudValue ?? '')}
-	                            onChange={(event) =>
-	                              setEditedValues((existing) => ({
-	                                ...existing,
-	                                [baudParameter.id]: event.target.value
-	                              }))
-	                            }
-	                            disabled={!port.editable}
-	                          >
-	                            {(baudParameter.definition?.options ?? []).map((valueOption) => (
-	                              <option key={`${baudParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-	                                {valueOption.label} baud
-	                              </option>
-	                            ))}
-	                          </select>
-	                        </label>
-	                        )
-	                      })() : null}
+	                      {baudParameter ? (
+                          <div className="port-row__baud">
+                            <label className="scoped-editor-field scoped-editor-field--compact">
+                              <span>Baud</span>
+                              <select
+                                value={selectedBaudPresetValue(currentBaudRate)}
+                                onChange={(event) => {
+                                  if (event.target.value === 'custom') {
+                                    setCustomSerialBaudInputs((existing) => ({
+                                      ...existing,
+                                      [baudParameter.id]: currentBaudRate !== undefined ? String(currentBaudRate) : ''
+                                    }))
+                                    return
+                                  }
 
-	                      {port.flowControlParameter ? (() => {
-	                        const flowControlParameter = port.flowControlParameter
-	                        return (
+                                  const selectedBaudRate = Number(event.target.value)
+                                  const encodedValue = encodeArducopterSerialBaud(selectedBaudRate)
+                                  setCustomSerialBaudInputs((existing) => {
+                                    if (!(baudParameter.id in existing)) {
+                                      return existing
+                                    }
+                                    const next = { ...existing }
+                                    delete next[baudParameter.id]
+                                    return next
+                                  })
+                                  setEditedValues((existing) => ({
+                                    ...existing,
+                                    [baudParameter.id]: String(encodedValue ?? port.baudValue ?? '')
+                                  }))
+                                }}
+                                disabled={!port.editable}
+                              >
+                                {SERIAL_BAUD_PRESET_RATES.map((baudRate) => (
+                                  <option key={`${baudParameter.id}:preset:${baudRate}`} value={String(baudRate)}>
+                                    {formatBaudRate(baudRate)}
+                                  </option>
+                                ))}
+                                <option value="custom">Custom / AP value</option>
+                              </select>
+                            </label>
+                            {showCustomBaudInput ? (
+                              <label className="scoped-editor-field scoped-editor-field--compact">
+                                <span>Custom</span>
+                                <input
+                                  type="number"
+                                  inputMode="numeric"
+                                  min={1}
+                                  value={customBaudInputValue}
+                                  onChange={(event) => {
+                                    const nextValue = event.target.value
+                                    setCustomSerialBaudInputs((existing) => ({
+                                      ...existing,
+                                      [baudParameter.id]: nextValue
+                                    }))
+                                    const parsed = parseSerialBaudInput(nextValue)
+                                    if (parsed.encodedValue === undefined) {
+                                      return
+                                    }
+                                    setEditedValues((existing) => ({
+                                      ...existing,
+                                      [baudParameter.id]: String(parsed.encodedValue)
+                                    }))
+                                  }}
+                                  disabled={!port.editable}
+                                />
+                              </label>
+                            ) : null}
+                          </div>
+	                      ) : null}
+
+	                      {flowControlParameter ? (
 	                        <label className="scoped-editor-field scoped-editor-field--compact">
 	                          <span>Flow control</span>
 	                          <select
@@ -6738,15 +7739,65 @@ export function App() {
 	                            ))}
 	                          </select>
 	                        </label>
-	                        )
-	                      })() : null}
+	                      ) : null}
 	                    </div>
 
 	                    <div className="config-pills">
-	                      <span>{port.protocolLabel}</span>
-	                      <span>{port.baudLabel}</span>
-	                      {port.flowControlLabel ? <span>{port.flowControlLabel}</span> : null}
+                        {port.hardwarePort ? <span>{port.hardwarePort}</span> : null}
+	                      <span>{protocolParameter ? formatArducopterSerialProtocol(Number(editedValues[protocolParameter.id] ?? port.protocolValue)) : port.protocolLabel}</span>
+	                      <span>{formatBaudRate(currentBaudRate)}</span>
+                        {optionsParameter ? <span>{serialOptionsSummary}</span> : null}
+	                      {flowControlParameter ? <span>{formatArducopterSerialRtscts(Number(editedValues[flowControlParameter.id] ?? port.flowControlValue))}</span> : null}
+                        {port.boardTrafficSummary ? <span>{port.boardTrafficSummary}</span> : null}
 	                    </div>
+
+                      {optionsParameter ? (
+                        <div className="port-row__options">
+                          <div className="port-row__options-header">
+                            <strong>Serial options</strong>
+                            <button
+                              style={buttonStyle()}
+                              onClick={() =>
+                                setExpandedSerialOptionsPortNumber((current) => (current === port.portNumber ? undefined : port.portNumber))
+                              }
+                              disabled={!port.editable}
+                            >
+                              {expandedSerialOptionsPortNumber === port.portNumber ? 'Hide Options' : 'Edit Options'}
+                            </button>
+                          </div>
+                          <small>{serialOptionsSummary}</small>
+                          {expandedSerialOptionsPortNumber === port.portNumber ? (
+                            <div className="scoped-checkbox-list port-row__options-panel">
+                              {Object.entries(ARDUCOPTER_SERIAL_OPTION_BIT_LABELS).map(([bit, label]) => {
+                                const numericBit = Number(bit)
+                                return (
+                                  <label key={`${optionsParameter.id}:${bit}`} className="scoped-checkbox-option">
+                                    <input
+                                      type="checkbox"
+                                      checked={hasBitmaskFlag(editedOptionsValue, numericBit)}
+                                      onChange={(event) =>
+                                        setEditedValues((existing) => {
+                                          const currentValue = normalizeBitmaskValue(existing[optionsParameter.id], port.optionsValue)
+                                          const nextValue = event.target.checked
+                                            ? currentValue | (1 << numericBit)
+                                            : currentValue & ~(1 << numericBit)
+
+                                          return {
+                                            ...existing,
+                                            [optionsParameter.id]: String(nextValue)
+                                          }
+                                        })
+                                      }
+                                      disabled={!port.editable}
+                                    />
+                                    <span>{label}</span>
+                                  </label>
+                                )
+                              })}
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
 
 	                    {port.notes.length > 0 ? (
 	                      <ul className="output-note-list">
@@ -6756,7 +7807,8 @@ export function App() {
 	                      </ul>
 	                    ) : null}
 	                  </article>
-	                ))}
+                    )
+                  })}
 	              </div>
                 </>
 	            ) : (
@@ -6766,6 +7818,95 @@ export function App() {
 		              </div>
 		              <div className="ports-workspace__sidebar">
 
+                {snapshot.hardware.board || snapshot.hardware.uartsFile.status !== 'idle' ? (
+                  <article className="port-card">
+                    <div className="port-card__header">
+                      <div>
+                        <strong>{boardCatalogEntry?.label ?? (snapshot.hardware.board ? `Board ${snapshot.hardware.board.boardType}` : 'Board detection')}</strong>
+                        <small>
+                          {boardCatalogEntry?.familyLabel
+                            ?? (snapshot.hardware.board ? `APJ board ${snapshot.hardware.board.boardType}` : 'Waiting for AUTOPILOT_VERSION')}
+                        </small>
+                      </div>
+                      <StatusBadge tone={uartsStatusTone}>
+                        {snapshot.hardware.uartsFile.status === 'ready'
+                          ? 'uarts.txt ready'
+                          : snapshot.hardware.uartsFile.status === 'loading'
+                            ? 'loading'
+                            : snapshot.hardware.uartsFile.status === 'unsupported'
+                              ? 'FTP unavailable'
+                              : snapshot.hardware.uartsFile.status === 'missing'
+                                ? 'uarts missing'
+                                : snapshot.hardware.uartsFile.status === 'error'
+                                  ? 'FTP error'
+                                  : 'identifying'}
+                      </StatusBadge>
+                    </div>
+
+                    <div className="config-pills">
+                      {snapshot.hardware.board ? <span>Board type {snapshot.hardware.board.boardType}</span> : null}
+                      {snapshot.hardware.board ? <span>{snapshot.hardware.board.ftpSupported ? 'MAVFTP supported' : 'MAVFTP unavailable'}</span> : null}
+                      {uartsMappedPortCount > 0 ? <span>{uartsMappedPortCount} mapped UARTs</span> : null}
+                    </div>
+
+                    <p>
+                      {snapshot.hardware.uartsFile.status === 'ready'
+                        ? 'Ports now use the controller-reported UART mapping instead of generic SERIAL labels.'
+                        : snapshot.hardware.uartsFile.status === 'unsupported'
+                          ? 'This controller did not advertise MAVFTP support, so Ports stays generic.'
+                          : snapshot.hardware.uartsFile.status === 'missing'
+                            ? 'Board identity is available, but this controller did not expose `@SYS/uarts.txt`.'
+                            : snapshot.hardware.uartsFile.status === 'error'
+                              ? `MAVFTP failed: ${snapshot.hardware.uartsFile.error ?? 'Unknown error.'}`
+                              : 'Waiting for board identity and UART mapping from the controller.'}
+                    </p>
+
+                    {boardCatalogEntry ? (
+                      <>
+                        {boardMediaAssets.length > 0 ? (
+                          <div className="board-media-gallery">
+                            {boardMediaAssets.map((mediaAsset) => (
+                              <button
+                                key={mediaAsset.id}
+                                type="button"
+                                className="board-media-card"
+                                onClick={() => setSelectedBoardMedia(mediaAsset)}
+                              >
+                                <img src={mediaAsset.assetPath} alt={mediaAsset.alt} />
+                                <span className="board-media-card__meta">
+                                  <strong>{mediaAsset.label}</strong>
+                                  <small>{mediaAsset.description}</small>
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+
+                        <div className="port-board-links">
+                          <a href={boardCatalogEntry.wikiUrl} target="_blank" rel="noreferrer">
+                            ArduPilot Wiki
+                          </a>
+                          <a href={boardCatalogEntry.manufacturerUrl} target="_blank" rel="noreferrer">
+                            {boardCatalogEntry.manufacturerName}
+                          </a>
+                          {boardReferenceLinks.map((reference) => (
+                            <a key={reference.id} href={reference.url} target="_blank" rel="noreferrer">
+                              {reference.label}
+                            </a>
+                          ))}
+                        </div>
+                      </>
+                    ) : null}
+
+                    {snapshot.hardware.uartsFile.rawText ? (
+                      <details className="port-board-debug">
+                        <summary>Controller `uarts.txt`</summary>
+                        <pre>{snapshot.hardware.uartsFile.rawText}</pre>
+                      </details>
+                    ) : null}
+                  </article>
+                ) : null}
+
 		            {gpsPeripheralViewModels.length > 0 ? (
 	              <div className="port-card-grid">
 	                {gpsPeripheralViewModels.map((peripheral) => (
@@ -6773,13 +7914,29 @@ export function App() {
 	                    <div className="port-card__header">
 	                      <div>
 	                        <strong>{peripheral.label}</strong>
-	                        <small>{formatArducopterGpsType(peripheral.value)}</small>
+	                        <small>Configured driver: {formatArducopterGpsType(peripheral.value)}</small>
 	                      </div>
-	                      <StatusBadge tone={peripheral.value === 0 ? 'neutral' : 'success'}>
-	                        {peripheral.value === 0 ? 'disabled' : 'configured'}
+	                      <StatusBadge
+                          tone={
+                            peripheral.value === 0
+                              ? 'neutral'
+                              : peripheral.label === 'Primary GPS' && snapshot.liveVerification.globalPosition.verified
+                                ? 'success'
+                                : 'warning'
+                          }
+                        >
+	                        {peripheral.value === 0
+                            ? 'disabled'
+                            : peripheral.label === 'Primary GPS' && snapshot.liveVerification.globalPosition.verified
+                              ? 'live position'
+                              : 'configured'}
 	                      </StatusBadge>
 	                    </div>
-	                    <p>Choose the expected GPS/peripheral driver, then verify the live device after reboot and reconnect.</p>
+	                    <p>
+                        {peripheral.label === 'Primary GPS' && snapshot.liveVerification.globalPosition.verified
+                          ? 'Live position is arriving. Keep the configured driver consistent with the actual hardware after reboot and reconnect.'
+                          : 'Choose the expected GPS/peripheral driver, then verify the live device after reboot and reconnect.'}
+                      </p>
 
 	                    {peripheral.parameter ? (() => {
 	                      const parameter = peripheral.parameter
@@ -6954,16 +8111,12 @@ export function App() {
                 <div className="scoped-review-card scoped-review-card--compact">
                   <div className="switch-exercise-card__header">
                     <div>
-                      <strong>Video OSD</strong>
-                      <p>Keep the FPV overlay backend, page switching, and MSP display options local to this Ports workflow.</p>
+                      <strong>OSD routed through dedicated tab</strong>
+                      <p>Keep the serial-port wiring context here, then use the OSD tab for backend, page, and MSP display settings.</p>
                     </div>
-                    <StatusBadge tone={toneForScopedDraftReview(portsStagedDrafts.length, portsInvalidDrafts.length)}>
-                      {portsInvalidDrafts.length > 0
-                        ? `${portsInvalidDrafts.length} invalid`
-                        : portsStagedDrafts.length > 0
-                          ? `${portsStagedDrafts.length} staged`
-                          : 'in sync'}
-                    </StatusBadge>
+                    <button style={buttonStyle('primary')} onClick={() => setActiveViewId('osd')}>
+                      Open OSD Tab
+                    </button>
                   </div>
 
                   <div className="config-pills">
@@ -6976,136 +8129,6 @@ export function App() {
                       ? osdLinkPorts.map((port) => <span key={`osd-link:${port.portNumber}`}>{port.label}: {port.protocolLabel}</span>)
                       : <span>No MSP / DisplayPort OSD link detected in current port roles</span>}
                   </div>
-
-                  <div className="scoped-editor-grid">
-                    {osdTypeParameter ? (
-                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(osdTypeParameter.id)?.status ?? 'unchanged'}`}>
-                        <span>{osdTypeParameter.definition?.label ?? osdTypeParameter.id}</span>
-                        <select
-                          value={editedValues[osdTypeParameter.id] ?? String(osdType ?? '')}
-                          onChange={(event) =>
-                            setEditedValues((existing) => ({
-                              ...existing,
-                              [osdTypeParameter.id]: event.target.value
-                            }))
-                          }
-                        >
-                          {(osdTypeParameter.definition?.options ?? []).map((valueOption) => (
-                            <option key={`${osdTypeParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                              {valueOption.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    ) : null}
-
-                    {osdChannelParameter ? (
-                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(osdChannelParameter.id)?.status ?? 'unchanged'}`}>
-                        <span>{osdChannelParameter.definition?.label ?? osdChannelParameter.id}</span>
-                        <select
-                          value={editedValues[osdChannelParameter.id] ?? String(osdChannel ?? '')}
-                          onChange={(event) =>
-                            setEditedValues((existing) => ({
-                              ...existing,
-                              [osdChannelParameter.id]: event.target.value
-                            }))
-                          }
-                        >
-                          {(osdChannelParameter.definition?.options ?? []).map((valueOption) => (
-                            <option key={`${osdChannelParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                              {valueOption.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    ) : null}
-
-                    {osdSwitchMethodParameter ? (
-                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(osdSwitchMethodParameter.id)?.status ?? 'unchanged'}`}>
-                        <span>{osdSwitchMethodParameter.definition?.label ?? osdSwitchMethodParameter.id}</span>
-                        <select
-                          value={editedValues[osdSwitchMethodParameter.id] ?? String(osdSwitchMethod ?? '')}
-                          onChange={(event) =>
-                            setEditedValues((existing) => ({
-                              ...existing,
-                              [osdSwitchMethodParameter.id]: event.target.value
-                            }))
-                          }
-                        >
-                          {(osdSwitchMethodParameter.definition?.options ?? []).map((valueOption) => (
-                            <option key={`${osdSwitchMethodParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                              {valueOption.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    ) : null}
-
-                    {mspOsdCellCountParameter ? (
-                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(mspOsdCellCountParameter.id)?.status ?? 'unchanged'}`}>
-                        <span>{mspOsdCellCountParameter.definition?.label ?? mspOsdCellCountParameter.id}</span>
-                        <select
-                          value={editedValues[mspOsdCellCountParameter.id] ?? String(mspOsdCellCount ?? '')}
-                          onChange={(event) =>
-                            setEditedValues((existing) => ({
-                              ...existing,
-                              [mspOsdCellCountParameter.id]: event.target.value
-                            }))
-                          }
-                        >
-                          {(mspOsdCellCountParameter.definition?.options ?? []).map((valueOption) => (
-                            <option key={`${mspOsdCellCountParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                              {valueOption.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    ) : null}
-
-                    {mspOptionsParameter ? (
-                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(mspOptionsParameter.id)?.status ?? 'unchanged'}`}>
-                        <span>{mspOptionsParameter.definition?.label ?? mspOptionsParameter.id}</span>
-                        <div className="scoped-checkbox-list">
-                          {Object.entries(ARDUCOPTER_MSP_OPTION_BIT_LABELS).map(([bit, label]) => {
-                            const numericBit = Number(bit)
-                            return (
-                              <label key={`${mspOptionsParameter.id}:${bit}`} className="scoped-checkbox-option">
-                                <input
-                                  type="checkbox"
-                                  checked={hasBitmaskFlag(editedMspOptions, numericBit)}
-                                  onChange={(event) =>
-                                    setEditedValues((existing) => {
-                                      const currentValue = normalizeBitmaskValue(existing[mspOptionsParameter.id], mspOptions)
-                                      const nextValue = event.target.checked
-                                        ? currentValue | (1 << numericBit)
-                                        : currentValue & ~(1 << numericBit)
-
-                                      return {
-                                        ...existing,
-                                        [mspOptionsParameter.id]: String(nextValue)
-                                      }
-                                    })
-                                  }
-                                />
-                                <span>{label}</span>
-                              </label>
-                            )
-                          })}
-                        </div>
-                        <small>
-                          {parameterDraftById.get(mspOptionsParameter.id)?.status === 'staged'
-                            ? `Staged ${describeBitmaskSelections(parameterDraftById.get(mspOptionsParameter.id)?.nextValue, ARDUCOPTER_MSP_OPTION_BIT_LABELS, 'No special options')}`
-                            : parameterDraftById.get(mspOptionsParameter.id)?.reason ??
-                              `Current ${describeBitmaskSelections(mspOptions, ARDUCOPTER_MSP_OPTION_BIT_LABELS, 'No special options')}`}
-                        </small>
-                      </label>
-                    ) : null}
-                  </div>
-
-                  <ul className="output-note-list">
-                    <li>Assign the matching serial port to MSP, DJI FPV, or DisplayPort before expecting an FPV overlay.</li>
-                    <li>After OSD backend changes, reboot, reconnect, and verify the live overlay in goggles or the display before flight.</li>
-                  </ul>
                 </div>
               ) : null}
 
@@ -7113,16 +8136,12 @@ export function App() {
                 <div className="scoped-review-card scoped-review-card--compact">
                   <div className="switch-exercise-card__header">
                     <div>
-                      <strong>Video transmitter</strong>
-                      <p>Keep VTX control, frequency, and power review local to this Ports workflow.</p>
+                      <strong>VTX routed through dedicated tab</strong>
+                      <p>Use Ports to assign the actual control link, then use the VTX tab for frequency, power, and control behavior.</p>
                     </div>
-                    <StatusBadge tone={toneForScopedDraftReview(portsStagedDrafts.length, portsInvalidDrafts.length)}>
-                      {portsInvalidDrafts.length > 0
-                        ? `${portsInvalidDrafts.length} invalid`
-                        : portsStagedDrafts.length > 0
-                          ? `${portsStagedDrafts.length} staged`
-                          : 'in sync'}
-                    </StatusBadge>
+                    <button style={buttonStyle('primary')} onClick={() => setActiveViewId('vtx')}>
+                      Open VTX Tab
+                    </button>
                   </div>
 
                   <div className="config-pills">
@@ -7134,110 +8153,6 @@ export function App() {
                       ? vtxLinkPorts.map((port) => <span key={`vtx-link:${port.portNumber}`}>{port.label}: {port.protocolLabel}</span>)
                       : <span>No VTX control link detected in current port roles</span>}
                   </div>
-
-                  <div className="scoped-editor-grid">
-                    {vtxEnableParameter ? (
-                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(vtxEnableParameter.id)?.status ?? 'unchanged'}`}>
-                        <span>{vtxEnableParameter.definition?.label ?? vtxEnableParameter.id}</span>
-                        <select
-                          value={editedValues[vtxEnableParameter.id] ?? String(vtxEnabled ?? '')}
-                          onChange={(event) =>
-                            setEditedValues((existing) => ({
-                              ...existing,
-                              [vtxEnableParameter.id]: event.target.value
-                            }))
-                          }
-                        >
-                          {(vtxEnableParameter.definition?.options ?? []).map((valueOption) => (
-                            <option key={`${vtxEnableParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                              {valueOption.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    ) : null}
-
-                    {vtxFrequencyParameter ? (
-                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(vtxFrequencyParameter.id)?.status ?? 'unchanged'}`}>
-                        <span>{vtxFrequencyParameter.definition?.label ?? vtxFrequencyParameter.id}</span>
-                        <input
-                          type="number"
-                          min={vtxFrequencyParameter.definition?.minimum}
-                          max={vtxFrequencyParameter.definition?.maximum}
-                          step={vtxFrequencyParameter.definition?.step ?? 1}
-                          value={editedValues[vtxFrequencyParameter.id] ?? String(vtxFrequency ?? '')}
-                          onChange={(event) =>
-                            setEditedValues((existing) => ({
-                              ...existing,
-                              [vtxFrequencyParameter.id]: event.target.value
-                            }))
-                          }
-                        />
-                      </label>
-                    ) : null}
-
-                    {vtxPowerParameter ? (
-                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(vtxPowerParameter.id)?.status ?? 'unchanged'}`}>
-                        <span>{vtxPowerParameter.definition?.label ?? vtxPowerParameter.id}</span>
-                        <input
-                          type="number"
-                          min={vtxPowerParameter.definition?.minimum}
-                          max={vtxPowerParameter.definition?.maximum}
-                          step={vtxPowerParameter.definition?.step ?? 1}
-                          value={editedValues[vtxPowerParameter.id] ?? String(vtxPower ?? '')}
-                          onChange={(event) =>
-                            setEditedValues((existing) => ({
-                              ...existing,
-                              [vtxPowerParameter.id]: event.target.value
-                            }))
-                          }
-                        />
-                      </label>
-                    ) : null}
-
-                    {vtxMaxPowerParameter ? (
-                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(vtxMaxPowerParameter.id)?.status ?? 'unchanged'}`}>
-                        <span>{vtxMaxPowerParameter.definition?.label ?? vtxMaxPowerParameter.id}</span>
-                        <input
-                          type="number"
-                          min={vtxMaxPowerParameter.definition?.minimum}
-                          max={vtxMaxPowerParameter.definition?.maximum}
-                          step={vtxMaxPowerParameter.definition?.step ?? 1}
-                          value={editedValues[vtxMaxPowerParameter.id] ?? String(vtxMaxPower ?? '')}
-                          onChange={(event) =>
-                            setEditedValues((existing) => ({
-                              ...existing,
-                              [vtxMaxPowerParameter.id]: event.target.value
-                            }))
-                          }
-                        />
-                      </label>
-                    ) : null}
-
-                    {vtxOptionsParameter ? (
-                      <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(vtxOptionsParameter.id)?.status ?? 'unchanged'}`}>
-                        <span>{vtxOptionsParameter.definition?.label ?? vtxOptionsParameter.id}</span>
-                        <input
-                          type="number"
-                          min={vtxOptionsParameter.definition?.minimum}
-                          max={vtxOptionsParameter.definition?.maximum}
-                          step={vtxOptionsParameter.definition?.step ?? 1}
-                          value={editedValues[vtxOptionsParameter.id] ?? String(vtxOptions ?? '')}
-                          onChange={(event) =>
-                            setEditedValues((existing) => ({
-                              ...existing,
-                              [vtxOptionsParameter.id]: event.target.value
-                            }))
-                          }
-                        />
-                      </label>
-                    ) : null}
-                  </div>
-
-                  <ul className="output-note-list">
-                    <li>Assign the actual VTX control protocol on the matching serial port first, then use this card to set frequency and power.</li>
-                    <li>Bench-check the actual transmitted channel and power after changes before flying or arming with props on.</li>
-                  </ul>
                 </div>
               ) : null}
 
@@ -7278,13 +8193,406 @@ export function App() {
 	            </div>
 
 	            <p className="telemetry-note">
-	              Use the sidebar session controls to reboot and refresh after changing serial roles, GPS drivers, or flow-control settings.
+	              Use the header session strip to reboot and refresh after changing serial roles, GPS drivers, or flow-control settings.
 	            </p>
 	          </div>
 	          </Panel>
 	        </div>
 	      </section>
 	      ) : null}
+
+        {activeViewId === 'vtx' ? (
+      <section className="grid one-up">
+        <Panel
+          title="Video Transmitter"
+          subtitle="Keep VTX control, frequency, and power in a dedicated workflow instead of burying it inside Ports."
+        >
+          <div className="telemetry-stack telemetry-stack--ports">
+            <div className="telemetry-header">
+              <div>
+                <h3>VTX control</h3>
+                <p>Assign the actual control UART in Ports first, then configure the transmitter here.</p>
+              </div>
+              <StatusBadge tone={toneForScopedDraftReview(vtxStagedDrafts.length, vtxInvalidDrafts.length)}>
+                {vtxInvalidDrafts.length > 0 ? `${vtxInvalidDrafts.length} invalid` : vtxStagedDrafts.length > 0 ? `${vtxStagedDrafts.length} staged` : 'in sync'}
+              </StatusBadge>
+            </div>
+
+            <div className="telemetry-metric-grid">
+              <article className="telemetry-metric-card">
+                <span>Control link</span>
+                <strong>{vtxLinkPorts.length > 0 ? `${vtxLinkPorts.length} linked` : 'Not detected'}</strong>
+              </article>
+              <article className="telemetry-metric-card">
+                <span>Frequency</span>
+                <strong>{vtxFrequency !== undefined ? `${vtxFrequency} MHz` : 'Unknown'}</strong>
+              </article>
+              <article className="telemetry-metric-card">
+                <span>Power</span>
+                <strong>{vtxPower !== undefined ? `${vtxPower} mW` : 'Unknown'}</strong>
+              </article>
+              <article className="telemetry-metric-card">
+                <span>Control state</span>
+                <strong>{formatArducopterVtxEnable(vtxEnabled)}</strong>
+              </article>
+            </div>
+
+            <div className="scoped-review-card scoped-review-card--compact">
+              <div className="switch-exercise-card__header">
+                <div>
+                  <strong>VTX configuration</strong>
+                  <p>Use this surface for the user-facing VTX workflow. Keep the port-role wiring itself in Ports.</p>
+                </div>
+              </div>
+
+              <div className="config-pills">
+                {vtxLinkPorts.length > 0
+                  ? vtxLinkPorts.map((port) => <span key={`vtx-tab-link:${port.portNumber}`}>{port.label}: {port.protocolLabel}</span>)
+                  : <span>No VTX control link detected in current port roles</span>}
+                {vtxEnableParameter ? <span>Control: {formatArducopterVtxEnable(vtxEnabled)}</span> : null}
+                {vtxMaxPowerParameter ? <span>Max power: {vtxMaxPower !== undefined ? `${vtxMaxPower} mW` : 'Unknown'}</span> : null}
+              </div>
+
+              <div className="scoped-editor-grid">
+                {vtxEnableParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(vtxEnableParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{vtxEnableParameter.definition?.label ?? vtxEnableParameter.id}</span>
+                    <select
+                      value={editedValues[vtxEnableParameter.id] ?? String(vtxEnabled ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [vtxEnableParameter.id]: event.target.value
+                        }))
+                      }
+                    >
+                      {(vtxEnableParameter.definition?.options ?? []).map((valueOption) => (
+                        <option key={`${vtxEnableParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                          {valueOption.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+
+                {vtxFrequencyParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(vtxFrequencyParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{vtxFrequencyParameter.definition?.label ?? vtxFrequencyParameter.id}</span>
+                    <input
+                      type="number"
+                      min={vtxFrequencyParameter.definition?.minimum}
+                      max={vtxFrequencyParameter.definition?.maximum}
+                      step={vtxFrequencyParameter.definition?.step ?? 1}
+                      value={editedValues[vtxFrequencyParameter.id] ?? String(vtxFrequency ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [vtxFrequencyParameter.id]: event.target.value
+                        }))
+                      }
+                    />
+                  </label>
+                ) : null}
+
+                {vtxPowerParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(vtxPowerParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{vtxPowerParameter.definition?.label ?? vtxPowerParameter.id}</span>
+                    <input
+                      type="number"
+                      min={vtxPowerParameter.definition?.minimum}
+                      max={vtxPowerParameter.definition?.maximum}
+                      step={vtxPowerParameter.definition?.step ?? 1}
+                      value={editedValues[vtxPowerParameter.id] ?? String(vtxPower ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [vtxPowerParameter.id]: event.target.value
+                        }))
+                      }
+                    />
+                  </label>
+                ) : null}
+
+                {vtxMaxPowerParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(vtxMaxPowerParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{vtxMaxPowerParameter.definition?.label ?? vtxMaxPowerParameter.id}</span>
+                    <input
+                      type="number"
+                      min={vtxMaxPowerParameter.definition?.minimum}
+                      max={vtxMaxPowerParameter.definition?.maximum}
+                      step={vtxMaxPowerParameter.definition?.step ?? 1}
+                      value={editedValues[vtxMaxPowerParameter.id] ?? String(vtxMaxPower ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [vtxMaxPowerParameter.id]: event.target.value
+                        }))
+                      }
+                    />
+                  </label>
+                ) : null}
+
+                {vtxOptionsParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(vtxOptionsParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{vtxOptionsParameter.definition?.label ?? vtxOptionsParameter.id}</span>
+                    <input
+                      type="number"
+                      min={vtxOptionsParameter.definition?.minimum}
+                      max={vtxOptionsParameter.definition?.maximum}
+                      step={vtxOptionsParameter.definition?.step ?? 1}
+                      value={editedValues[vtxOptionsParameter.id] ?? String(vtxOptions ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [vtxOptionsParameter.id]: event.target.value
+                        }))
+                      }
+                    />
+                  </label>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="scoped-review-card scoped-review-card--compact">
+              <div className="switch-exercise-card__header">
+                <div>
+                  <strong>VTX Table</strong>
+                  <p>Visible by design so the missing upstream capability stays obvious.</p>
+                </div>
+                <StatusBadge tone="warning">Not yet supported by ArduPilot</StatusBadge>
+              </div>
+              <p className="telemetry-note">This placeholder is intentional. If ArduPilot gains VTX Table support upstream, this tab should expose it here instead of hiding the gap.</p>
+            </div>
+
+            <div className="switch-exercise-controls">
+              <button
+                style={buttonStyle('primary')}
+                onClick={() => void handleApplyScopedParameterDrafts(vtxDraftEntries, 'vtx:apply', 'VTX')}
+                disabled={busyAction !== undefined || vtxStagedDrafts.length === 0 || vtxInvalidDrafts.length > 0 || !canApplyDraftParameters}
+              >
+                {busyAction === 'vtx:apply' ? 'Applying…' : `Apply VTX Changes (${vtxStagedDrafts.length})`}
+              </button>
+              <button
+                style={buttonStyle()}
+                onClick={() => handleDiscardScopedParameterDrafts(vtxDraftEntries.map((entry) => entry.id), 'VTX')}
+                disabled={busyAction !== undefined || vtxDraftEntries.length === 0}
+              >
+                Discard VTX Changes
+              </button>
+            </div>
+          </div>
+        </Panel>
+      </section>
+        ) : null}
+
+        {activeViewId === 'osd' ? (
+      <section className="grid one-up">
+        <Panel
+          title="On-Screen Display"
+          subtitle="Keep OSD backend and display behavior in a dedicated FPV tab instead of the Ports sidebar."
+        >
+          <div className="telemetry-stack telemetry-stack--ports">
+            <div className="telemetry-header">
+              <div>
+                <h3>OSD configuration</h3>
+                <p>Assign the matching serial role in Ports first, then use this view for the pilot-facing overlay workflow.</p>
+              </div>
+              <StatusBadge tone={toneForScopedDraftReview(osdStagedDrafts.length, osdInvalidDrafts.length)}>
+                {osdInvalidDrafts.length > 0 ? `${osdInvalidDrafts.length} invalid` : osdStagedDrafts.length > 0 ? `${osdStagedDrafts.length} staged` : 'in sync'}
+              </StatusBadge>
+            </div>
+
+            <div className="telemetry-metric-grid">
+              <article className="telemetry-metric-card">
+                <span>Display link</span>
+                <strong>{osdLinkPorts.length > 0 ? `${osdLinkPorts.length} linked` : 'Not detected'}</strong>
+              </article>
+              <article className="telemetry-metric-card">
+                <span>Backend</span>
+                <strong>{formatArducopterOsdType(osdType)}</strong>
+              </article>
+              <article className="telemetry-metric-card">
+                <span>Switching</span>
+                <strong>{formatArducopterOsdSwitchMethod(osdSwitchMethod)}</strong>
+              </article>
+              <article className="telemetry-metric-card">
+                <span>MSP cells</span>
+                <strong>{formatArducopterMspOsdCellCount(mspOsdCellCount)}</strong>
+              </article>
+            </div>
+
+            <div className="scoped-review-card scoped-review-card--compact">
+              <div className="switch-exercise-card__header">
+                <div>
+                  <strong>OSD backend and switching</strong>
+                  <p>This is the dedicated OSD surface. The linked UART still belongs in Ports, but the overlay setup belongs here.</p>
+                </div>
+              </div>
+
+              <div className="config-pills">
+                {osdLinkPorts.length > 0
+                  ? osdLinkPorts.map((port) => <span key={`osd-tab-link:${port.portNumber}`}>{port.label}: {port.protocolLabel}</span>)
+                  : <span>No MSP / DisplayPort OSD link detected in current port roles</span>}
+                {mspOptionsParameter ? <span>MSP options: {describeBitmaskSelections(mspOptions, ARDUCOPTER_MSP_OPTION_BIT_LABELS, 'No special options')}</span> : null}
+              </div>
+
+              <div className="scoped-editor-grid">
+                {osdTypeParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(osdTypeParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{osdTypeParameter.definition?.label ?? osdTypeParameter.id}</span>
+                    <select
+                      value={editedValues[osdTypeParameter.id] ?? String(osdType ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [osdTypeParameter.id]: event.target.value
+                        }))
+                      }
+                    >
+                      {(osdTypeParameter.definition?.options ?? []).map((valueOption) => (
+                        <option key={`${osdTypeParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                          {valueOption.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+
+                {osdChannelParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(osdChannelParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{osdChannelParameter.definition?.label ?? osdChannelParameter.id}</span>
+                    <select
+                      value={editedValues[osdChannelParameter.id] ?? String(osdChannel ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [osdChannelParameter.id]: event.target.value
+                        }))
+                      }
+                    >
+                      {(osdChannelParameter.definition?.options ?? []).map((valueOption) => (
+                        <option key={`${osdChannelParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                          {valueOption.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+
+                {osdSwitchMethodParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(osdSwitchMethodParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{osdSwitchMethodParameter.definition?.label ?? osdSwitchMethodParameter.id}</span>
+                    <select
+                      value={editedValues[osdSwitchMethodParameter.id] ?? String(osdSwitchMethod ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [osdSwitchMethodParameter.id]: event.target.value
+                        }))
+                      }
+                    >
+                      {(osdSwitchMethodParameter.definition?.options ?? []).map((valueOption) => (
+                        <option key={`${osdSwitchMethodParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                          {valueOption.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+
+                {mspOsdCellCountParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(mspOsdCellCountParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{mspOsdCellCountParameter.definition?.label ?? mspOsdCellCountParameter.id}</span>
+                    <select
+                      value={editedValues[mspOsdCellCountParameter.id] ?? String(mspOsdCellCount ?? '')}
+                      onChange={(event) =>
+                        setEditedValues((existing) => ({
+                          ...existing,
+                          [mspOsdCellCountParameter.id]: event.target.value
+                        }))
+                      }
+                    >
+                      {(mspOsdCellCountParameter.definition?.options ?? []).map((valueOption) => (
+                        <option key={`${mspOsdCellCountParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
+                          {valueOption.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+
+                {mspOptionsParameter ? (
+                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(mspOptionsParameter.id)?.status ?? 'unchanged'}`}>
+                    <span>{mspOptionsParameter.definition?.label ?? mspOptionsParameter.id}</span>
+                    <div className="scoped-checkbox-list">
+                      {Object.entries(ARDUCOPTER_MSP_OPTION_BIT_LABELS).map(([bit, label]) => {
+                        const numericBit = Number(bit)
+                        return (
+                          <label key={`${mspOptionsParameter.id}:${bit}`} className="scoped-checkbox-option">
+                            <input
+                              type="checkbox"
+                              checked={hasBitmaskFlag(editedMspOptions, numericBit)}
+                              onChange={(event) =>
+                                setEditedValues((existing) => {
+                                  const currentValue = normalizeBitmaskValue(existing[mspOptionsParameter.id], mspOptions)
+                                  const nextValue = event.target.checked
+                                    ? currentValue | (1 << numericBit)
+                                    : currentValue & ~(1 << numericBit)
+
+                                  return {
+                                    ...existing,
+                                    [mspOptionsParameter.id]: String(nextValue)
+                                  }
+                                })
+                              }
+                            />
+                            <span>{label}</span>
+                          </label>
+                        )
+                      })}
+                    </div>
+                    <small>
+                      {parameterDraftById.get(mspOptionsParameter.id)?.status === 'staged'
+                        ? `Staged ${describeBitmaskSelections(parameterDraftById.get(mspOptionsParameter.id)?.nextValue, ARDUCOPTER_MSP_OPTION_BIT_LABELS, 'No special options')}`
+                        : parameterDraftById.get(mspOptionsParameter.id)?.reason ??
+                          `Current ${describeBitmaskSelections(mspOptions, ARDUCOPTER_MSP_OPTION_BIT_LABELS, 'No special options')}`}
+                    </small>
+                  </label>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="scoped-review-card scoped-review-card--compact">
+              <div className="switch-exercise-card__header">
+                <div>
+                  <strong>Live editor roadmap</strong>
+                  <p>The dedicated tab exists now. Full drag-and-drop layout editing still needs broader OSD element metadata coverage.</p>
+                </div>
+                <StatusBadge tone="warning">layout editor pending</StatusBadge>
+              </div>
+              <p className="telemetry-note">This tab is where the Betaflight-style OSD layout editor should land. The current pass establishes the dedicated workflow and keeps OSD-specific settings out of Ports.</p>
+            </div>
+
+            <div className="switch-exercise-controls">
+              <button
+                style={buttonStyle('primary')}
+                onClick={() => void handleApplyScopedParameterDrafts(osdDraftEntries, 'osd:apply', 'OSD')}
+                disabled={busyAction !== undefined || osdStagedDrafts.length === 0 || osdInvalidDrafts.length > 0 || !canApplyDraftParameters}
+              >
+                {busyAction === 'osd:apply' ? 'Applying…' : `Apply OSD Changes (${osdStagedDrafts.length})`}
+              </button>
+              <button
+                style={buttonStyle()}
+                onClick={() => handleDiscardScopedParameterDrafts(osdDraftEntries.map((entry) => entry.id), 'OSD')}
+                disabled={busyAction !== undefined || osdDraftEntries.length === 0}
+              >
+                Discard OSD Changes
+              </button>
+            </div>
+          </div>
+        </Panel>
+      </section>
+        ) : null}
 
 	      {(activeViewId === 'receiver' || activeViewId === 'power') ? (
       <section className={`grid ${activeViewId === 'receiver' || activeViewId === 'power' ? 'one-up' : 'two-up'}`}>
@@ -9479,7 +10787,7 @@ export function App() {
                   {parameterFollowUp.requiresReboot ? 'reboot' : 'refresh'}
                 </StatusBadge>
                 <p>{parameterFollowUp.text}</p>
-                <small>Use the sidebar session controls to complete the pending reboot or refresh after a restore.</small>
+                <small>Use the header session strip to complete the pending reboot or refresh after a restore.</small>
               </div>
             ) : null}
 
@@ -10016,7 +11324,7 @@ export function App() {
                   {parameterFollowUp.requiresReboot ? 'reboot' : 'refresh'}
                 </StatusBadge>
                 <p>{parameterFollowUp.text}</p>
-                <small>Use the sidebar session controls to complete the pending reboot or refresh after a preset apply.</small>
+                <small>Use the header session strip to complete the pending reboot or refresh after a preset apply.</small>
               </div>
             ) : null}
 
@@ -10334,6 +11642,7 @@ export function App() {
             accept="application/json,.json"
             onChange={(event) => void handleImportParameterBackup(event)}
           />
+          <input ref={mavftpUploadInputRef} className="parameter-backup-input" type="file" onChange={(event) => void handleImportMavftpFile(event)} />
           <div className="parameter-review__summary">
             <div className="parameter-review__stats">
               <StatusBadge tone={parameterDraftSummary.stagedCount > 0 ? 'warning' : 'neutral'}>
@@ -10404,7 +11713,7 @@ export function App() {
 	                {parameterFollowUp.requiresReboot ? 'reboot' : 'refresh'}
 	              </StatusBadge>
 	              <p>{parameterFollowUp.text}</p>
-	              <small>Use the sidebar session controls to complete the pending reboot or refresh.</small>
+	              <small>Use the header session strip to complete the pending reboot or refresh.</small>
 	            </div>
 	          ) : null}
 
@@ -10464,6 +11773,155 @@ export function App() {
               ))}
             </div>
           ) : null}
+
+          <section className="mavftp-browser" data-testid="mavftp-browser">
+            <div className="mavftp-browser__header">
+              <div>
+                <strong>Developer MAVFTP Browser</strong>
+                <p>Browse `@SYS`, upload scripts, download board files, and remove entries through the shared runtime.</p>
+              </div>
+              <StatusBadge
+                tone={
+                  snapshot.connection.kind !== 'connected'
+                    ? 'neutral'
+                    : snapshot.hardware.board?.ftpSupported === false
+                      ? 'warning'
+                      : mavftpBrowser.status === 'loading'
+                        ? 'warning'
+                        : mavftpBrowser.status === 'error'
+                          ? 'danger'
+                          : mavftpBrowser.status === 'ready'
+                            ? 'success'
+                            : 'neutral'
+                }
+              >
+                {snapshot.connection.kind !== 'connected'
+                  ? 'offline'
+                  : snapshot.hardware.board?.ftpSupported === false
+                    ? 'FTP unavailable'
+                    : mavftpBrowser.status === 'loading'
+                      ? 'loading'
+                      : mavftpBrowser.status === 'error'
+                        ? 'error'
+                        : mavftpBrowser.status === 'ready'
+                          ? 'ready'
+                          : 'idle'}
+              </StatusBadge>
+            </div>
+
+            <div className="mavftp-browser__toolbar">
+              <label className="mavftp-browser__path">
+                <span>Remote path</span>
+                <input
+                  data-testid="mavftp-path-input"
+                  value={mavftpPathInput}
+                  onChange={(event) => setMavftpPathInput(event.target.value)}
+                  disabled={mavftpBusy || snapshot.connection.kind !== 'connected'}
+                />
+              </label>
+
+              <div className="button-row">
+                <button
+                  data-testid="mavftp-open-button"
+                  style={buttonStyle('primary')}
+                  onClick={() => void loadMavftpDirectory(mavftpPathInput, { noticeOnSuccess: true })}
+                  disabled={mavftpBusy || snapshot.connection.kind !== 'connected'}
+                >
+                  Open
+                </button>
+                <button
+                  data-testid="mavftp-refresh-button"
+                  style={buttonStyle()}
+                  onClick={() => void loadMavftpDirectory(mavftpBrowser.path, { noticeOnSuccess: true })}
+                  disabled={mavftpBusy || snapshot.connection.kind !== 'connected'}
+                >
+                  Refresh
+                </button>
+                <button
+                  style={buttonStyle()}
+                  onClick={() => (mavftpParentPath ? void loadMavftpDirectory(mavftpParentPath) : undefined)}
+                  disabled={mavftpBusy || snapshot.connection.kind !== 'connected' || !mavftpParentPath}
+                >
+                  Up
+                </button>
+                <button
+                  data-testid="mavftp-upload-button"
+                  style={buttonStyle()}
+                  onClick={handleOpenMavftpUpload}
+                  disabled={mavftpBusy || snapshot.connection.kind !== 'connected' || snapshot.hardware.board?.ftpSupported === false}
+                >
+                  Upload File
+                </button>
+              </div>
+            </div>
+
+            <div className="config-pills">
+              <span>{mavftpBrowser.path}</span>
+              {mavftpBrowser.status === 'ready' ? <span>{mavftpBrowser.entries.length} items</span> : null}
+              {snapshot.hardware.board ? <span>Board {snapshot.hardware.board.boardType}</span> : null}
+              {snapshot.hardware.board ? <span>{snapshot.hardware.board.ftpSupported ? 'MAVFTP supported' : 'MAVFTP unavailable'}</span> : null}
+            </div>
+
+            {mavftpBrowser.error ? (
+              <div className="parameter-review__notice">
+                <StatusBadge tone="danger">error</StatusBadge>
+                <p>{mavftpBrowser.error}</p>
+              </div>
+            ) : null}
+
+            {snapshot.connection.kind !== 'connected' ? (
+              <p className="telemetry-note">Connect to a controller before browsing `@SYS`.</p>
+            ) : snapshot.hardware.board?.ftpSupported === false ? (
+              <p className="telemetry-note">This controller reported that MAVFTP is unavailable, so developer file browsing is disabled.</p>
+            ) : mavftpBrowser.entries.length > 0 ? (
+              <div className="mavftp-browser__table">
+                <div className="mavftp-browser__row mavftp-browser__row--header">
+                  <span>Name</span>
+                  <span>Type</span>
+                  <span>Size</span>
+                  <span>Actions</span>
+                </div>
+                {mavftpBrowser.entries.map((entry) => (
+                  <div key={entry.path} className="mavftp-browser__row">
+                    <span>
+                      <strong>{entry.name}</strong>
+                      <small>{entry.path}</small>
+                    </span>
+                    <span>{entry.kind === 'directory' ? 'Directory' : 'File'}</span>
+                    <span>{entry.kind === 'file' ? formatByteCount(entry.sizeBytes) : '—'}</span>
+                    <span>
+                      <div className="parameter-actions">
+                        {entry.kind === 'directory' ? (
+                          <button
+                            style={buttonStyle('primary')}
+                            onClick={() => void loadMavftpDirectory(entry.path)}
+                            disabled={mavftpBusy}
+                          >
+                            Open
+                          </button>
+                        ) : (
+                          <button
+                            style={buttonStyle('primary')}
+                            onClick={() => void handleDownloadMavftpEntry(entry)}
+                            disabled={mavftpBusy}
+                          >
+                            Download
+                          </button>
+                        )}
+                        <button style={buttonStyle()} onClick={() => void handleDeleteMavftpEntry(entry)} disabled={mavftpBusy}>
+                          Delete
+                        </button>
+                      </div>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : mavftpBrowser.status === 'loading' ? (
+              <p className="telemetry-note">Loading remote directory…</p>
+            ) : (
+              <p className="telemetry-note">No entries are visible in the current remote directory.</p>
+            )}
+          </section>
         </div>
 
         {selectedParameter ? (
@@ -10640,6 +12098,23 @@ export function App() {
       ) : null}
         </div>
       </div>
+
+      {selectedBoardMedia ? (
+        <div className="board-media-lightbox" role="dialog" aria-modal="true" onClick={() => setSelectedBoardMedia(undefined)}>
+          <div className="board-media-lightbox__frame" onClick={(event) => event.stopPropagation()}>
+            <div className="board-media-lightbox__header">
+              <div>
+                <strong>{selectedBoardMedia.label}</strong>
+                <p>{selectedBoardMedia.description}</p>
+              </div>
+              <button type="button" style={buttonStyle()} onClick={() => setSelectedBoardMedia(undefined)}>
+                Close
+              </button>
+            </div>
+            <img src={selectedBoardMedia.assetPath} alt={selectedBoardMedia.alt} />
+          </div>
+        </div>
+      ) : null}
 
       <footer className="app-status-bar">
         <span className={`app-status-bar__item ${snapshot.connection.kind === 'connected' ? 'is-ok' : ''}`}>

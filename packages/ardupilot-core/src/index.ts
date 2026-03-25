@@ -1,5 +1,6 @@
 export * from './airframe-outputs.js'
 export * from './esc-setup.js'
+export * from './mavftp.js'
 export * from './motor-test.js'
 export * from './parameter-backups.js'
 export * from './parameter-drafts.js'

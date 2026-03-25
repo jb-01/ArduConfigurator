@@ -1,20 +1,29 @@
 import type { FrameListener, StatusListener, Transport, TransportStatus, Unsubscribe } from './types.js'
 
-interface WebSerialPortLike {
+export interface WebSerialPortInfo {
+  usbVendorId?: number
+  usbProductId?: number
+  bluetoothServiceClassId?: number | string
+}
+
+export interface WebSerialPortLike {
   readable: ReadableStream<Uint8Array> | null
   writable: WritableStream<Uint8Array> | null
   open(options: { baudRate: number; bufferSize?: number }): Promise<void>
   close(): Promise<void>
+  getInfo?(): WebSerialPortInfo
 }
 
-interface WebSerialNavigatorLike {
+export interface WebSerialNavigatorLike {
   requestPort(): Promise<WebSerialPortLike>
+  getPorts?(): Promise<WebSerialPortLike[]>
 }
 
 export interface WebSerialTransportOptions {
   baudRate: number
   bufferSize?: number
   port?: WebSerialPortLike
+  onPortSelected?: (port: WebSerialPortLike) => void
 }
 
 export class WebSerialTransport implements Transport {
@@ -38,7 +47,7 @@ export class WebSerialTransport implements Transport {
   }
 
   static isSupported(): boolean {
-    return getSerialNavigator() !== undefined
+    return getWebSerialNavigator() !== undefined
   }
 
   getStatus(): TransportStatus {
@@ -50,7 +59,7 @@ export class WebSerialTransport implements Transport {
       return
     }
 
-    const serial = getSerialNavigator()
+    const serial = getWebSerialNavigator()
     if (!this.port && !serial) {
       const error = new Error('Web Serial is not available in this browser.')
       this.updateStatus({ kind: 'error', message: error.message })
@@ -63,6 +72,7 @@ export class WebSerialTransport implements Transport {
     let openedPort = false
     try {
       this.port = this.port ?? (await serial!.requestPort())
+      this.options.onPortSelected?.(this.port)
       await this.port.open({
         baudRate: this.options.baudRate,
         bufferSize: this.options.bufferSize
@@ -170,9 +180,22 @@ export class WebSerialTransport implements Transport {
   }
 }
 
-function getSerialNavigator(): WebSerialNavigatorLike | undefined {
+export function getWebSerialNavigator(): WebSerialNavigatorLike | undefined {
   const candidate = navigator as Navigator & { serial?: WebSerialNavigatorLike }
   return candidate.serial
+}
+
+export async function getAvailableWebSerialPorts(): Promise<WebSerialPortLike[]> {
+  const serial = getWebSerialNavigator()
+  if (!serial?.getPorts) {
+    return []
+  }
+
+  return serial.getPorts()
+}
+
+export function getWebSerialPortInfo(port: WebSerialPortLike | undefined): WebSerialPortInfo | undefined {
+  return port?.getInfo?.()
 }
 
 function isRecoverableWebSerialReadError(message: string): boolean {

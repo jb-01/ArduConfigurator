@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises'
 
 import { MockTransport, ReplayTransport, parseRecordedSession } from '@arduconfig/transport'
 import { createArduCopterMockScenario } from '@arduconfig/protocol-mavlink'
+import { TcpTransport, UdpTransport } from '@arduconfig/sitl-harness'
 
 import { NativeSerialTransport } from './native-serial-transport.js'
 import { startWebSocketBridgeServer } from './websocket-bridge-server.js'
@@ -10,10 +11,14 @@ interface BridgeOptions {
   host: string
   port: number
   route: string
-  source: 'demo' | 'serial' | 'replay'
+  source: 'demo' | 'serial' | 'replay' | 'tcp' | 'udp-listen' | 'udp-connect'
   serialPath?: string
   baudRate: number
   replayFile?: string
+  targetHost?: string
+  targetPort?: number
+  bindHost?: string
+  bindPort?: number
 }
 
 const DEFAULT_OPTIONS: BridgeOptions = {
@@ -21,7 +26,9 @@ const DEFAULT_OPTIONS: BridgeOptions = {
   port: 14550,
   route: '/',
   source: 'demo',
-  baudRate: 115200
+  baudRate: 115200,
+  bindHost: '0.0.0.0',
+  bindPort: 14551
 }
 
 void main().catch((error) => {
@@ -85,6 +92,35 @@ async function createBridgeTransport(options: BridgeOptions) {
         session: parseRecordedSession(await readFile(options.replayFile, 'utf8')),
         speedMultiplier: 1
       })
+    case 'tcp':
+      if (!options.targetHost || !options.targetPort) {
+        throw new Error('Pass --target-host=HOST and --target-port=PORT when using --source=tcp.')
+      }
+      return new TcpTransport('bridge-tcp-transport', {
+        host: options.targetHost,
+        port: options.targetPort
+      })
+    case 'udp-listen':
+      if (!options.bindPort) {
+        throw new Error('Pass --bind-port=PORT when using --source=udp-listen.')
+      }
+      return new UdpTransport('bridge-udp-listen-transport', {
+        bindHost: options.bindHost,
+        bindPort: options.bindPort
+      })
+    case 'udp-connect':
+      if (!options.targetHost || !options.targetPort) {
+        throw new Error('Pass --target-host=HOST and --target-port=PORT when using --source=udp-connect.')
+      }
+      if (!options.bindPort) {
+        throw new Error('Pass --bind-port=PORT when using --source=udp-connect.')
+      }
+      return new UdpTransport('bridge-udp-connect-transport', {
+        bindHost: options.bindHost,
+        bindPort: options.bindPort,
+        remoteHost: options.targetHost,
+        remotePort: options.targetPort
+      })
   }
 }
 
@@ -102,6 +138,18 @@ function parseArgs(args: string[]): BridgeOptions {
     }
     if (argument === '--replay') {
       options.source = 'replay'
+      continue
+    }
+    if (argument === '--tcp') {
+      options.source = 'tcp'
+      continue
+    }
+    if (argument === '--udp-listen') {
+      options.source = 'udp-listen'
+      continue
+    }
+    if (argument === '--udp-connect') {
+      options.source = 'udp-connect'
       continue
     }
 
@@ -133,6 +181,18 @@ function parseArgs(args: string[]): BridgeOptions {
         options.replayFile = value
         options.source = 'replay'
         break
+      case 'target-host':
+        options.targetHost = value
+        break
+      case 'target-port':
+        options.targetPort = Number.isFinite(Number.parseInt(value, 10)) ? Number.parseInt(value, 10) : undefined
+        break
+      case 'bind-host':
+        options.bindHost = value || DEFAULT_OPTIONS.bindHost
+        break
+      case 'bind-port':
+        options.bindPort = Number.isFinite(Number.parseInt(value, 10)) ? Number.parseInt(value, 10) : undefined
+        break
       default:
         break
     }
@@ -142,6 +202,9 @@ function parseArgs(args: string[]): BridgeOptions {
 }
 
 function describeSource(options: BridgeOptions): string {
+  const targetPortLabel = options.targetPort !== undefined ? String(options.targetPort) : 'unknown'
+  const bindPortLabel = options.bindPort !== undefined ? String(options.bindPort) : String(DEFAULT_OPTIONS.bindPort)
+
   switch (options.source) {
     case 'demo':
       return 'demo mock vehicle'
@@ -149,5 +212,11 @@ function describeSource(options: BridgeOptions): string {
       return `serial ${options.serialPath ?? 'unknown'} @ ${options.baudRate}`
     case 'replay':
       return `replay ${options.replayFile ?? 'unknown'}`
+    case 'tcp':
+      return `tcp ${options.targetHost ?? 'unknown'}:${targetPortLabel}`
+    case 'udp-listen':
+      return `udp listen ${options.bindHost ?? DEFAULT_OPTIONS.bindHost}:${bindPortLabel}`
+    case 'udp-connect':
+      return `udp connect ${options.targetHost ?? 'unknown'}:${targetPortLabel} from ${options.bindHost ?? DEFAULT_OPTIONS.bindHost}:${bindPortLabel}`
   }
 }
