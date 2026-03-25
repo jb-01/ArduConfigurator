@@ -1230,6 +1230,16 @@ textarea:focus {
   line-height: 1.5;
 }
 
+.workspace-note small {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.workspace-note .button-row {
+  margin-top: 2px;
+}
+
 .workspace-note--warning {
   border-color: rgba(255, 102, 0, 0.34);
   background: rgba(255, 102, 0, 0.08);

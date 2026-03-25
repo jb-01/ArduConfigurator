@@ -202,7 +202,7 @@ test.describe('browser configurator regression flows', () => {
   test('websocket transport connects through the bundled demo bridge', async ({ page }) => {
     await connectToVehicle(page, 'websocket')
 
-    await expect(page.getByText('ws://127.0.0.1:14550')).toBeVisible()
+    await expect(page.getByText('WebSocket · ws://127.0.0.1:14550', { exact: true })).toBeVisible()
     await openView(page, 'ports')
     await expect(page.getByRole('heading', { name: 'Ports & Peripherals' })).toBeVisible()
   })

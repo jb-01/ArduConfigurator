@@ -2560,6 +2560,10 @@ export function App() {
     () => selectedSnapshotDiffEntries.filter((entry) => entry.status === 'invalid'),
     [selectedSnapshotDiffEntries]
   )
+  const selectedSnapshotRebootSensitiveCount = useMemo(
+    () => selectedSnapshotChangedEntries.filter((entry) => entry.definition?.rebootRequired).length,
+    [selectedSnapshotChangedEntries]
+  )
   const selectedSnapshotDiffSignature = useMemo(
     () => createDraftSignature(selectedSnapshotDiffEntries),
     [selectedSnapshotDiffEntries]
@@ -6680,6 +6684,54 @@ export function App() {
               </small>
             </div>
 
+            <div className="baseline-summary">
+              <div className="baseline-summary__header">
+                <div>
+                  <strong>Active Baseline</strong>
+                  <small>
+                    {selectedSnapshot
+                      ? 'Drift tracking stays visible across every tab.'
+                      : 'Capture or select a snapshot to track configuration drift.'}
+                  </small>
+                </div>
+                <StatusBadge tone={selectedSnapshotInvalidEntries.length > 0 ? 'danger' : selectedSnapshotChangedEntries.length > 0 ? 'warning' : 'neutral'}>
+                  {selectedSnapshotInvalidEntries.length > 0
+                    ? `${selectedSnapshotInvalidEntries.length} invalid`
+                    : selectedSnapshotChangedEntries.length > 0
+                      ? `${selectedSnapshotChangedEntries.length} diff`
+                      : selectedSnapshot
+                        ? 'matched'
+                        : `${savedSnapshots.length} saved`}
+                </StatusBadge>
+              </div>
+              <p className="baseline-summary__text" data-testid="active-baseline-label">
+                {selectedSnapshot ? selectedSnapshot.label : 'No baseline selected'}
+              </p>
+              <div className="baseline-summary__metrics">
+                <article>
+                  <span>Saved</span>
+                  <strong>{savedSnapshots.length}</strong>
+                </article>
+                <article>
+                  <span>Drift</span>
+                  <strong>{selectedSnapshotChangedEntries.length}</strong>
+                </article>
+                <article>
+                  <span>Reboot</span>
+                  <strong>{selectedSnapshotRebootSensitiveCount}</strong>
+                </article>
+                <article>
+                  <span>Status</span>
+                  <strong>{selectedSnapshot ? (selectedSnapshotChangedEntries.length > 0 ? 'Restore' : 'Synced') : 'Idle'}</strong>
+                </article>
+              </div>
+              <p className="baseline-summary__note">
+                {selectedSnapshot
+                  ? `Captured ${formatSnapshotTimestamp(selectedSnapshot.capturedAt)}.`
+                  : 'Open Snapshots to capture a known-good baseline before larger changes.'}
+              </p>
+            </div>
+
             <nav className="workspace-nav workspace-nav--flat" aria-label="Configurator tabs">
               {visibleAppViews.map((view) => (
                 <button
@@ -6717,6 +6769,30 @@ export function App() {
                 <div className="workspace-note workspace-note--warning">
                   <strong>{parameterFollowUp.requiresReboot ? 'Reconnect required' : 'Refresh required'}</strong>
                   <p>{parameterFollowUp.text}</p>
+                  {snapshot.connection.kind !== 'connected' ? (
+                    <small>Reconnect from the header session strip to continue.</small>
+                  ) : (
+                    <div className="button-row">
+                      {parameterFollowUp.requiresReboot ? (
+                        <button
+                          type="button"
+                          style={buttonStyle()}
+                          onClick={() => void handleGuidedAction('reboot-autopilot')}
+                          disabled={busyAction !== undefined || !canRunGuidedAction(snapshot, 'reboot-autopilot')}
+                        >
+                          Request Reboot
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        style={buttonStyle()}
+                        onClick={() => void handleGuidedAction('request-parameters')}
+                        disabled={parameterFollowUp.requiresReboot || busyAction !== undefined || !canRunGuidedAction(snapshot, 'request-parameters')}
+                      >
+                        Pull Parameters
+                      </button>
+                    </div>
+                  )}
                 </div>
               ) : null}
               {!isExpertMode && stagedParameterDrafts.length > 0 ? (
