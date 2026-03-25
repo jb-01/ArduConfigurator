@@ -1,19 +1,19 @@
 import type { CSSProperties, PropsWithChildren, ReactNode } from 'react'
 
 const palette = {
-  surface: '#090d12',
-  surfaceRaised: '#151c25',
-  surfaceInset: '#0b1016',
-  border: '#2e3d4e',
-  borderStrong: '#42566b',
-  text: '#e4eaf0',
-  muted: '#8ea0b0',
-  dim: '#5a7088',
-  accent: '#6db8e0',
-  primary: '#dab254',
-  success: '#5cc28a',
-  warning: '#dab254',
-  danger: '#d46b62'
+  surface: 'var(--bg-panel, #141414)',
+  surfaceRaised: 'var(--bg-panel-raised, #1f1f1f)',
+  surfaceInset: 'var(--bg-panel-soft, #242424)',
+  border: 'var(--border, #3d3d3d)',
+  borderStrong: 'var(--border-strong, #595959)',
+  text: 'var(--text, #f2f2f2)',
+  muted: 'var(--text-muted, #b3b3b3)',
+  dim: 'var(--text-dim, #999999)',
+  accent: 'var(--accent, #ffbb00)',
+  primary: 'var(--primary-action, #96e212)',
+  success: 'var(--success, #96e212)',
+  warning: 'var(--warning, #ff6600)',
+  danger: 'var(--danger, #e2123f)'
 }
 
 export function Panel({
@@ -25,20 +25,34 @@ export function Panel({
   return (
     <section
       style={{
-        background: palette.surfaceRaised,
-        border: `1px solid ${palette.border}`,
-        borderRadius: 7,
-        padding: 12
+        background: 'transparent',
+        border: 'none',
+        borderRadius: 0,
+        padding: 0
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-        <div>
-          <h2 style={{ margin: 0, color: palette.text, fontSize: 14, letterSpacing: '-0.01em', fontWeight: 600 }}>{title}</h2>
-          {subtitle ? <p style={{ margin: '3px 0 0', color: palette.dim, lineHeight: 1.4, fontSize: 12 }}>{subtitle}</p> : null}
+      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 16, marginBottom: 16 }}>
+        <div style={{ minWidth: 0 }}>
+          <h2
+            style={{
+              margin: 0,
+              color: palette.text,
+              fontSize: 24,
+              lineHeight: 1.05,
+              letterSpacing: 0,
+              fontWeight: 300,
+              paddingBottom: 6,
+              borderBottom: `2px solid ${palette.accent}`,
+              display: 'inline-block'
+            }}
+          >
+            {title}
+          </h2>
+          {subtitle ? <p style={{ margin: '8px 0 0', color: palette.dim, lineHeight: 1.5, fontSize: 12 }}>{subtitle}</p> : null}
         </div>
         {actions}
       </div>
-      <div style={{ marginTop: 10 }}>{children}</div>
+      <div>{children}</div>
     </section>
   )
 }
@@ -53,11 +67,11 @@ export function StatusBadge({ tone, children }: PropsWithChildren<{ tone: 'neutr
         display: 'inline-flex',
         alignItems: 'center',
         gap: 4,
-        padding: '2px 6px',
+        padding: '2px 7px',
         borderRadius: 3,
         border: `1px solid ${color}48`,
-        color,
-        background: `${color}14`,
+        color: tone === 'neutral' ? palette.text : color,
+        background: tone === 'neutral' ? 'rgba(255, 187, 0, 0.12)' : `${color}14`,
         fontSize: 10,
         fontWeight: 700,
         textTransform: 'uppercase',
@@ -91,25 +105,24 @@ export function KeyValueRow({ label, value }: { label: string; value: ReactNode 
 export function buttonStyle(kind: 'primary' | 'secondary' | 'hero' = 'secondary'): CSSProperties {
   if (kind === 'hero') {
     return {
-      border: '1px solid rgba(218, 178, 84, 0.6)',
-      background: 'linear-gradient(180deg, rgba(218, 178, 84, 0.18), rgba(218, 178, 84, 0.10))',
-      color: '#f0d56e',
-      padding: '12px 20px',
-      borderRadius: 6,
+      border: '1px solid var(--primary-600, #e8a803)',
+      background: 'var(--primary-500, #ffbb00)',
+      color: '#111111',
+      padding: '8px 14px',
+      borderRadius: 3,
       fontWeight: 700,
-      fontSize: 14,
+      fontSize: 12,
       letterSpacing: 0.01,
-      cursor: 'pointer',
-      boxShadow: '0 0 12px rgba(218, 178, 84, 0.08)'
+      cursor: 'pointer'
     }
   }
   return {
-    border: `1px solid ${kind === 'primary' ? 'rgba(218, 178, 84, 0.5)' : palette.borderStrong}`,
-    background: kind === 'primary' ? 'rgba(218, 178, 84, 0.12)' : 'rgba(255, 255, 255, 0.05)',
-    color: kind === 'primary' ? '#e8c968' : palette.text,
+    border: `1px solid ${kind === 'primary' ? 'var(--primary-action-border, #79b210)' : 'var(--surface-400, #333333)'}`,
+    background: kind === 'primary' ? 'var(--primary-action, #96e212)' : 'var(--surface-500, #3d3d3d)',
+    color: kind === 'primary' ? '#111111' : 'var(--surface-950, #cccccc)',
     padding: '5px 10px',
-    borderRadius: 4,
-    fontWeight: 600,
+    borderRadius: 3,
+    fontWeight: 700,
     fontSize: 12,
     letterSpacing: 0.01,
     cursor: 'pointer'
