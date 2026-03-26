@@ -51,8 +51,10 @@ import {
   type ParameterDraftStatus,
   type ParameterState,
   type RcAxisId,
+  type RcMappingCandidate,
   type RcAxisObservation,
   type RcRangeExerciseState,
+  type ServoOutputAssignment,
   type ServoOutputKind,
 } from '@arduconfig/ardupilot-core'
 import {
@@ -60,7 +62,9 @@ import {
   ARDUCOPTER_MSP_OPTION_BIT_LABELS,
   ARDUCOPTER_NOTIFICATION_BUZZER_TYPE_BIT_LABELS,
   ARDUCOPTER_NOTIFICATION_LED_TYPE_BIT_LABELS,
+  arducopterMotorNumberForServoFunction,
   arducopterMetadata,
+  formatArducopterServoFunction,
   arducopterSerialBaudRate,
   encodeArducopterSerialBaud,
   findBoardCatalogEntry,
@@ -186,6 +190,7 @@ const TUNING_PARAM_IDS = [...TUNING_FLIGHT_FEEL_PARAM_IDS, ...TUNING_ACRO_PARAM_
 const PRESET_AUTO_BACKUP_TAGS = ['auto-backup', 'preset'] as const
 const DEFAULT_WEBSOCKET_URL = 'ws://127.0.0.1:14550'
 const SERIAL_BAUD_PRESET_RATES = [9600, 19200, 38400, 57600, 100000, 111100, 115200, 230400, 256000, 460800, 500000, 921600, 1200000, 1500000, 2000000] as const
+const ALL_MOTOR_TEST_OUTPUT = 0 as const
 
 type TransportMode = 'demo' | 'web-serial' | 'websocket'
 type ProductMode = 'basic' | 'expert'
@@ -197,6 +202,21 @@ const PRODUCT_MODE_STORAGE_KEY = 'arduconfig:product-mode'
 const TRANSPORT_MODE_STORAGE_KEY = 'arduconfig:transport-mode'
 const WEBSOCKET_URL_STORAGE_KEY = 'arduconfig:websocket-url'
 const SERIAL_PORT_INFO_STORAGE_KEY = 'arduconfig:web-serial-port'
+const GUIDED_SETUP_STEP_QUERY_KEY = 'guidedSetupStep'
+
+function buildMotorTestRequest(
+  selectedOutput: number | undefined,
+  throttlePercent: number,
+  durationSeconds: number
+): Partial<MotorTestRequest> {
+  return {
+    outputChannel:
+      selectedOutput !== undefined && selectedOutput !== ALL_MOTOR_TEST_OUTPUT ? selectedOutput : undefined,
+    runAllOutputs: selectedOutput === ALL_MOTOR_TEST_OUTPUT,
+    throttlePercent,
+    durationSeconds
+  }
+}
 
 interface AppViewDescriptor {
   id: AppViewId
@@ -324,6 +344,12 @@ interface RcMappingSessionState {
   failureReason?: string
 }
 
+interface RcMappingAutoCaptureState {
+  axisId?: RcAxisId
+  channelNumber?: number
+  accumulatedMs: number
+}
+
 interface MotorVerificationState {
   status: MotorVerificationStatus
   targetOutputs: number[]
@@ -333,6 +359,13 @@ interface MotorVerificationState {
   startedAtMs?: number
   completedAtMs?: number
   failureReason?: string
+}
+
+interface MotorPreviewNode {
+  motorNumber: number
+  x: number
+  y: number
+  stack?: 'top' | 'bottom'
 }
 
 interface ParameterNotice {
@@ -421,6 +454,9 @@ interface SetupFlowFollowUpDescriptor {
 }
 
 const ORIENTATION_EXERCISE_ORDER: OrientationExerciseStepId[] = ['level', 'pitch-forward', 'roll-right']
+const RC_MAPPING_AUTO_CAPTURE_MS = 900
+const RC_MAPPING_AUTO_CAPTURE_TICK_MS = 80
+const RC_MAPPING_AUTO_CAPTURE_GAP_TOLERANCE_MS = 320
 const ORIENTATION_LABELS: Record<number, string> = {
   0: 'No rotation',
   2: 'Yaw 90',
@@ -694,6 +730,166 @@ function createIdleMotorVerificationState(): MotorVerificationState {
   }
 }
 
+function sortMotorOutputsByMotorNumber(left: ServoOutputAssignment, right: ServoOutputAssignment): number {
+  return (left.motorNumber ?? Number.MAX_SAFE_INTEGER) - (right.motorNumber ?? Number.MAX_SAFE_INTEGER)
+}
+
+function circularMotorPreviewNodes(motorCount: number, radius: number, rotationOffsetDeg = -90): MotorPreviewNode[] {
+  if (motorCount <= 0) {
+    return []
+  }
+
+  return Array.from({ length: motorCount }, (_, index) => {
+    const angle = ((rotationOffsetDeg + (360 / motorCount) * index) * Math.PI) / 180
+    return {
+      motorNumber: index + 1,
+      x: Math.cos(angle) * radius,
+      y: Math.sin(angle) * radius
+    }
+  })
+}
+
+function quadXPreviewNodes(motorNumbersByCorner: [number, number, number, number]): MotorPreviewNode[] {
+  const positions = [
+    { x: 0.64, y: -0.64 }, // front right
+    { x: 0.64, y: 0.64 }, // rear right
+    { x: -0.64, y: 0.64 }, // rear left
+    { x: -0.64, y: -0.64 }, // front left
+  ] as const
+
+  return motorNumbersByCorner
+    .map((motorNumber, index) => ({
+      motorNumber,
+      x: positions[index].x,
+      y: positions[index].y,
+    }))
+    .sort((left, right) => left.motorNumber - right.motorNumber)
+}
+
+function quadPlusPreviewNodes(motorNumbersByPosition: [number, number, number, number]): MotorPreviewNode[] {
+  const positions = [
+    { x: 0, y: -0.78 }, // front
+    { x: 0.78, y: 0 }, // right
+    { x: 0, y: 0.78 }, // rear
+    { x: -0.78, y: 0 }, // left
+  ] as const
+
+  return motorNumbersByPosition
+    .map((motorNumber, index) => ({
+      motorNumber,
+      x: positions[index].x,
+      y: positions[index].y,
+    }))
+    .sort((left, right) => left.motorNumber - right.motorNumber)
+}
+
+function createMotorPreviewNodes(motorCount: number, frameTypeLabel: string): MotorPreviewNode[] {
+  const normalizedFrameType = frameTypeLabel.toLowerCase()
+
+  if (motorCount <= 0) {
+    return []
+  }
+
+  if (motorCount === 2) {
+    return [
+      { motorNumber: 1, x: -0.72, y: 0 },
+      { motorNumber: 2, x: 0.72, y: 0 }
+    ]
+  }
+
+  if (motorCount === 3) {
+    return [
+      { motorNumber: 1, x: 0, y: -0.76 },
+      { motorNumber: 2, x: 0.66, y: 0.48 },
+      { motorNumber: 3, x: -0.66, y: 0.48 }
+    ]
+  }
+
+  if (motorCount === 4) {
+    if (normalizedFrameType.includes('betaflight x')) {
+      return quadXPreviewNodes([2, 1, 3, 4])
+    }
+
+    if (normalizedFrameType.includes('dji x')) {
+      return quadXPreviewNodes([1, 4, 3, 2])
+    }
+
+    if (normalizedFrameType.includes('clockwise x')) {
+      return quadXPreviewNodes([1, 2, 3, 4])
+    }
+
+    if (normalizedFrameType.includes('+')) {
+      return quadPlusPreviewNodes([3, 1, 4, 2])
+    }
+
+    return quadXPreviewNodes([1, 4, 2, 3])
+  }
+
+  if (motorCount === 6 && normalizedFrameType.includes('+')) {
+    return [
+      { motorNumber: 1, x: 0.6, y: -0.36 },
+      { motorNumber: 2, x: 0.6, y: 0.36 },
+      { motorNumber: 3, x: -0.6, y: -0.36 },
+      { motorNumber: 4, x: -0.6, y: 0.36 },
+      { motorNumber: 5, x: 0, y: 0.78 },
+      { motorNumber: 6, x: 0, y: -0.78 }
+    ]
+  }
+
+  if (motorCount === 6 && normalizedFrameType.includes('y6')) {
+    return [
+      { motorNumber: 1, x: 0, y: -0.52, stack: 'top' },
+      { motorNumber: 2, x: 0.56, y: 0.4, stack: 'top' },
+      { motorNumber: 3, x: -0.56, y: 0.4, stack: 'top' },
+      { motorNumber: 4, x: 0, y: -0.76, stack: 'bottom' },
+      { motorNumber: 5, x: 0.76, y: 0.52, stack: 'bottom' },
+      { motorNumber: 6, x: -0.76, y: 0.52, stack: 'bottom' }
+    ]
+  }
+
+  if (motorCount === 8 && normalizedFrameType.includes('x8')) {
+    return [
+      { motorNumber: 1, x: 0.46, y: -0.46, stack: 'top' },
+      { motorNumber: 2, x: 0.46, y: 0.46, stack: 'top' },
+      { motorNumber: 3, x: -0.46, y: -0.46, stack: 'top' },
+      { motorNumber: 4, x: -0.46, y: 0.46, stack: 'top' },
+      { motorNumber: 5, x: 0.68, y: -0.68, stack: 'bottom' },
+      { motorNumber: 6, x: 0.68, y: 0.68, stack: 'bottom' },
+      { motorNumber: 7, x: -0.68, y: -0.68, stack: 'bottom' },
+      { motorNumber: 8, x: -0.68, y: 0.68, stack: 'bottom' }
+    ]
+  }
+
+  if (motorCount === 4 && normalizedFrameType.includes('y4')) {
+    return [
+      { motorNumber: 1, x: 0, y: -0.52, stack: 'top' },
+      { motorNumber: 2, x: 0.76, y: 0.52 },
+      { motorNumber: 3, x: 0, y: -0.78, stack: 'bottom' },
+      { motorNumber: 4, x: -0.76, y: 0.52 }
+    ]
+  }
+
+  if (motorCount === 4 && normalizedFrameType.includes('v-tail')) {
+    return [
+      { motorNumber: 1, x: 0.48, y: -0.6 },
+      { motorNumber: 2, x: 0.76, y: 0.56 },
+      { motorNumber: 3, x: -0.48, y: -0.6 },
+      { motorNumber: 4, x: -0.76, y: 0.56 }
+    ]
+  }
+
+  if (motorCount === 4 && normalizedFrameType.includes('a-tail')) {
+    return [
+      { motorNumber: 1, x: -0.48, y: -0.6 },
+      { motorNumber: 2, x: 0.76, y: 0.56 },
+      { motorNumber: 3, x: 0.48, y: -0.6 },
+      { motorNumber: 4, x: -0.76, y: 0.56 }
+    ]
+  }
+
+  return circularMotorPreviewNodes(motorCount, motorCount >= 8 ? 0.8 : 0.74)
+}
+
 function createIdleRcCalibrationSessionState(observations: RcAxisObservation[] = []): RcCalibrationSessionState {
   const observationMap = new Map(observations.map((observation) => [observation.axisId, observation]))
   return {
@@ -748,6 +944,84 @@ function createRcMappingSessionState(snapshot: ConfiguratorSnapshot): RcMappingS
     currentTargetAxis: RC_CALIBRATION_AXIS_ORDER[0],
     startedAtMs: Date.now()
   }
+}
+
+function rcMappingTargetPrompt(axisId: RcAxisId): { title: string; detail: string } {
+  switch (axisId) {
+    case 'roll':
+      return {
+        title: 'Move Roll Only',
+        detail: 'Move the roll stick through left and right, then briefly hold it to let the app lock onto the channel. Keep pitch and yaw centered and leave throttle low.'
+      }
+    case 'pitch':
+      return {
+        title: 'Move Pitch Only',
+        detail: 'Move the pitch stick forward and back, then briefly hold it to let the app lock onto the channel. Keep roll and yaw centered and leave throttle low.'
+      }
+    case 'throttle':
+      return {
+        title: 'Move Throttle Only',
+        detail: 'Raise and lower throttle by itself, then briefly hold it away from idle so the app can lock onto the throttle channel.'
+      }
+    case 'yaw':
+      return {
+        title: 'Move Yaw Only',
+        detail: 'Move the yaw stick left and right, then briefly hold it to let the app lock onto the channel. Keep roll and pitch centered and leave throttle low.'
+      }
+    default:
+      return {
+        title: 'Move One Axis Only',
+        detail: 'Move only the requested control until one receiver channel clearly dominates.'
+      }
+  }
+}
+
+function rcMappingConfidenceLabel(deltaUs: number | undefined): { label: string; tone: StatusTone } {
+  if (deltaUs === undefined) {
+    return { label: 'Waiting', tone: 'neutral' }
+  }
+
+  if (deltaUs >= 280) {
+    return { label: 'Strong', tone: 'success' }
+  }
+
+  if (deltaUs >= 180) {
+    return { label: 'Good', tone: 'warning' }
+  }
+
+  return { label: 'Weak', tone: 'neutral' }
+}
+
+function deriveRcMappingLiveCandidates(
+  channels: number[],
+  baselineChannels: number[],
+  excludedChannelNumbers: number[] = []
+): RcMappingCandidate[] {
+  const excluded = new Set(excludedChannelNumbers)
+
+  return channels
+    .map((livePwm, index) => {
+      const channelNumber = index + 1
+      const baselinePwm = baselineChannels[index]
+      if (
+        excluded.has(channelNumber) ||
+        !Number.isFinite(livePwm) ||
+        !Number.isFinite(baselinePwm) ||
+        livePwm < 800 ||
+        baselinePwm < 800
+      ) {
+        return undefined
+      }
+
+      return {
+        channelNumber,
+        deltaUs: Math.abs(livePwm - baselinePwm),
+        baselinePwm,
+        livePwm
+      }
+    })
+    .filter((candidate): candidate is RcMappingCandidate => candidate !== undefined)
+    .sort((left, right) => right.deltaUs - left.deltaUs)
 }
 
 function failRcMappingSessionState(current: RcMappingSessionState, reason: string): RcMappingSessionState {
@@ -1115,6 +1389,33 @@ function guidedActionBlockingReason(snapshot: ConfiguratorSnapshot, actionId: ke
   return undefined
 }
 
+type CompassStepSkipReason = 'no-enabled-compass' | 'unsupported'
+
+function deriveCompassStepSkipReason(snapshot: ConfiguratorSnapshot): CompassStepSkipReason | undefined {
+  if (deriveCompassSetupAvailability(snapshot).enabledCompassCount === 0) {
+    return 'no-enabled-compass'
+  }
+
+  const actionState = snapshot.guidedActions['calibrate-compass']
+  if (actionState.status !== 'failed') {
+    return undefined
+  }
+
+  const normalizedEvidence = [actionState.summary, ...actionState.statusTexts].map((text) => text.toLowerCase())
+  if (
+    normalizedEvidence.some(
+      (text) =>
+        text.includes('unsupported') ||
+        text.includes('no enabled compass') ||
+        text.includes('no usable compass')
+    )
+  ) {
+    return 'unsupported'
+  }
+
+  return undefined
+}
+
 function canRunGuidedAction(snapshot: ConfiguratorSnapshot, actionId: keyof typeof actionLabels): boolean {
   return guidedActionBlockingReason(snapshot, actionId) === undefined
 }
@@ -1268,6 +1569,33 @@ function readStoredSerialPortInfo(): WebSerialPortInfo | undefined {
 
     const parsed = JSON.parse(stored) as WebSerialPortInfo
     return typeof parsed === 'object' && parsed !== null ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function canUseGuidedSetupTestingShortcut(): boolean {
+  if (typeof window === 'undefined') {
+    return false
+  }
+
+  const host = window.location.hostname
+  return import.meta.env.DEV || host === 'localhost' || host === '127.0.0.1'
+}
+
+function readGuidedSetupShortcutSectionId(availableSectionIds: readonly string[]): string | undefined {
+  if (!canUseGuidedSetupTestingShortcut() || availableSectionIds.length === 0) {
+    return undefined
+  }
+
+  try {
+    const params = new URLSearchParams(window.location.search)
+    const requestedSectionId = params.get(GUIDED_SETUP_STEP_QUERY_KEY)?.trim().toLowerCase()
+    if (!requestedSectionId) {
+      return undefined
+    }
+
+    return availableSectionIds.find((sectionId) => sectionId.toLowerCase() === requestedSectionId)
   } catch {
     return undefined
   }
@@ -2060,6 +2388,11 @@ function createIdleMavftpBrowserState(path = '@SYS'): MavftpBrowserState {
 
 export function App() {
   const metadataCatalog = useMemo(() => normalizeFirmwareMetadata(arducopterMetadata), [])
+  const setupSectionIds = useMemo(() => arducopterMetadata.setupSections.map((section) => section.id), [])
+  const guidedSetupShortcutSectionId = useMemo(
+    () => readGuidedSetupShortcutSectionId(setupSectionIds),
+    [setupSectionIds]
+  )
   const desktopBridge = getDesktopBridge()
   const webSerialSupported = WebSerialTransport.isSupported()
   const [transportMode, setTransportMode] = useState<TransportMode>(() => readStoredTransportMode(webSerialSupported))
@@ -2115,11 +2448,14 @@ export function App() {
   const [modeSwitchExercise, setModeSwitchExercise] = useState<ModeSwitchExerciseState>(createIdleModeSwitchExerciseState)
   const [rcRangeExercise, setRcRangeExercise] = useState<RcRangeExerciseState>(createIdleRcRangeExerciseState)
   const [rcMappingSession, setRcMappingSession] = useState<RcMappingSessionState>(createIdleRcMappingSessionState)
+  const [rcMappingAutoCaptureState, setRcMappingAutoCaptureState] = useState<RcMappingAutoCaptureState>({ accumulatedMs: 0 })
   const [rcCalibrationSession, setRcCalibrationSession] = useState<RcCalibrationSessionState>(createIdleRcCalibrationSessionState)
   const [motorTestOutput, setMotorTestOutput] = useState<number>()
   const [motorTestThrottlePercent, setMotorTestThrottlePercent] = useState(7)
   const [motorTestDurationSeconds, setMotorTestDurationSeconds] = useState(1)
   const [motorVerification, setMotorVerification] = useState<MotorVerificationState>(createIdleMotorVerificationState)
+  const [motorReorderDialogOpen, setMotorReorderDialogOpen] = useState(false)
+  const [motorReorderSelections, setMotorReorderSelections] = useState<Record<string, string>>({})
   const [propsRemovedAcknowledged, setPropsRemovedAcknowledged] = useState(false)
   const [testAreaAcknowledged, setTestAreaAcknowledged] = useState(false)
   const [showAllOutputAssignments, setShowAllOutputAssignments] = useState(false)
@@ -2128,14 +2464,29 @@ export function App() {
   const [expandedSerialOptionsPortNumber, setExpandedSerialOptionsPortNumber] = useState<number>()
   const [snapshotRestoreAcknowledged, setSnapshotRestoreAcknowledged] = useState(false)
   const [presetApplyAcknowledged, setPresetApplyAcknowledged] = useState(false)
-  const [selectedSetupSectionId, setSelectedSetupSectionId] = useState<string>()
-  const [setupMode, setSetupMode] = useState<SetupMode>('overview')
+  const [selectedSetupSectionId, setSelectedSetupSectionId] = useState<string | undefined>(guidedSetupShortcutSectionId)
+  const [setupMode, setSetupMode] = useState<SetupMode>(() => (guidedSetupShortcutSectionId ? 'wizard' : 'overview'))
   const [pendingSetupWizardFocusId, setPendingSetupWizardFocusId] = useState<string>()
   const [setupConfirmations, setSetupConfirmations] = useState<Record<string, SetupConfirmationRecord>>({})
   const [selectedBoardMedia, setSelectedBoardMedia] = useState<BoardMediaAsset>()
   const parameterBackupInputRef = useRef<HTMLInputElement>(null)
   const mavftpUploadInputRef = useRef<HTMLInputElement>(null)
   const snapshotImportInputRef = useRef<HTMLInputElement>(null)
+  const guidedSetupShortcutAppliedRef = useRef(false)
+  const rcMappingCandidateRef = useRef<RcMappingCandidate | undefined>(undefined)
+  const rcMappingTargetAxisRef = useRef<RcAxisId | undefined>(undefined)
+  const rcMappingAutoCaptureTrackerRef = useRef<{
+    axisId?: RcAxisId
+    channelNumber?: number
+    accumulatedMs: number
+    lastTickAtMs?: number
+    lastMatchedAtMs?: number
+  }>({
+    accumulatedMs: 0
+  })
+  const captureRcMappingCandidateRef = useRef<((candidate: RcMappingCandidate, source?: 'manual' | 'auto') => void) | undefined>(
+    undefined
+  )
   const previousModeSwitchRef = useRef<{ slot?: number; pwm?: number }>({})
   const serialAutoReconnectAttemptedRef = useRef(false)
   const boardCatalogEntry = useMemo(() => findBoardCatalogEntry(snapshot.hardware.board?.boardType), [snapshot.hardware.board?.boardType])
@@ -2193,11 +2544,7 @@ export function App() {
     (left, right) => left.channelNumber - right.channelNumber
   )
   const visibleDisabledOutputs = outputMapping.disabledOutputs.slice(0, 6)
-  const motorTestRequest: Partial<MotorTestRequest> = {
-    outputChannel: motorTestOutput,
-    throttlePercent: motorTestThrottlePercent,
-    durationSeconds: motorTestDurationSeconds
-  }
+  const motorTestRequest = buildMotorTestRequest(motorTestOutput, motorTestThrottlePercent, motorTestDurationSeconds)
   const motorTestEligibility = evaluateMotorTestEligibility(snapshot, motorTestRequest)
   const motorTestGuardReasons = [
     ...motorTestEligibility.reasons,
@@ -2205,11 +2552,14 @@ export function App() {
     ...(testAreaAcknowledged ? [] : ['Confirm the vehicle is restrained and the test area is clear.'])
   ]
   const canRunMotorTest = motorTestGuardReasons.length === 0
-  const selectedMotorTestOutputLabel = motorTestEligibility.selectedOutput
-    ? `OUT${motorTestEligibility.selectedOutput.channelNumber}${
-        motorTestEligibility.selectedOutput.motorNumber !== undefined ? ` / M${motorTestEligibility.selectedOutput.motorNumber}` : ''
-      }`
-    : undefined
+  const selectedMotorTestOutputLabel =
+    motorTestOutput === ALL_MOTOR_TEST_OUTPUT
+      ? `All ${outputMapping.motorOutputs.length} mapped motors (sequence)`
+      : motorTestEligibility.selectedOutput
+        ? `OUT${motorTestEligibility.selectedOutput.channelNumber}${
+            motorTestEligibility.selectedOutput.motorNumber !== undefined ? ` / M${motorTestEligibility.selectedOutput.motorNumber}` : ''
+          }`
+        : undefined
   const canRunModeSwitchExercise =
     snapshot.connection.kind === 'connected' &&
     snapshot.liveVerification.rcInput.verified &&
@@ -2411,7 +2761,10 @@ export function App() {
     }
 
     setMotorTestOutput((current) => {
-      if (current !== undefined && outputMapping.motorOutputs.some((output) => output.channelNumber === current)) {
+      if (
+        current === ALL_MOTOR_TEST_OUTPUT ||
+        (current !== undefined && outputMapping.motorOutputs.some((output) => output.channelNumber === current))
+      ) {
         return current
       }
 
@@ -2741,19 +3094,68 @@ export function App() {
   )
   const canApplyAllDraftParameters =
     canApplyDraftParameters && stagedParameterDrafts.length > 0 && invalidParameterDrafts.length === 0
+  const rcMappingExcludedChannelNumbers = useMemo(
+    () =>
+      Object.values(rcMappingSession.captures)
+        .map((capture) => capture.detectedChannelNumber)
+        .filter((channelNumber): channelNumber is number => channelNumber !== undefined),
+    [rcMappingSession.captures]
+  )
   const rcMappingCandidate = useMemo(() => {
     if (rcMappingSession.status !== 'running' || rcMappingSession.currentTargetAxis === undefined) {
       return undefined
     }
 
-    const excludedChannelNumbers = Object.values(rcMappingSession.captures)
-      .map((capture) => capture.detectedChannelNumber)
-      .filter((channelNumber): channelNumber is number => channelNumber !== undefined)
-
     return detectDominantRcChannelChange(snapshot.liveVerification.rcInput.channels, rcMappingSession.baselineChannels, {
-      excludedChannelNumbers
+      excludedChannelNumbers: rcMappingExcludedChannelNumbers
     })
-  }, [rcMappingSession, snapshot.liveVerification.rcInput.channels])
+  }, [rcMappingExcludedChannelNumbers, rcMappingSession.baselineChannels, rcMappingSession.currentTargetAxis, rcMappingSession.status, snapshot.liveVerification.rcInput.channels])
+  const rcMappingLiveCandidates = useMemo(() => {
+    if (rcMappingSession.status !== 'running' || rcMappingSession.currentTargetAxis === undefined) {
+      return []
+    }
+
+    return deriveRcMappingLiveCandidates(
+      snapshot.liveVerification.rcInput.channels,
+      rcMappingSession.baselineChannels,
+      rcMappingExcludedChannelNumbers
+    ).slice(0, 4)
+  }, [
+    rcMappingExcludedChannelNumbers,
+    rcMappingSession.baselineChannels,
+    rcMappingSession.currentTargetAxis,
+    rcMappingSession.status,
+    snapshot.liveVerification.rcInput.channels
+  ])
+  const rcMappingCapturedCount = useMemo(
+    () => Object.values(rcMappingSession.captures).filter((capture) => capture.detectedChannelNumber !== undefined).length,
+    [rcMappingSession.captures]
+  )
+  const rcMappingTargetGuide = rcMappingTargetPrompt(rcMappingSession.currentTargetAxis ?? 'roll')
+  const rcMappingCandidateConfidence = rcMappingConfidenceLabel(rcMappingCandidate?.deltaUs)
+  const rcMappingDetectedChannelMap = useMemo(
+    () =>
+      Object.fromEntries(
+        RC_CALIBRATION_AXIS_ORDER.map((axisId) => [axisId, rcMappingSession.captures[axisId].detectedChannelNumber])
+      ) as Partial<Record<RcAxisId, number>>,
+    [rcMappingSession.captures]
+  )
+  const rcMappingDraftPreview = useMemo(
+    () => deriveRcMapDraftValues(rcMappingDetectedChannelMap, currentRcAxisChannelMap),
+    [currentRcAxisChannelMap, rcMappingDetectedChannelMap]
+  )
+  const rcMappingStagedChangeCount = Object.keys(rcMappingDraftPreview).length
+  const rcMappingAutoCaptureKey =
+    rcMappingSession.status === 'running' && rcMappingSession.currentTargetAxis !== undefined && rcMappingCandidate
+      ? `${rcMappingSession.currentTargetAxis}:${rcMappingCandidate.channelNumber}`
+      : undefined
+  const rcMappingAutoCaptureProgressPercent =
+    rcMappingSession.status === 'running' &&
+    rcMappingCandidate !== undefined &&
+    rcMappingAutoCaptureState.axisId === rcMappingSession.currentTargetAxis &&
+    rcMappingAutoCaptureState.channelNumber === rcMappingCandidate.channelNumber
+      ? Math.min(100, (rcMappingAutoCaptureState.accumulatedMs / RC_MAPPING_AUTO_CAPTURE_MS) * 100)
+      : 0
   const selectedParameter =
     filteredParameters.find((parameter) => parameter.id === selectedParameterId) ?? filteredParameters[0]
   const selectedParameterDraft = selectedParameter ? parameterDraftById.get(selectedParameter.id) : undefined
@@ -2958,6 +3360,56 @@ export function App() {
         .sort((left, right) => (parseServoOutputChannelNumber(left.id) ?? 99) - (parseServoOutputChannelNumber(right.id) ?? 99)),
     [snapshot.parameters]
   )
+  const outputAssignmentParameterById = useMemo(
+    () => new Map(outputAssignmentParameters.map((parameter) => [parameter.id, parameter])),
+    [outputAssignmentParameters]
+  )
+  const effectiveMotorOutputs = useMemo<ServoOutputAssignment[]>(
+    () => {
+      const outputs: ServoOutputAssignment[] = []
+
+      outputAssignmentParameters.forEach((parameter) => {
+        const channelNumber = parseServoOutputChannelNumber(parameter.id)
+        if (channelNumber === undefined) {
+          return
+        }
+
+        const nextValue = editedValues[parameter.id]
+        const functionValue = nextValue !== undefined ? Number(nextValue) : Math.round(parameter.value)
+        const motorNumber = arducopterMotorNumberForServoFunction(functionValue)
+
+        if (motorNumber === undefined) {
+          return
+        }
+
+        outputs.push({
+          channelNumber,
+          paramId: parameter.id,
+          functionValue,
+          functionLabel: formatArducopterServoFunction(functionValue),
+          kind: 'motor',
+          motorNumber,
+        })
+      })
+
+      return outputs.sort(sortMotorOutputsByMotorNumber)
+    },
+    [editedValues, outputAssignmentParameters]
+  )
+  const effectiveMotorOutputByMotorNumber = useMemo(
+    () => new Map(effectiveMotorOutputs.map((output) => [output.motorNumber ?? 0, output])),
+    [effectiveMotorOutputs]
+  )
+  const motorPreviewCount = Math.max(
+    airframe.expectedMotorCount ?? 0,
+    effectiveMotorOutputs.length,
+    outputMapping.motorOutputs.length
+  )
+  const motorPreviewNodes = useMemo(
+    () => createMotorPreviewNodes(motorPreviewCount, airframe.frameTypeLabel),
+    [airframe.frameTypeLabel, motorPreviewCount]
+  )
+  const motorPreviewGeometryMode = airframe.frameTypeLabel.includes('+') ? 'plus' : 'x'
   const prioritizedOutputAssignmentChannels = useMemo(() => {
     const channels = new Set<number>()
     const defaultVisibleMotorCount = Math.max(airframe.expectedMotorCount ?? 0, 4)
@@ -2996,6 +3448,40 @@ export function App() {
     return visibleParameters.length > 0 ? visibleParameters : outputAssignmentParameters.slice(0, Math.min(outputAssignmentParameters.length, 4))
   }, [outputAssignmentParameters, prioritizedOutputAssignmentChannels, showAllOutputAssignments])
   const hiddenOutputAssignmentCount = outputAssignmentParameters.length - visibleOutputAssignmentParameters.length
+  const motorReorderRows = useMemo(
+    () =>
+      effectiveMotorOutputs
+        .filter((output) => output.motorNumber !== undefined)
+        .map((output) => {
+          const selectedChannelValue = motorReorderSelections[String(output.motorNumber)] ?? String(output.channelNumber)
+          const selectedChannelNumber = Number(selectedChannelValue)
+          const selectedOutput = effectiveMotorOutputs.find((candidate) => candidate.channelNumber === selectedChannelNumber)
+
+          return {
+            motorNumber: output.motorNumber ?? 0,
+            currentChannelNumber: output.channelNumber,
+            currentOutputLabel: `OUT${output.channelNumber}`,
+            selectedChannelNumber,
+            selectedOutputLabel: selectedOutput ? `OUT${selectedOutput.channelNumber}` : `OUT${selectedChannelNumber}`,
+            functionValue: output.functionValue,
+            functionLabel: output.functionLabel
+          }
+        }),
+    [effectiveMotorOutputs, motorReorderSelections]
+  )
+  const motorReorderDuplicateChannels = useMemo(() => {
+    const counts = new Map<number, number>()
+    motorReorderRows.forEach((row) => {
+      counts.set(row.selectedChannelNumber, (counts.get(row.selectedChannelNumber) ?? 0) + 1)
+    })
+    return [...counts.entries()].filter(([, count]) => count > 1).map(([channelNumber]) => channelNumber)
+  }, [motorReorderRows])
+  const motorReorderChangedCount = motorReorderRows.filter((row) => row.selectedChannelNumber !== row.currentChannelNumber).length
+  const motorReorderCanStage =
+    motorReorderRows.length > 0 &&
+    motorReorderChangedCount > 0 &&
+    motorReorderDuplicateChannels.length === 0 &&
+    motorReorderRows.every((row) => Number.isFinite(row.selectedChannelNumber) && row.selectedChannelNumber > 0)
   const setupAdditionalGroups = useMemo(
     () => buildAdditionalSettingsGroups(snapshot, metadataCatalog, 'setup', new Set<string>()),
     [metadataCatalog, snapshot]
@@ -3260,6 +3746,8 @@ export function App() {
   function openSetupWizard(sectionId?: string, focusTargetId?: string): void {
     if (sectionId) {
       setSelectedSetupSectionId(sectionId)
+    } else if (guidedSetupShortcutSectionId) {
+      setSelectedSetupSectionId(guidedSetupShortcutSectionId)
     } else if (recommendedSetupSection) {
       setSelectedSetupSectionId(recommendedSetupSection.id)
     }
@@ -3304,6 +3792,17 @@ export function App() {
 
     return () => window.clearTimeout(timer)
   }, [activeViewId, pendingSetupWizardFocusId, setupMode])
+
+  useEffect(() => {
+    if (!guidedSetupShortcutSectionId || guidedSetupShortcutAppliedRef.current) {
+      return
+    }
+
+    guidedSetupShortcutAppliedRef.current = true
+    setSelectedSetupSectionId(guidedSetupShortcutSectionId)
+    setActiveViewId('setup')
+    setSetupMode('wizard')
+  }, [guidedSetupShortcutSectionId])
 
   function handleDiscardParameterDraft(paramId: string): void {
     setEditedValues((existing) => {
@@ -4086,35 +4585,16 @@ export function App() {
 
   async function handleRunMotorTest(): Promise<void> {
     let targetOutput = motorTestOutput
-    const canAutoStartVerification =
-      activeViewId === 'outputs' &&
-      snapshot.sessionProfile !== 'usb-bench' &&
-      canRunMotorVerification &&
-      outputMapping.motorOutputs.length > 0
 
     if (motorVerification.status === 'running' && motorVerification.currentOutputChannel !== undefined) {
       targetOutput = motorVerification.currentOutputChannel
-    } else if (canAutoStartVerification) {
-      const preferredOutput =
-        targetOutput !== undefined && outputMapping.motorOutputs.some((output) => output.channelNumber === targetOutput)
-          ? targetOutput
-          : outputMapping.motorOutputs[0]?.channelNumber
-
-      if (preferredOutput !== undefined) {
-        handleStartMotorVerification(preferredOutput)
-        targetOutput = preferredOutput
-      }
     }
 
     if (targetOutput === undefined) {
       return
     }
 
-    const effectiveRequest: Partial<MotorTestRequest> = {
-      outputChannel: targetOutput,
-      throttlePercent: motorTestThrottlePercent,
-      durationSeconds: motorTestDurationSeconds
-    }
+    const effectiveRequest = buildMotorTestRequest(targetOutput, motorTestThrottlePercent, motorTestDurationSeconds)
     const effectiveEligibility = evaluateMotorTestEligibility(snapshot, effectiveRequest)
     const effectiveGuardReasons = [
       ...effectiveEligibility.reasons,
@@ -4130,11 +4610,9 @@ export function App() {
     setBusyAction('motor-test')
     try {
       setMotorTestOutput(targetOutput)
-      await runtime.runMotorTest({
-        outputChannel: targetOutput,
-        throttlePercent: motorTestThrottlePercent,
-        durationSeconds: motorTestDurationSeconds
-      })
+      await runtime.runMotorTest(
+        buildMotorTestRequest(targetOutput, motorTestThrottlePercent, motorTestDurationSeconds) as MotorTestRequest
+      )
     } finally {
       setBusyAction(undefined)
     }
@@ -4218,41 +4696,52 @@ export function App() {
       return
     }
 
+    rcMappingAutoCaptureTrackerRef.current = {
+      accumulatedMs: 0
+    }
+    setRcMappingAutoCaptureState({ accumulatedMs: 0 })
     setRcMappingSession(createRcMappingSessionState(snapshot))
     clearSetupSectionConfirmation('radio')
   }
 
   function handleResetRcMappingExercise(): void {
+    rcMappingAutoCaptureTrackerRef.current = {
+      accumulatedMs: 0
+    }
+    setRcMappingAutoCaptureState({ accumulatedMs: 0 })
     setRcMappingSession(createIdleRcMappingSessionState())
   }
 
-  function handleConfirmRcMappingCandidate(): void {
-    if (rcMappingSession.status !== 'running' || rcMappingSession.currentTargetAxis === undefined) {
-      return
-    }
-
-    if (!rcMappingCandidate) {
-      setParameterNotice({
-        tone: 'warning',
-        text: `Move the ${formatRcAxisLabel(rcMappingSession.currentTargetAxis)} axis by itself until one receiver channel clearly dominates.`
-      })
-      return
-    }
+  function captureRcMappingCandidate(candidate: RcMappingCandidate, source: 'manual' | 'auto' = 'manual'): void {
+    let nextNotice: ParameterNotice | undefined
+    let shouldClearRadioConfirmation = false
 
     setRcMappingSession((current) => {
       if (current.status !== 'running' || current.currentTargetAxis === undefined) {
         return current
       }
 
+      const capturedAxis = current.currentTargetAxis
       const captures: Record<RcAxisId, RcMappingAxisCapture> = {
         ...current.captures,
-        [current.currentTargetAxis]: {
-          ...current.captures[current.currentTargetAxis],
-          detectedChannelNumber: rcMappingCandidate.channelNumber,
-          deltaUs: rcMappingCandidate.deltaUs
+        [capturedAxis]: {
+          ...current.captures[capturedAxis],
+          detectedChannelNumber: candidate.channelNumber,
+          deltaUs: candidate.deltaUs
         }
       }
       const nextTargetAxis = RC_CALIBRATION_AXIS_ORDER.find((axisId) => captures[axisId].detectedChannelNumber === undefined)
+
+      nextNotice = {
+        tone: 'success',
+        text:
+          nextTargetAxis === undefined
+            ? 'Captured roll, pitch, throttle, and yaw. Review the detected map and stage any needed RCMAP_* changes.'
+            : `${
+                source === 'auto' ? 'Captured' : 'Confirmed'
+              } ${formatRcAxisLabel(capturedAxis)} on CH${candidate.channelNumber}. Next: ${rcMappingTargetPrompt(nextTargetAxis).title.toLowerCase()}.`
+      }
+      shouldClearRadioConfirmation = true
 
       return nextTargetAxis === undefined
         ? {
@@ -4269,7 +4758,31 @@ export function App() {
             currentTargetAxis: nextTargetAxis
           }
     })
-    clearSetupSectionConfirmation('radio')
+
+    if (shouldClearRadioConfirmation) {
+      clearSetupSectionConfirmation('radio')
+    }
+    if (nextNotice) {
+      setParameterNotice(nextNotice)
+    }
+  }
+
+  captureRcMappingCandidateRef.current = captureRcMappingCandidate
+
+  function handleConfirmRcMappingCandidate(): void {
+    if (rcMappingSession.status !== 'running' || rcMappingSession.currentTargetAxis === undefined) {
+      return
+    }
+
+    if (!rcMappingCandidate) {
+      setParameterNotice({
+        tone: 'warning',
+        text: `${rcMappingTargetGuide.detail} Keep moving only that control until one receiver channel clearly dominates.`
+      })
+      return
+    }
+
+    captureRcMappingCandidate(rcMappingCandidate, 'manual')
   }
 
   function handleFailRcMappingExercise(): void {
@@ -4282,6 +4795,93 @@ export function App() {
         : current
     )
   }
+
+  useEffect(() => {
+    rcMappingCandidateRef.current = rcMappingCandidate
+  }, [rcMappingCandidate])
+
+  useEffect(() => {
+    rcMappingTargetAxisRef.current =
+      rcMappingSession.status === 'running' ? rcMappingSession.currentTargetAxis : undefined
+  }, [rcMappingSession.currentTargetAxis, rcMappingSession.status])
+
+  useEffect(() => {
+    if (rcMappingSession.status !== 'running' || rcMappingSession.currentTargetAxis === undefined) {
+      rcMappingAutoCaptureTrackerRef.current = {
+        accumulatedMs: 0
+      }
+      setRcMappingAutoCaptureState({ accumulatedMs: 0 })
+      return
+    }
+
+    const interval = window.setInterval(() => {
+      const now = Date.now()
+      const latestCandidate = rcMappingCandidateRef.current
+      const latestTargetAxis = rcMappingTargetAxisRef.current
+      const tracker = rcMappingAutoCaptureTrackerRef.current
+      const elapsedSinceLastTick = tracker.lastTickAtMs === undefined ? RC_MAPPING_AUTO_CAPTURE_TICK_MS : now - tracker.lastTickAtMs
+      tracker.lastTickAtMs = now
+
+      if (!latestTargetAxis) {
+        if (tracker.accumulatedMs !== 0 || tracker.channelNumber !== undefined || tracker.axisId !== undefined) {
+          tracker.axisId = undefined
+          tracker.channelNumber = undefined
+          tracker.accumulatedMs = 0
+          tracker.lastMatchedAtMs = undefined
+          setRcMappingAutoCaptureState({ accumulatedMs: 0 })
+        }
+        return
+      }
+
+      if (!latestCandidate) {
+        const withinGapTolerance =
+          tracker.axisId === latestTargetAxis &&
+          tracker.channelNumber !== undefined &&
+          tracker.lastMatchedAtMs !== undefined &&
+          now - tracker.lastMatchedAtMs <= RC_MAPPING_AUTO_CAPTURE_GAP_TOLERANCE_MS
+
+        if (!withinGapTolerance && (tracker.accumulatedMs !== 0 || tracker.channelNumber !== undefined || tracker.axisId !== latestTargetAxis)) {
+          tracker.axisId = latestTargetAxis
+          tracker.channelNumber = undefined
+          tracker.accumulatedMs = 0
+          tracker.lastMatchedAtMs = undefined
+          setRcMappingAutoCaptureState({ axisId: latestTargetAxis, accumulatedMs: 0 })
+        }
+        return
+      }
+
+      if (tracker.axisId === latestTargetAxis && tracker.channelNumber === latestCandidate.channelNumber) {
+        tracker.accumulatedMs = Math.min(
+          RC_MAPPING_AUTO_CAPTURE_MS,
+          tracker.accumulatedMs + Math.min(elapsedSinceLastTick, RC_MAPPING_AUTO_CAPTURE_GAP_TOLERANCE_MS)
+        )
+      } else {
+        tracker.axisId = latestTargetAxis
+        tracker.channelNumber = latestCandidate.channelNumber
+        tracker.accumulatedMs = Math.min(elapsedSinceLastTick, RC_MAPPING_AUTO_CAPTURE_TICK_MS)
+      }
+
+      tracker.lastMatchedAtMs = now
+      setRcMappingAutoCaptureState({
+        axisId: latestTargetAxis,
+        channelNumber: latestCandidate.channelNumber,
+        accumulatedMs: tracker.accumulatedMs
+      })
+
+      if (tracker.accumulatedMs >= RC_MAPPING_AUTO_CAPTURE_MS) {
+        tracker.accumulatedMs = 0
+        tracker.lastMatchedAtMs = undefined
+        setRcMappingAutoCaptureState({
+          axisId: latestTargetAxis,
+          channelNumber: latestCandidate.channelNumber,
+          accumulatedMs: RC_MAPPING_AUTO_CAPTURE_MS
+        })
+        captureRcMappingCandidateRef.current?.(latestCandidate, 'auto')
+      }
+    }, RC_MAPPING_AUTO_CAPTURE_TICK_MS)
+
+    return () => window.clearInterval(interval)
+  }, [rcMappingSession.currentTargetAxis, rcMappingSession.status])
 
   function handleStageRcMappingDrafts(): void {
     if (rcMappingSession.status !== 'ready') {
@@ -4361,6 +4961,71 @@ export function App() {
     setParameterNotice({
       tone: 'warning',
       text: `Staged ${Object.keys(nextDrafts).length} RC calibration value(s). Review and apply them from the Receiver view before confirming radio setup.`
+    })
+  }
+
+  function handleOpenMotorReorderDialog(): void {
+    if (effectiveMotorOutputs.length === 0) {
+      return
+    }
+
+    setMotorReorderSelections(
+      Object.fromEntries(
+        effectiveMotorOutputs
+          .filter((output) => output.motorNumber !== undefined)
+          .map((output) => [String(output.motorNumber), String(output.channelNumber)])
+      )
+    )
+    setMotorReorderDialogOpen(true)
+  }
+
+  function handleCloseMotorReorderDialog(): void {
+    setMotorReorderDialogOpen(false)
+  }
+
+  function handleStageMotorReorderDrafts(): void {
+    if (!motorReorderCanStage) {
+      return
+    }
+
+    const nextAssignmentValues = new Map<string, string>()
+    motorReorderRows.forEach((row) => {
+      nextAssignmentValues.set(`SERVO${row.selectedChannelNumber}_FUNCTION`, String(row.functionValue))
+    })
+
+    const nextEditedValues = { ...editedValues }
+    const changedParamIds: string[] = []
+    effectiveMotorOutputs.forEach((output) => {
+      const parameter = outputAssignmentParameterById.get(output.paramId)
+      if (!parameter) {
+        return
+      }
+
+      const nextValue = nextAssignmentValues.get(output.paramId)
+      delete nextEditedValues[output.paramId]
+
+      if (nextValue !== undefined && Number(nextValue) !== Math.round(parameter.value)) {
+        nextEditedValues[output.paramId] = nextValue
+        changedParamIds.push(output.paramId)
+      }
+    })
+
+    setEditedValues(nextEditedValues)
+    clearSetupSectionConfirmation('outputs')
+    setMotorReorderDialogOpen(false)
+
+    if (changedParamIds.length === 0) {
+      setParameterNotice({
+        tone: 'neutral',
+        text: 'Motor output order already matches the selected layout.'
+      })
+      return
+    }
+
+    setSelectedParameterId(changedParamIds[0] ?? selectedParameterId)
+    setParameterNotice({
+      tone: 'warning',
+      text: `Staged ${changedParamIds.length} motor output remap change(s). Apply them from Outputs, then rerun the guarded motor direction check before flight.`
     })
   }
 
@@ -4545,35 +5210,44 @@ export function App() {
 
   const rcMappingSummary = (() => {
     if (rcMappingSession.status === 'ready') {
-      return 'Detected one receiver channel for each primary axis and ready to stage RCMAP_* drafts if needed.'
+      return rcMappingStagedChangeCount > 0
+        ? `Detected all four primary axes. ${rcMappingStagedChangeCount} RCMAP_* change${rcMappingStagedChangeCount === 1 ? '' : 's'} are ready to stage.`
+        : 'Detected all four primary axes. The current RCMAP_* values already match the live stick inputs.'
     }
     if (rcMappingSession.status === 'failed') {
       return rcMappingSession.failureReason ?? 'RC mapping exercise failed.'
     }
     if (rcMappingSession.status === 'running') {
       return rcMappingSession.currentTargetAxis === undefined
-        ? 'RC mapping exercise is ready for review.'
-        : `Move ${formatRcAxisLabel(rcMappingSession.currentTargetAxis)} by itself until one channel clearly dominates.`
+        ? 'RC mapping capture is ready for review.'
+        : `${rcMappingTargetGuide.title}. The app will capture the channel automatically once one input stays clearly dominant.`
     }
     if (!snapshot.liveVerification.rcInput.verified) {
       return 'Waiting for live RC telemetry before channel remapping can start.'
     }
-    return 'Run the RC mapping exercise to detect which receiver channels actually carry roll, pitch, throttle, and yaw.'
+    return 'Run the guided RC mapping capture to identify which live receiver channels actually carry roll, pitch, throttle, and yaw.'
   })()
 
   const rcMappingInstructions =
     rcMappingSession.status === 'running'
       ? [
           `Current target: ${formatRcAxisLabel(rcMappingSession.currentTargetAxis ?? 'roll')}.`,
+          rcMappingTargetGuide.detail,
           rcMappingCandidate
-            ? `Current dominant channel: CH${rcMappingCandidate.channelNumber} (${Math.round(rcMappingCandidate.deltaUs)}us delta).`
-            : 'Move only the requested axis until one channel clearly dominates.'
+            ? `Current dominant channel: CH${rcMappingCandidate.channelNumber} (${Math.round(rcMappingCandidate.deltaUs)}us delta, ${rcMappingCandidateConfidence.label.toLowerCase()} confidence).`
+            : 'Move only the requested axis. Leave the other sticks still so the correct channel can stand out.'
         ]
       : rcMappingSession.status === 'ready'
-        ? ['Stage any needed RCMAP_* changes, then reboot and refresh before rerunning endpoint capture.']
+        ? [
+            rcMappingStagedChangeCount > 0
+              ? 'Stage the detected RCMAP_* changes, apply them, then refresh parameters before rerunning endpoint capture.'
+              : 'No remap is needed. You can move straight on to stick range and endpoint capture.'
+          ]
         : rcMappingSession.status === 'failed'
-          ? ['Center the sticks, move only one axis at a time, and rerun the mapping exercise.']
-          : ['The app watches raw RC channel movement directly, independent of the current RCMAP_* parameters.']
+          ? ['Center the sticks, make sure only one control is moving, and rerun the guided capture.']
+          : [
+              'The app compares live RC motion to the starting baseline and looks for the single channel that moved the most.'
+            ]
 
   const rcCalibrationSummary = (() => {
     if (rcCalibrationSession.status === 'ready') {
@@ -4618,11 +5292,54 @@ export function App() {
         currentMotorVerificationOutput.motorNumber !== undefined ? ` / M${currentMotorVerificationOutput.motorNumber}` : ''
       }`
     : undefined
-  const guidedMotorTestRequest: Partial<MotorTestRequest> = {
-    outputChannel: motorVerification.currentOutputChannel,
-    throttlePercent: motorTestThrottlePercent,
-    durationSeconds: motorTestDurationSeconds
-  }
+  const selectedMotorTestOutput = motorTestOutput !== undefined && motorTestOutput !== ALL_MOTOR_TEST_OUTPUT
+    ? outputMapping.motorOutputs.find((output) => output.channelNumber === motorTestOutput)
+    : undefined
+  const selectedMotorTestOutputMotorNumber = selectedMotorTestOutput?.motorNumber
+  const motorTestSliderTargets = outputMapping.motorOutputs.map((output) => ({
+    value: output.channelNumber,
+    label: output.motorNumber !== undefined ? `M${output.motorNumber}` : `OUT${output.channelNumber}`
+  }))
+  const outputAssignmentReviewLabel =
+    outputAssignmentInvalidDrafts.length > 0
+      ? `${outputAssignmentInvalidDrafts.length} invalid`
+      : outputAssignmentStagedDrafts.length > 0
+        ? `${outputAssignmentStagedDrafts.length} staged`
+        : 'in sync'
+  const motorMixerSummary = (() => {
+    if (effectiveMotorOutputs.length === 0) {
+      return 'No motor outputs are currently mapped in the editable SERVO function range.'
+    }
+    if (outputAssignmentInvalidDrafts.length > 0) {
+      return 'Resolve invalid output drafts before applying any motor remap.'
+    }
+    if (outputAssignmentStagedDrafts.length > 0) {
+      return 'Motor-output draft changes are staged locally. Apply them, then rerun the guarded direction check.'
+    }
+    return 'Schematic motor map based on the current SERVOx_FUNCTION assignments. Reorder outputs here, then verify direction with guarded motor tests.'
+  })()
+  const motorDirectionSummary = (() => {
+    if (snapshot.sessionProfile === 'usb-bench') {
+      return 'Motor direction checks are deferred in USB bench sessions.'
+    }
+    if (motorVerification.status === 'running') {
+      return currentMotorVerificationLabel
+        ? `Spin ${currentMotorVerificationLabel}, then confirm the correct motor and spin direction.`
+        : 'Motor verification is waiting for the next mapped output.'
+    }
+    if (motorVerification.status === 'passed') {
+      return 'Every mapped motor was stepped through and operator-confirmed.'
+    }
+    if (motorVerification.status === 'failed') {
+      return motorVerification.failureReason ?? 'Motor direction check failed.'
+    }
+    return 'Use the guarded single-motor bench test to confirm order and spin direction before the first props-on flight.'
+  })()
+  const guidedMotorTestRequest = buildMotorTestRequest(
+    motorVerification.currentOutputChannel,
+    motorTestThrottlePercent,
+    motorTestDurationSeconds
+  )
   const guidedMotorTestEligibility = evaluateMotorTestEligibility(snapshot, guidedMotorTestRequest)
   const guidedMotorTestGuardReasons = [
     ...guidedMotorTestEligibility.reasons,
@@ -5130,6 +5847,7 @@ export function App() {
         }
         case 'compass': {
           const actionState = snapshot.guidedActions['calibrate-compass']
+          const compassStepSkipReason = deriveCompassStepSkipReason(snapshot)
           confirmationOutcome = compassConfirmation?.outcome
           const compassCalibrationRecorded =
             actionState.status === 'succeeded' || compassConfirmation !== undefined
@@ -5219,38 +5937,39 @@ export function App() {
               actionId: 'calibrate-compass',
               disabled: busyAction !== undefined || !canRunGuidedAction(snapshot, 'calibrate-compass')
             })
-          } else if (compassSetupAvailability.canSkipCalibration && actionState.status !== 'succeeded') {
+          } else if (compassStepSkipReason !== undefined && actionState.status !== 'succeeded') {
             criteria = [
               {
-                label: 'No enabled compass was detected on COMPASS_USE settings',
-                met: compassSetupAvailability.enabledCompassCount === 0
+                label:
+                  compassStepSkipReason === 'no-enabled-compass'
+                    ? 'No enabled compass was detected on COMPASS_USE settings'
+                    : 'Compass calibration is unsupported or no usable compass was detected on this build',
+                met: true
               },
               {
-                label: 'Operator confirmed this aircraft has no compass and can skip this step',
-                met: compassConfirmation !== undefined
+                label:
+                  compassStepSkipReason === 'no-enabled-compass'
+                    ? 'This build can skip compass calibration until compass hardware is added or enabled'
+                    : 'The flight controller reported that compass calibration is unavailable on this build',
+                met: true
               }
             ]
-            summary = compassConfirmation
-              ? 'Compass step skipped for a build with no enabled compass.'
-              : 'No enabled compass was detected on this build.'
-            detail = compassConfirmation
-              ? 'The guided flow will skip compass calibration for this aircraft unless compass hardware is later added or enabled.'
-              : 'If this aircraft truly has no compass, confirm that here and move on. If a compass is fitted, enable it and run calibration instead.'
+            summary =
+              compassStepSkipReason === 'unsupported'
+                ? actionState.summary
+                : 'No enabled compass was detected on this build.'
+            detail =
+              compassStepSkipReason === 'unsupported'
+                ? 'Guided setup will not block on compass calibration for this aircraft. If compass hardware is later fitted or enabled, return to this step and run calibration again.'
+                : 'Guided setup will skip compass calibration for this aircraft unless compass hardware is later added or enabled.'
             evidence = [
+              ...(compassStepSkipReason === 'unsupported' ? [actionState.summary] : []),
               `GPS: ${compassSetupAvailability.gpsConfigured ? 'configured' : 'not detected'}`,
               `Enabled compasses: ${compassSetupAvailability.enabledCompassCount}`,
               ...section.notes,
-              `Review: ${compassConfirmation ? `confirmed at ${formatConfirmationTime(compassConfirmation.confirmedAtMs)}` : 'pending no-compass confirmation'}`
+              `Skip reason: ${compassStepSkipReason === 'unsupported' ? 'autopilot reported unsupported' : 'no enabled compass detected'}`
             ].slice(0, 4)
             actions.unshift({
-              kind: compassConfirmation ? 'clear-confirmation' : 'confirm-step',
-              label: compassConfirmation ? 'Clear No-Compass Confirmation' : 'No Compass On This Drone — Skip Forward',
-              tone: 'primary',
-              sectionId: 'compass',
-              confirmationOutcome: 'not-applicable',
-              disabled: busyAction !== undefined
-            })
-            actions.splice(1, 0, {
               kind: 'guided',
               label:
                 actionState.status === 'idle'
@@ -5260,14 +5979,16 @@ export function App() {
               actionId: 'calibrate-compass',
               disabled: busyAction !== undefined || !canRunGuidedAction(snapshot, 'calibrate-compass')
             })
-            actions.push({
-              kind: 'confirm-step',
-              label: 'Already Calibrated — Continue',
-              tone: 'secondary',
-              sectionId: 'compass',
-              confirmationOutcome: 'already-done',
-              disabled: busyAction !== undefined
-            })
+            if (compassStepSkipReason === 'no-enabled-compass') {
+              actions.push({
+                kind: 'confirm-step',
+                label: 'Record No-Compass Skip',
+                tone: 'secondary',
+                sectionId: 'compass',
+                confirmationOutcome: 'not-applicable',
+                disabled: busyAction !== undefined
+              })
+            }
           } else {
             criteria = [
               {
@@ -5373,7 +6094,7 @@ export function App() {
                 ? rcRangeExercise.failureReason ?? 'Stick range exercise failed.'
                 : rcCalibrationSession.status === 'failed'
                   ? rcCalibrationSession.failureReason ?? 'RC endpoint capture failed.'
-                  : 'Detect the true roll/pitch/throttle/yaw channels first, then verify stick travel, capture endpoints, and sign off the full radio review.'
+                  : 'Use the guided one-axis-at-a-time receiver mapping first, then verify stick travel, capture endpoints, and sign off the full radio review.'
           evidence = [
             snapshot.liveVerification.rcInput.verified
               ? `${snapshot.liveVerification.rcInput.channelCount} RC channels live`
@@ -5385,7 +6106,7 @@ export function App() {
           ].slice(0, 4)
           actions.unshift({
             kind: 'rc-mapping-exercise',
-            label: rcMappingSession.status === 'ready' ? 'Run RC Mapping Again' : 'Start RC Mapping',
+            label: rcMappingSession.status === 'ready' ? 'Run Guided Mapping Again' : 'Begin Guided Mapping',
             tone: 'primary',
             disabled: !canRunRcMappingExercise || rcMappingSession.status === 'running'
           })
@@ -5413,7 +6134,7 @@ export function App() {
                 ? 'Stage RC Calibration'
                 : rcMappingSession.status === 'ready'
                   ? 'Run RC Calibration'
-                  : 'Review RC Mapping',
+                  : 'Open Guided RC Mapping',
             panelId: panel.panelId
           })
           break
@@ -5653,9 +6374,10 @@ export function App() {
     setupFlowSections.find((section) => section.sequenceState === 'current') ??
     setupFlowSections.find((section) => section.status !== 'complete') ??
     setupFlowSections[0]
+  const guidedSetupTestingShortcutActive = guidedSetupShortcutSectionId !== undefined
   const selectedSetupSectionCandidate = setupFlowSections.find((section) => section.id === selectedSetupSectionId)
   const selectedSetupSection =
-    !selectedSetupSectionCandidate || selectedSetupSectionCandidate.sequenceState === 'locked'
+    !selectedSetupSectionCandidate || (!guidedSetupTestingShortcutActive && selectedSetupSectionCandidate.sequenceState === 'locked')
       ? recommendedSetupSection
       : selectedSetupSectionCandidate
   const selectedSetupSectionIndex = selectedSetupSection
@@ -6111,11 +6833,11 @@ export function App() {
 
     if (
       !selectedSetupSectionCandidate ||
-      selectedSetupSectionCandidate.sequenceState === 'locked'
+      (!guidedSetupTestingShortcutActive && selectedSetupSectionCandidate.sequenceState === 'locked')
     ) {
       setSelectedSetupSectionId(recommendedSetupSection.id)
     }
-  }, [recommendedSetupSection, selectedSetupSectionCandidate])
+  }, [guidedSetupTestingShortcutActive, recommendedSetupSection, selectedSetupSectionCandidate])
 
   // Auto-return to guided setup wizard when an exercise completes while on another page
   const exerciseReturnRef = useRef<{
@@ -6194,7 +6916,7 @@ export function App() {
     }
 
     const targetSection = setupFlowSections[nextIndex]
-    if (targetSection.sequenceState === 'locked') {
+    if (!guidedSetupTestingShortcutActive && targetSection.sequenceState === 'locked') {
       return
     }
 
@@ -6303,12 +7025,17 @@ export function App() {
   }, [motorVerification.status, motorVerification.currentOutputChannel, motorTestOutput])
 
   useEffect(() => {
-    if (activeViewId !== 'outputs' || !currentMotorTestSucceeded) {
+    if (
+      activeViewId !== 'outputs' ||
+      !currentMotorTestSucceeded ||
+      setupMode !== 'wizard' ||
+      selectedSetupSectionId !== 'outputs'
+    ) {
       return
     }
 
     focusOutputsTarget(OUTPUTS_MOTOR_CONFIRM_BUTTON_ID)
-  }, [activeViewId, currentMotorTestSucceeded])
+  }, [activeViewId, currentMotorTestSucceeded, selectedSetupSectionId, setupMode])
 
   useEffect(() => {
     setSnapshotRestoreAcknowledged(false)
@@ -7099,6 +7826,7 @@ export function App() {
                       <StatusBadge tone={toneForSetup(selectedSetupSection.status)}>
                         {selectedSetupSection.criteriaMetCount}/{selectedSetupSection.criteria.length} criteria
                       </StatusBadge>
+                      {guidedSetupTestingShortcutActive ? <StatusBadge tone="warning">Testing shortcut</StatusBadge> : null}
                       {selectedSetupSection.confirmationOutcome && selectedSetupSection.confirmationOutcome !== 'complete' ? (
                         <StatusBadge tone="warning">{formatSetupOutcome(selectedSetupSection.confirmationOutcome)}</StatusBadge>
                       ) : null}
@@ -7119,7 +7847,7 @@ export function App() {
                           setSelectedSetupSectionId(section.id)
                           setSetupMode('wizard')
                         }}
-                        disabled={section.sequenceState === 'locked'}
+                        disabled={!guidedSetupTestingShortcutActive && section.sequenceState === 'locked'}
                       >
                         <small>Step {index + 1}</small>
                         <span>{section.title}</span>
@@ -9056,19 +9784,47 @@ export function App() {
                 </StatusBadge>
               </div>
 
-              <div className="config-pills">
-                {RC_CALIBRATION_AXIS_ORDER.map((axisId) => {
-                  const capture = rcMappingSession.captures[axisId]
-                  return (
-                    <span
-                      key={axisId}
-                      className={capture.detectedChannelNumber !== undefined ? 'is-complete' : rcMappingSession.currentTargetAxis === axisId ? 'is-target' : undefined}
-                    >
-                      {formatRcAxisLabel(axisId)}: RCMAP CH{currentRcAxisChannelMap[axisId]}
-                      {capture.detectedChannelNumber !== undefined ? ` -> observed CH${capture.detectedChannelNumber}` : ''}
-                    </span>
-                  )
-                })}
+              <div className={`rc-mapping-focus${rcMappingSession.status === 'running' ? ' rc-mapping-focus--active' : ''}${rcMappingSession.status === 'ready' ? ' rc-mapping-focus--complete' : ''}`}>
+                <div className="rc-mapping-focus__copy">
+                  <span>
+                    {rcMappingSession.status === 'running'
+                      ? `Step ${Math.min(rcMappingCapturedCount + 1, RC_CALIBRATION_AXIS_ORDER.length)} of ${RC_CALIBRATION_AXIS_ORDER.length}`
+                      : rcMappingSession.status === 'ready'
+                        ? 'Mapping Complete'
+                        : 'Guided Capture'}
+                  </span>
+                  <strong>
+                    {rcMappingSession.status === 'running'
+                      ? rcMappingTargetGuide.title
+                      : rcMappingSession.status === 'ready'
+                        ? 'Roll, pitch, throttle, and yaw were all identified.'
+                        : 'Capture one axis at a time.'}
+                  </strong>
+                  <p>
+                    {rcMappingSession.status === 'running'
+                      ? rcMappingTargetGuide.detail
+                      : rcMappingSession.status === 'ready'
+                        ? rcMappingStagedChangeCount > 0
+                          ? 'Review the detected map below, then stage the RCMAP_* changes before continuing with endpoint capture.'
+                          : 'The current receiver map already matches the detected live inputs, so you can continue without staging any remap.'
+                        : 'Start the guided capture, then move only the highlighted control. The app will lock onto the dominant channel automatically.'}
+                  </p>
+                </div>
+
+                <div className="rc-mapping-focus__status">
+                  <StatusBadge tone={rcMappingCandidateConfidence.tone}>
+                    {rcMappingSession.status === 'running'
+                      ? `${rcMappingCandidateConfidence.label} detection`
+                      : rcMappingSession.status === 'ready'
+                        ? `${rcMappingCapturedCount}/${RC_CALIBRATION_AXIS_ORDER.length} captured`
+                        : 'idle'}
+                  </StatusBadge>
+                  <div className="config-pills">
+                    <span>{rcMappingCapturedCount}/{RC_CALIBRATION_AXIS_ORDER.length} axes captured</span>
+                    {rcMappingCandidate ? <span>CH{rcMappingCandidate.channelNumber} leading</span> : null}
+                    {rcMappingSession.status === 'ready' ? <span>{rcMappingStagedChangeCount} remap changes</span> : null}
+                  </div>
+                </div>
               </div>
 
               <div className="rc-range-axis-grid">
@@ -9082,21 +9838,76 @@ export function App() {
                     >
                       <div className="rc-range-axis-card__header">
                         <strong>{formatRcAxisLabel(axisId)}</strong>
-                        <span>RCMAP CH{currentRcAxisChannelMap[axisId]}</span>
+                        <span>{capture.detectedChannelNumber !== undefined ? 'Captured' : activeTarget ? 'Current target' : 'Pending'}</span>
                       </div>
                       <p>
                         {capture.detectedChannelNumber !== undefined
-                          ? `Observed CH${capture.detectedChannelNumber}${capture.deltaUs !== undefined ? ` (${Math.round(capture.deltaUs)}us delta)` : ''}`
+                          ? `Current map CH${currentRcAxisChannelMap[axisId]} · detected CH${capture.detectedChannelNumber}${capture.deltaUs !== undefined ? ` (${Math.round(capture.deltaUs)}us delta)` : ''}`
                           : activeTarget
                             ? rcMappingCandidate
                               ? `Current dominant channel CH${rcMappingCandidate.channelNumber} (${Math.round(rcMappingCandidate.deltaUs)}us delta)`
-                              : 'Move only this axis until one channel clearly dominates.'
-                            : 'Not captured yet'}
+                              : 'Waiting for one clear dominant channel.'
+                            : `Current map CH${currentRcAxisChannelMap[axisId]} · not captured yet`}
                       </p>
+                      {activeTarget && rcMappingSession.status === 'running' ? (
+                        <div className="config-pills">
+                          <span className="is-target">{rcMappingTargetGuide.title}</span>
+                          <span>{rcMappingCandidate ? 'Auto-capture armed' : 'Move only this control'}</span>
+                        </div>
+                      ) : null}
                     </article>
                   )
                 })}
               </div>
+
+              {rcMappingSession.status === 'running' ? (
+                <div className="rc-mapping-candidate-panel">
+                  <div className="rc-mapping-candidate-panel__header">
+                    <strong>Live candidates right now</strong>
+                    <small>Top channel movement compared to the baseline captured when this exercise started.</small>
+                  </div>
+                  {rcMappingLiveCandidates.length > 0 ? (
+                    <div className="rc-mapping-candidate-list">
+                      {rcMappingLiveCandidates.map((candidate, index) => (
+                        <article
+                          key={`${rcMappingSession.currentTargetAxis}:${candidate.channelNumber}`}
+                          className={`rc-mapping-candidate${index === 0 ? ' is-leading' : ''}`}
+                        >
+                          <div className="rc-mapping-candidate__header">
+                            <strong>CH{candidate.channelNumber}</strong>
+                            <StatusBadge tone={index === 0 ? rcMappingCandidateConfidence.tone : 'neutral'}>
+                              {index === 0 ? 'leading' : 'candidate'}
+                            </StatusBadge>
+                          </div>
+                          <p>{Math.round(candidate.deltaUs)} us change</p>
+                          <small>
+                            {Math.round(candidate.baselinePwm)} us baseline to {Math.round(candidate.livePwm)} us live
+                          </small>
+                        </article>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="switch-exercise-warning">No channel is standing out yet. Move only the highlighted control and keep the others still.</p>
+                  )}
+
+                  {rcMappingCandidate ? (
+                    <div key={rcMappingAutoCaptureKey} className="rc-mapping-auto-capture">
+                      <div className="rc-mapping-auto-capture__copy">
+                        <strong>Locking onto CH{rcMappingCandidate.channelNumber}</strong>
+                        <small>
+                          Repeated strong movement on the same channel will auto-capture it and advance to the next axis.
+                        </small>
+                      </div>
+                      <div className="rc-mapping-auto-capture__meter" aria-hidden="true">
+                        <span
+                          className="rc-mapping-auto-capture__fill"
+                          style={{ width: `${rcMappingAutoCaptureProgressPercent}%` }}
+                        />
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
 
               <ol className="switch-exercise-instructions">
                 {rcMappingInstructions.map((instruction) => (
@@ -9110,35 +9921,39 @@ export function App() {
                   onClick={handleStartRcMappingExercise}
                   disabled={!canRunRcMappingExercise || rcMappingSession.status === 'running'}
                 >
-                  {rcMappingSession.status === 'ready' ? 'Run Again' : 'Start Mapping'}
+                  {rcMappingSession.status === 'ready' ? 'Run Guided Mapping Again' : 'Begin Guided Mapping'}
                 </button>
                 <button
                   style={buttonStyle('secondary')}
                   onClick={handleConfirmRcMappingCandidate}
                   disabled={rcMappingSession.status !== 'running' || rcMappingCandidate === undefined}
                 >
-                  Confirm Detected Channel
+                  {rcMappingCandidate && rcMappingSession.currentTargetAxis
+                    ? `Capture CH${rcMappingCandidate.channelNumber} for ${formatRcAxisLabel(rcMappingSession.currentTargetAxis)}`
+                    : 'Capture Current Channel'}
                 </button>
                 <button
                   style={buttonStyle('secondary')}
                   onClick={handleStageRcMappingDrafts}
-                  disabled={rcMappingSession.status !== 'ready'}
+                  disabled={rcMappingSession.status !== 'ready' || rcMappingStagedChangeCount === 0}
                 >
-                  Stage RCMAP Changes
+                  {rcMappingSession.status === 'ready' && rcMappingStagedChangeCount === 0
+                    ? 'No RCMAP Changes Needed'
+                    : `Stage Detected Mapping (${rcMappingStagedChangeCount})`}
                 </button>
                 <button
                   style={buttonStyle()}
                   onClick={handleResetRcMappingExercise}
                   disabled={rcMappingSession.status === 'idle'}
                 >
-                  Reset
+                  Start Over
                 </button>
                 <button
                   style={buttonStyle('secondary')}
                   onClick={handleFailRcMappingExercise}
                   disabled={rcMappingSession.status !== 'running'}
                 >
-                  Mark Failed
+                  Can’t Isolate Axis
                 </button>
               </div>
                 </div>
@@ -9967,6 +10782,380 @@ export function App() {
             </article>
           </div>
 
+          <div className="bf-motor-setup-grid">
+            <section className="bf-gui-box">
+              <div className="bf-gui-box__titlebar">
+                <strong>Mixer</strong>
+              </div>
+              <div className="bf-gui-box__body">
+                <div className="switch-exercise-card__header">
+                  <div>
+                    <strong>Motor Setup</strong>
+                    <p>{motorMixerSummary}</p>
+                  </div>
+                  <StatusBadge tone={toneForScopedDraftReview(outputAssignmentStagedDrafts.length, outputAssignmentInvalidDrafts.length)}>
+                    {outputAssignmentReviewLabel}
+                  </StatusBadge>
+                </div>
+
+                {motorPreviewNodes.length > 0 ? (
+                  <div className="motor-mixer-preview">
+                    <svg viewBox="0 0 260 260" role="img" aria-label="Schematic motor map preview">
+                      <defs>
+                        <radialGradient id="motorPreviewBody" cx="50%" cy="50%" r="65%">
+                          <stop offset="0%" stopColor="rgba(255, 187, 0, 0.18)" />
+                          <stop offset="100%" stopColor="rgba(255, 187, 0, 0.02)" />
+                        </radialGradient>
+                      </defs>
+                      <rect x="0" y="0" width="260" height="260" rx="18" className="motor-mixer-preview__backdrop" />
+                      <line x1="130" y1="34" x2="130" y2="58" className="motor-mixer-preview__nose-arrow" />
+                      <polygon points="130,18 122,36 138,36" className="motor-mixer-preview__nose-arrow" />
+                      {motorPreviewNodes.map((node) => {
+                        const assignedOutput = effectiveMotorOutputByMotorNumber.get(node.motorNumber)
+                        const x = 130 + node.x * 82
+                        const y = 130 + node.y * 82
+                        const stateClassName =
+                          motorVerification.currentMotorNumber === node.motorNumber
+                            ? 'is-target'
+                            : motorVerification.verifiedOutputs.includes(assignedOutput?.channelNumber ?? -1)
+                              ? 'is-complete'
+                              : assignedOutput
+                                ? 'is-mapped'
+                                : 'is-empty'
+
+                        return (
+                          <g key={`motor-preview:${node.motorNumber}`} className={`motor-mixer-preview__node ${stateClassName}`}>
+                            <line x1="130" y1="130" x2={x} y2={y} className="motor-mixer-preview__arm" />
+                            <circle cx={x} cy={y} r={node.stack ? 29 : 24} className="motor-mixer-preview__ring" />
+                            {node.stack ? (
+                              <circle cx={x} cy={y} r={19} className="motor-mixer-preview__stack" />
+                            ) : null}
+                            <text x={x} y={y + 4} textAnchor="middle" className="motor-mixer-preview__motor-number">
+                              {node.motorNumber}
+                            </text>
+                            <text x={x} y={y + (node.stack ? 38 : 34)} textAnchor="middle" className="motor-mixer-preview__channel-label">
+                              {assignedOutput ? `OUT${assignedOutput.channelNumber}` : 'UNMAPPED'}
+                            </text>
+                            {node.stack ? (
+                              <text x={x} y={y - 34} textAnchor="middle" className="motor-mixer-preview__stack-label">
+                                {node.stack}
+                              </text>
+                            ) : null}
+                          </g>
+                        )
+                      })}
+                      <circle cx="130" cy="130" r="26" fill="url(#motorPreviewBody)" className="motor-mixer-preview__body" />
+                      <text x="130" y="136" textAnchor="middle" className="motor-mixer-preview__center-label">
+                        {motorPreviewGeometryMode.toUpperCase()}
+                      </text>
+                    </svg>
+                  </div>
+                ) : (
+                  <div className="bf-note">
+                    <p>No mapped motor outputs were detected yet. Set the required `SERVOx_FUNCTION` motor assignments first.</p>
+                  </div>
+                )}
+
+                <div className="motor-mixer-summary-grid">
+                  {Array.from({ length: motorPreviewCount }, (_, index) => {
+                    const motorNumber = index + 1
+                    const assignedOutput = effectiveMotorOutputByMotorNumber.get(motorNumber)
+                    return (
+                      <div key={`motor-summary:${motorNumber}`} className="motor-mixer-summary-card">
+                        <strong>M{motorNumber}</strong>
+                        <span>{assignedOutput ? `OUT${assignedOutput.channelNumber}` : 'Unmapped'}</span>
+                        <small>{assignedOutput?.functionLabel ?? 'No motor function staged on any visible output.'}</small>
+                      </div>
+                    )
+                  })}
+                </div>
+
+                <div className="config-pills">
+                  <span>Schematic preview only</span>
+                  <span>{airframe.frameClassLabel}</span>
+                  <span>{airframe.frameTypeLabel}</span>
+                  <span>{effectiveMotorOutputs.length} mapped motors</span>
+                  {airframe.expectedMotorCount !== undefined ? <span>{airframe.expectedMotorCount} expected</span> : null}
+                </div>
+
+                <div className="bf-tool-button-row">
+                  <button
+                    type="button"
+                    style={buttonStyle('secondary')}
+                    onClick={handleOpenMotorReorderDialog}
+                    disabled={effectiveMotorOutputs.length === 0}
+                  >
+                    Reorder Motor Outputs
+                  </button>
+                  <button
+                    type="button"
+                    style={buttonStyle()}
+                    onClick={() => setShowAllOutputAssignments((current) => !current)}
+                    disabled={outputAssignmentParameters.length === 0}
+                  >
+                    {showAllOutputAssignments ? 'Show Focused Output Slots' : `Show All ${outputAssignmentParameters.length} Output Slots`}
+                  </button>
+                </div>
+
+                <ul className="output-note-list">
+                  <li>Reordering stages new `SERVOx_FUNCTION` values. Nothing changes on the flight controller until you apply the staged output drafts.</li>
+                  <li>This preview is schematic. Always confirm the actual motor that spins with the guarded bench test before flight.</li>
+                </ul>
+
+                {outputAssignmentStagedDrafts.length > 0 || outputAssignmentInvalidDrafts.length > 0 ? (
+                  <div className="bf-toolbar">
+                    <div className="bf-toolbar__status">
+                      <span>{outputAssignmentReviewLabel}</span>
+                    </div>
+                    <button
+                      type="button"
+                      style={buttonStyle('primary')}
+                      onClick={() =>
+                        void handleApplyScopedParameterDrafts(outputAssignmentDraftEntries, 'outputs:assignments', 'Output assignments')
+                      }
+                      disabled={
+                        busyAction !== undefined ||
+                        outputAssignmentStagedDrafts.length === 0 ||
+                        outputAssignmentInvalidDrafts.length > 0 ||
+                        !canApplyDraftParameters
+                      }
+                    >
+                      {busyAction === 'outputs:assignments' ? 'Applying…' : `Apply Output Assignments (${outputAssignmentStagedDrafts.length})`}
+                    </button>
+                    <button
+                      type="button"
+                      style={buttonStyle()}
+                      onClick={() =>
+                        handleDiscardScopedParameterDrafts(outputAssignmentDraftEntries.map((entry) => entry.id), 'output assignments')
+                      }
+                      disabled={busyAction !== undefined || outputAssignmentDraftEntries.length === 0}
+                    >
+                      Discard
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            </section>
+
+            <section className="bf-gui-box" id={OUTPUTS_BENCH_TARGET_ID}>
+              <div className="bf-gui-box__titlebar">
+                <strong>Direction & Test</strong>
+              </div>
+              <div className="bf-gui-box__body">
+                <div className="switch-exercise-card__header">
+                  <div>
+                    <strong>Motor Direction Check</strong>
+                    <p>{motorDirectionSummary}</p>
+                  </div>
+                  <StatusBadge tone={toneForModeSwitchExercise(motorVerification.status)}>{motorVerification.status}</StatusBadge>
+                </div>
+
+                <div className="config-pills">
+                  <span>Current: {currentMotorVerificationLabel ?? 'Not started'}</span>
+                  <span>Selected: {selectedMotorTestOutputLabel ?? 'None selected'}</span>
+                  <span>Bench test: {motorTestThrottlePercent}% / {motorTestDurationSeconds.toFixed(1)}s</span>
+                  {outputMapping.motorOutputs.map((output) => {
+                    const verified = motorVerification.verifiedOutputs.includes(output.channelNumber)
+                    const targeted = motorVerification.currentOutputChannel === output.channelNumber
+                    const selected = selectedMotorTestOutputMotorNumber === output.motorNumber
+                    return (
+                      <span
+                        key={`direction-pill:${output.paramId}`}
+                        className={verified ? 'is-complete' : targeted ? 'is-target' : selected ? 'is-pending' : undefined}
+                      >
+                        M{output.motorNumber ?? '?'} · OUT{output.channelNumber}
+                      </span>
+                    )
+                  })}
+                </div>
+
+                <div className="motor-direction-layout">
+                  <div className="motor-direction-layout__sliders">
+                    <MotorTestSliders
+                      targets={motorTestSliderTargets}
+                      selectedOutput={motorTestOutput}
+                      throttlePercent={motorTestThrottlePercent}
+                      onSelectOutput={(output) => setMotorTestOutput(output)}
+                      onThrottleChange={(percent) => setMotorTestThrottlePercent(percent)}
+                      onTest={() => void handleRunMotorTest()}
+                      testDisabled={busyAction !== undefined || !motorTestEligibility.allowed || motorTestOutput === undefined}
+                      masterEnabled
+                      testId="motor-test-sliders"
+                    />
+                  </div>
+
+                  <div className="motor-test-card motor-test-card--embedded">
+                    <div className="switch-exercise-card__header">
+                      <div>
+                        <strong>Motor Test Guardrails</strong>
+                        <p>{snapshot.motorTest.summary}</p>
+                      </div>
+                      <StatusBadge tone={toneForMotorTestStatus(snapshot.motorTest.status)}>{snapshot.motorTest.status}</StatusBadge>
+                    </div>
+
+                    <div className="motor-test-grid">
+                      <label>
+                        <span>Output</span>
+                        <select
+                          value={motorTestOutput ?? ''}
+                          onChange={(event) => setMotorTestOutput(event.target.value ? Number(event.target.value) : undefined)}
+                          disabled={busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
+                        >
+                          <option value="">Select output</option>
+                          <option value={ALL_MOTOR_TEST_OUTPUT}>All mapped motors (sequence)</option>
+                          {outputMapping.motorOutputs.map((output) => (
+                            <option key={output.paramId} value={output.channelNumber}>
+                              OUT{output.channelNumber}
+                              {output.motorNumber !== undefined ? ` / M${output.motorNumber}` : ''} · {output.functionLabel}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <label>
+                        <span>Throttle %</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={MAX_MOTOR_TEST_THROTTLE_PERCENT}
+                          step={1}
+                          value={motorTestThrottlePercent}
+                          onChange={(event) => setMotorTestThrottlePercent(Number(event.target.value))}
+                          disabled={busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
+                        />
+                      </label>
+
+                      <label>
+                        <span>Duration (s)</span>
+                        <input
+                          type="number"
+                          min={0.1}
+                          max={MAX_MOTOR_TEST_DURATION_SECONDS}
+                          step={0.1}
+                          value={motorTestDurationSeconds}
+                          onChange={(event) => setMotorTestDurationSeconds(Number(event.target.value))}
+                          disabled={busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
+                        />
+                      </label>
+                    </div>
+
+                    <div className="config-pills">
+                      <span>Single output or ALL sequence</span>
+                      <span>ALL uses ArduPilot motor sequence order</span>
+                      <span>Auto-stop after {motorTestDurationSeconds.toFixed(1)}s</span>
+                      <span>Throttle capped at {MAX_MOTOR_TEST_THROTTLE_PERCENT}%</span>
+                      {selectedMotorTestOutputLabel ? <span>Selected: {selectedMotorTestOutputLabel}</span> : null}
+                    </div>
+
+                    <div className="motor-test-acknowledgments">
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={propsRemovedAcknowledged}
+                          onChange={(event) => setPropsRemovedAcknowledged(event.target.checked)}
+                          disabled={busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
+                        />
+                        <span>All propellers are removed.</span>
+                      </label>
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={testAreaAcknowledged}
+                          onChange={(event) => setTestAreaAcknowledged(event.target.checked)}
+                          disabled={busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
+                        />
+                        <span>The vehicle is restrained and the test area is clear.</span>
+                      </label>
+                    </div>
+
+                    <ul className="output-note-list">
+                      {motorTestGuardReasons.length > 0
+                        ? motorTestGuardReasons.map((reason) => <li key={reason}>{reason}</li>)
+                        : snapshot.motorTest.instructions.map((instruction) => <li key={instruction}>{instruction}</li>)}
+                    </ul>
+
+                    <div className="switch-exercise-controls">
+                      <button
+                        id={OUTPUTS_MOTOR_TEST_BUTTON_ID}
+                        type="button"
+                        className={
+                          motorVerification.status === 'running' && !currentMotorTestSucceeded && canRunMotorTest
+                            ? 'guided-action-pulse'
+                            : undefined
+                        }
+                        style={buttonStyle('secondary')}
+                        onClick={() => void handleRunMotorTest()}
+                        disabled={!canRunMotorTest || busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
+                      >
+                        {busyAction === 'motor-test' ? 'Sending…' : 'Run Motor Test'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <ol className="switch-exercise-instructions">
+                  <li>Remove props, acknowledge the motor-test guardrails, and keep the vehicle restrained.</li>
+                  <li>Start the guided direction check or target a specific mapped output, then spin one motor at a time.</li>
+                  <li>If the correct motor spins but direction is wrong, reverse it in the ESC toolchain, then retest here.</li>
+                </ol>
+
+                <div className="bf-tool-button-row">
+                  <button
+                    id={OUTPUTS_MOTOR_START_BUTTON_ID}
+                    type="button"
+                    style={buttonStyle('primary')}
+                    onClick={() => handleStartMotorVerification()}
+                    disabled={!canRunMotorVerification || motorVerification.status === 'running'}
+                  >
+                    {motorVerification.status === 'passed' ? 'Run Direction Check Again' : 'Start Direction Check'}
+                  </button>
+                  <button
+                    type="button"
+                    style={buttonStyle()}
+                    onClick={() => setMotorTestOutput(motorVerification.currentOutputChannel)}
+                    disabled={motorVerification.currentOutputChannel === undefined}
+                  >
+                    Target Current Output
+                  </button>
+                  <button
+                    id={OUTPUTS_MOTOR_CONFIRM_BUTTON_ID}
+                    type="button"
+                    className={currentMotorTestSucceeded ? 'guided-action-pulse' : undefined}
+                    style={buttonStyle('secondary')}
+                    onClick={handleConfirmMotorVerification}
+                    disabled={
+                      motorVerification.status !== 'running' ||
+                      snapshot.motorTest.status !== 'succeeded' ||
+                      snapshot.motorTest.selectedOutputChannel !== motorVerification.currentOutputChannel
+                    }
+                  >
+                    Confirm Motor & Direction
+                  </button>
+                  <button
+                    type="button"
+                    style={buttonStyle('secondary')}
+                    onClick={handleFailMotorVerification}
+                    disabled={motorVerification.status !== 'running'}
+                  >
+                    Mark Failed
+                  </button>
+                  <button
+                    type="button"
+                    style={buttonStyle()}
+                    onClick={handleResetMotorVerification}
+                    disabled={motorVerification.status === 'idle'}
+                  >
+                    Reset
+                  </button>
+                </div>
+
+                <div className="bf-note">
+                  <p>Direction changes are not written from this card. Use it to verify the real motor response after any ESC-side reversal or output remap.</p>
+                </div>
+              </div>
+            </section>
+          </div>
+
           <div className={`orientation-card${orientationBenchFocusActive ? ' orientation-card--guided-focus' : ''}`} id={OUTPUTS_ORIENTATION_TARGET_ID}>
             <div className="switch-exercise-card__header">
               <div>
@@ -10471,199 +11660,7 @@ export function App() {
             </div>
           </div>
 
-          <div className="outputs-lab-grid" id={OUTPUTS_BENCH_TARGET_ID}>
-          <MotorTestSliders
-            motorCount={outputMapping.motorOutputs.length || 4}
-            selectedOutput={motorTestOutput}
-            throttlePercent={motorTestThrottlePercent}
-            onSelectOutput={(output) => setMotorTestOutput(output)}
-            onThrottleChange={(percent) => setMotorTestThrottlePercent(percent)}
-            onTest={() => void handleRunMotorTest()}
-            testDisabled={busyAction !== undefined || !motorTestEligibility.allowed || motorTestOutput === undefined}
-            masterEnabled={false}
-            testId="motor-test-sliders"
-          />
-
-          <div className="motor-test-card">
-            <div className="switch-exercise-card__header">
-              <div>
-                <strong>Motor test guardrails</strong>
-                <p>{snapshot.motorTest.summary}</p>
-              </div>
-              <StatusBadge tone={toneForMotorTestStatus(snapshot.motorTest.status)}>{snapshot.motorTest.status}</StatusBadge>
-            </div>
-
-            <div className="motor-test-grid">
-              <label>
-                <span>Output</span>
-                <select
-                  value={motorTestOutput ?? ''}
-                  onChange={(event) => setMotorTestOutput(event.target.value ? Number(event.target.value) : undefined)}
-                  disabled={busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
-                >
-                  <option value="">Select output</option>
-                  {outputMapping.motorOutputs.map((output) => (
-                    <option key={output.paramId} value={output.channelNumber}>
-                      OUT{output.channelNumber}
-                      {output.motorNumber !== undefined ? ` / M${output.motorNumber}` : ''} · {output.functionLabel}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label>
-                <span>Throttle %</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={MAX_MOTOR_TEST_THROTTLE_PERCENT}
-                  step={1}
-                  value={motorTestThrottlePercent}
-                  onChange={(event) => setMotorTestThrottlePercent(Number(event.target.value))}
-                  disabled={busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
-                />
-              </label>
-
-              <label>
-                <span>Duration (s)</span>
-                <input
-                  type="number"
-                  min={0.1}
-                  max={MAX_MOTOR_TEST_DURATION_SECONDS}
-                  step={0.1}
-                  value={motorTestDurationSeconds}
-                  onChange={(event) => setMotorTestDurationSeconds(Number(event.target.value))}
-                  disabled={busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
-                />
-              </label>
-            </div>
-
-            <div className="config-pills">
-              <span>Single output only</span>
-              <span>Board order only</span>
-              <span>Auto-stop after {motorTestDurationSeconds.toFixed(1)}s</span>
-              <span>Throttle capped at {MAX_MOTOR_TEST_THROTTLE_PERCENT}%</span>
-              {selectedMotorTestOutputLabel ? <span>Selected: {selectedMotorTestOutputLabel}</span> : null}
-            </div>
-
-            <div className="motor-test-acknowledgments">
-              <label>
-                <input
-                  type="checkbox"
-                  checked={propsRemovedAcknowledged}
-                  onChange={(event) => setPropsRemovedAcknowledged(event.target.checked)}
-                  disabled={busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
-                />
-                <span>All propellers are removed.</span>
-              </label>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={testAreaAcknowledged}
-                  onChange={(event) => setTestAreaAcknowledged(event.target.checked)}
-                  disabled={busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
-                />
-                <span>The vehicle is restrained and the test area is clear.</span>
-              </label>
-            </div>
-
-            <ul className="output-note-list">
-              {motorTestGuardReasons.length > 0
-                ? motorTestGuardReasons.map((reason) => <li key={reason}>{reason}</li>)
-                : snapshot.motorTest.instructions.map((instruction) => <li key={instruction}>{instruction}</li>)}
-            </ul>
-
-            <div className="switch-exercise-controls">
-              <button
-                id={OUTPUTS_MOTOR_TEST_BUTTON_ID}
-                className={
-                  motorVerification.status === 'running' && !currentMotorTestSucceeded && canRunMotorTest
-                    ? 'guided-action-pulse'
-                    : undefined
-                }
-                style={buttonStyle('secondary')}
-                onClick={() => void handleRunMotorTest()}
-                disabled={!canRunMotorTest || busyAction !== undefined || snapshot.motorTest.status === 'requested' || snapshot.motorTest.status === 'running'}
-              >
-                {busyAction === 'motor-test' ? 'Sending…' : 'Run Motor Test'}
-              </button>
-            </div>
-          </div>
-
-          <div className="motor-verification-card">
-            <div className="switch-exercise-card__header">
-              <div>
-                <strong>Motor order & direction</strong>
-                <p>{motorVerificationSummary}</p>
-              </div>
-              <StatusBadge tone={toneForModeSwitchExercise(motorVerification.status)}>{motorVerification.status}</StatusBadge>
-            </div>
-
-            <div className="config-pills">
-              {outputMapping.motorOutputs.map((output) => {
-                const verified = motorVerification.verifiedOutputs.includes(output.channelNumber)
-                const targeted = motorVerification.currentOutputChannel === output.channelNumber
-                return (
-                  <span key={output.paramId} className={verified ? 'is-complete' : targeted ? 'is-target' : undefined}>
-                    OUT{output.channelNumber}
-                    {output.motorNumber !== undefined ? ` / M${output.motorNumber}` : ''} · {output.functionLabel}
-                  </span>
-                )
-              })}
-            </div>
-
-            <ol className="switch-exercise-instructions">
-              <li>Remove props, acknowledge the motor-test guardrails, and use full-power mode only.</li>
-              <li>Spin the targeted output with the guarded motor test.</li>
-              <li>Confirm that the expected motor spins and that direction is correct for the frame.</li>
-            </ol>
-
-            <div className="switch-exercise-controls">
-              <button
-                id={OUTPUTS_MOTOR_START_BUTTON_ID}
-                style={buttonStyle('primary')}
-                onClick={() => handleStartMotorVerification()}
-                disabled={!canRunMotorVerification || motorVerification.status === 'running'}
-              >
-                {motorVerification.status === 'passed' ? 'Run Again' : 'Start Verification'}
-              </button>
-              <button
-                style={buttonStyle()}
-                onClick={() => setMotorTestOutput(motorVerification.currentOutputChannel)}
-                disabled={motorVerification.currentOutputChannel === undefined}
-              >
-                Target Current Output
-              </button>
-              <button
-                id={OUTPUTS_MOTOR_CONFIRM_BUTTON_ID}
-                className={currentMotorTestSucceeded ? 'guided-action-pulse' : undefined}
-                style={buttonStyle('secondary')}
-                onClick={handleConfirmMotorVerification}
-                disabled={
-                  motorVerification.status !== 'running' ||
-                  snapshot.motorTest.status !== 'succeeded' ||
-                  snapshot.motorTest.selectedOutputChannel !== motorVerification.currentOutputChannel
-                }
-              >
-                Confirm Motor & Direction
-              </button>
-              <button
-                style={buttonStyle('secondary')}
-                onClick={handleFailMotorVerification}
-                disabled={motorVerification.status !== 'running'}
-              >
-                Mark Failed
-              </button>
-              <button
-                style={buttonStyle()}
-                onClick={handleResetMotorVerification}
-                disabled={motorVerification.status === 'idle'}
-              >
-                Reset
-              </button>
-            </div>
-          </div>
-
+          <div className="outputs-lab-grid">
           <div className="esc-review-card">
             <div className="switch-exercise-card__header">
               <div>
@@ -12325,6 +13322,136 @@ export function App() {
       ) : null}
         </div>
       </div>
+
+      {motorReorderDialogOpen ? (
+        <div className="board-media-lightbox motor-reorder-lightbox" role="dialog" aria-modal="true" onClick={handleCloseMotorReorderDialog}>
+          <div className="board-media-lightbox__frame motor-reorder-lightbox__frame" onClick={(event) => event.stopPropagation()}>
+            <div className="board-media-lightbox__header">
+              <div>
+                <strong>Motor Output Reordering</strong>
+                <p>Choose which physical output should drive each motor number. This stages new `SERVOx_FUNCTION` values and does not touch the flight controller until you apply the draft.</p>
+              </div>
+              <button type="button" style={buttonStyle()} onClick={handleCloseMotorReorderDialog}>
+                Close
+              </button>
+            </div>
+
+            <div className="motor-reorder-lightbox__grid">
+              <section className="bf-gui-box">
+                <div className="bf-gui-box__titlebar">
+                  <strong>Preview</strong>
+                </div>
+                <div className="bf-gui-box__body">
+                  {motorPreviewNodes.length > 0 ? (
+                    <div className="motor-mixer-preview motor-mixer-preview--dialog">
+                      <svg viewBox="0 0 260 260" role="img" aria-label="Schematic reordered motor map preview">
+                        <rect x="0" y="0" width="260" height="260" rx="18" className="motor-mixer-preview__backdrop" />
+                        <line x1="130" y1="34" x2="130" y2="58" className="motor-mixer-preview__nose-arrow" />
+                        <polygon points="130,18 122,36 138,36" className="motor-mixer-preview__nose-arrow" />
+                        {motorPreviewNodes.map((node) => {
+                          const selectedChannelNumber = Number(motorReorderSelections[String(node.motorNumber)] ?? '')
+                          const selectedOutput = effectiveMotorOutputs.find((output) => output.channelNumber === selectedChannelNumber)
+                          const x = 130 + node.x * 82
+                          const y = 130 + node.y * 82
+
+                          return (
+                            <g key={`motor-dialog-preview:${node.motorNumber}`} className={`motor-mixer-preview__node ${selectedOutput ? 'is-mapped' : 'is-empty'}`}>
+                              <line x1="130" y1="130" x2={x} y2={y} className="motor-mixer-preview__arm" />
+                              <circle cx={x} cy={y} r={node.stack ? 29 : 24} className="motor-mixer-preview__ring" />
+                              {node.stack ? <circle cx={x} cy={y} r={19} className="motor-mixer-preview__stack" /> : null}
+                              <text x={x} y={y + 4} textAnchor="middle" className="motor-mixer-preview__motor-number">
+                                {node.motorNumber}
+                              </text>
+                              <text x={x} y={y + (node.stack ? 38 : 34)} textAnchor="middle" className="motor-mixer-preview__channel-label">
+                                {selectedOutput ? `OUT${selectedOutput.channelNumber}` : 'UNMAPPED'}
+                              </text>
+                            </g>
+                          )
+                        })}
+                        <circle cx="130" cy="130" r="26" className="motor-mixer-preview__body" />
+                        <text x="130" y="136" textAnchor="middle" className="motor-mixer-preview__center-label">
+                          {motorPreviewGeometryMode.toUpperCase()}
+                        </text>
+                      </svg>
+                    </div>
+                  ) : (
+                    <div className="bf-note">
+                      <p>No mapped motor outputs are available to reorder yet.</p>
+                    </div>
+                  )}
+
+                  <div className="config-pills">
+                    <span>{airframe.frameClassLabel}</span>
+                    <span>{airframe.frameTypeLabel}</span>
+                    <span>{motorReorderRows.length} mapped outputs</span>
+                  </div>
+                </div>
+              </section>
+
+              <section className="bf-gui-box">
+                <div className="bf-gui-box__titlebar">
+                  <strong>Assignments</strong>
+                </div>
+                <div className="bf-gui-box__body">
+                  <div className="motor-reorder-table">
+                    <div className="motor-reorder-table__row motor-reorder-table__row--header">
+                      <span>Motor</span>
+                      <span>Current</span>
+                      <span>Target Output</span>
+                    </div>
+                    {motorReorderRows.map((row) => (
+                      <label key={`motor-reorder-row:${row.motorNumber}`} className="motor-reorder-table__row">
+                        <strong>M{row.motorNumber}</strong>
+                        <span>{row.currentOutputLabel}</span>
+                        <select
+                          value={motorReorderSelections[String(row.motorNumber)] ?? String(row.currentChannelNumber)}
+                          onChange={(event) =>
+                            setMotorReorderSelections((current) => ({
+                              ...current,
+                              [String(row.motorNumber)]: event.target.value
+                            }))
+                          }
+                        >
+                          {effectiveMotorOutputs.map((output) => (
+                            <option key={`motor-reorder-option:${row.motorNumber}:${output.channelNumber}`} value={String(output.channelNumber)}>
+                              OUT{output.channelNumber} · {output.functionLabel}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ))}
+                  </div>
+
+                  {motorReorderDuplicateChannels.length > 0 ? (
+                    <div className="bf-note bf-note--warning">
+                      <p>Each motor must use a unique output. Resolve the duplicate selections on {motorReorderDuplicateChannels.map((channelNumber) => `OUT${channelNumber}`).join(', ')}.</p>
+                    </div>
+                  ) : null}
+
+                  <ul className="output-note-list">
+                    <li>This changes which output pin carries each motor function. It does not infer or change ESC spin direction.</li>
+                    <li>After applying a new order, rerun the guarded direction check and confirm the correct motor spins.</li>
+                  </ul>
+
+                  <div className="switch-exercise-controls">
+                    <button type="button" style={buttonStyle()} onClick={handleCloseMotorReorderDialog}>
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      style={buttonStyle('primary')}
+                      onClick={handleStageMotorReorderDrafts}
+                      disabled={!motorReorderCanStage}
+                    >
+                      {motorReorderChangedCount > 0 ? `Stage Reorder (${motorReorderChangedCount})` : 'Stage Reorder'}
+                    </button>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {selectedBoardMedia ? (
         <div className="board-media-lightbox" role="dialog" aria-modal="true" onClick={() => setSelectedBoardMedia(undefined)}>

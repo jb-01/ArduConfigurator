@@ -173,7 +173,9 @@ export interface MotorTestState {
   status: MotorTestStatus
   summary: string
   instructions: string[]
+  allOutputsSelected?: boolean
   selectedOutputChannel?: number
+  selectedOutputCount?: number
   selectedMotorNumber?: number
   throttlePercent?: number
   durationSeconds?: number
@@ -183,7 +185,8 @@ export interface MotorTestState {
 }
 
 export interface MotorTestRequest {
-  outputChannel: number
+  outputChannel?: number
+  runAllOutputs?: boolean
   throttlePercent: number
   durationSeconds: number
 }

@@ -4,8 +4,12 @@ async function expectParameterSummaryComplete(page: Page): Promise<void> {
   await expect(page.getByTestId('session-parameter-summary')).toHaveText(/^(134 params|Params 134)$/)
 }
 
-async function connectToVehicle(page: Page, transportMode: 'demo' | 'websocket' = 'demo'): Promise<void> {
-  await page.goto('/')
+async function connectToVehicle(
+  page: Page,
+  transportMode: 'demo' | 'websocket' = 'demo',
+  path = '/'
+): Promise<void> {
+  await page.goto(path)
 
   await page.getByTestId('transport-mode-select').selectOption(transportMode)
 
@@ -69,6 +73,54 @@ test.describe('browser configurator regression flows', () => {
     await page.getByTestId('setup-start-guided-button').click()
     const accelerometerStep = page.locator('.setup-wizard-step').filter({ hasText: 'Accelerometer' })
     await expect(accelerometerStep).toHaveClass(/is-complete/)
+  })
+
+  test('local guided setup shortcut opens the requested step directly for faster iteration', async ({ page }) => {
+    await connectToVehicle(page, 'demo', '/?guidedSetupStep=radio')
+
+    await expect(page.getByTestId('setup-wizard')).toBeVisible()
+    await expect(page.locator('.setup-wizard__header h3')).toHaveText('Radio')
+    await expect(page.getByText('Testing shortcut')).toBeVisible()
+    await expect(page.locator('.setup-wizard-step').filter({ hasText: 'Failsafe' })).toBeEnabled()
+  })
+
+  test('outputs exposes the motor setup card and reorder dialog', async ({ page }) => {
+    await connectToVehicle(page, 'demo')
+
+    await openView(page, 'outputs')
+    await expect(page.getByText('Motor Setup', { exact: true })).toBeVisible()
+    await expect(page.getByText('Motor Direction Check', { exact: true })).toBeVisible()
+
+    await page.getByRole('button', { name: 'Reorder Motor Outputs' }).click()
+    await expect(page.getByRole('dialog')).toBeVisible()
+    await expect(page.getByText('Motor Output Reordering', { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Stage Reorder' })).toBeVisible()
+    await page.getByRole('button', { name: 'Close' }).click()
+    await expect(page.getByText('Motor Output Reordering', { exact: true })).toHaveCount(0)
+  })
+
+  test('outputs supports an ALL motor test slider with sequential mapped-motor testing', async ({ page }) => {
+    await connectToVehicle(page, 'demo')
+
+    await openView(page, 'outputs')
+    await page.getByLabel('All propellers are removed.').check()
+    await page.getByLabel('The vehicle is restrained and the test area is clear.').check()
+    await page.getByTestId('motor-test-sliders').getByText('ALL', { exact: true }).click()
+    await expect(page.getByText('Selected: All 4 mapped motors (sequence)').first()).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Run Motor Test' })).toBeEnabled()
+  })
+
+  test('manual motor test does not silently start motor verification', async ({ page }) => {
+    await connectToVehicle(page, 'demo')
+
+    await openView(page, 'outputs')
+    await page.getByLabel('All propellers are removed.').check()
+    await page.getByLabel('The vehicle is restrained and the test area is clear.').check()
+    await page.getByTestId('motor-test-sliders').getByRole('button', { name: 'Test' }).click()
+
+    await expect(page.getByText('Motor Direction Check', { exact: true })).toBeVisible()
+    await expect(page.locator('#outputs-motor-confirm')).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Start Direction Check' })).toBeVisible()
   })
 
   test('bundled websocket demo keeps core configuration surfaces reachable', async ({ page }) => {
@@ -143,6 +195,9 @@ test.describe('browser configurator regression flows', () => {
     await page.getByLabel('All propellers are removed.').check()
     await page.getByLabel('The vehicle is restrained and the test area is clear.').check()
     await page.getByTestId('motor-test-sliders').getByRole('button', { name: 'Test' }).click()
+    await expect(page.getByRole('button', { name: 'Start Direction Check' })).toBeVisible()
+    await page.getByRole('button', { name: 'Start Direction Check' }).click()
+    await page.getByRole('button', { name: 'Run Motor Test' }).click()
     await expect(page.locator('#outputs-motor-confirm')).toBeEnabled()
     await expect(page.locator('#outputs-motor-confirm')).toHaveClass(/guided-action-pulse/)
 

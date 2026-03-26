@@ -425,9 +425,11 @@ export function createArduCopterMockScenario(): MockScenario {
           ) {
             responses.push(codec.encode(envelope(95, mockAutopilotVersion)))
           } else if (outbound.message.command === MAV_CMD.DO_MOTOR_TEST) {
-            const outputChannel = Math.round(outbound.message.params[0] ?? 0)
+            const targetIndex = Math.round(outbound.message.params[0] ?? 0)
             const throttlePercent = Number((outbound.message.params[2] ?? 0).toFixed(1))
             const durationSeconds = Number((outbound.message.params[3] ?? 0).toFixed(1))
+            const motorCount = Math.max(Math.round(outbound.message.params[4] ?? 1), 1)
+            const motorOrder = Math.round(outbound.message.params[5] ?? 0)
             responses.push(
               codec.encode(
                 envelope(94, {
@@ -446,7 +448,12 @@ export function createArduCopterMockScenario(): MockScenario {
                 envelope(95, {
                   type: 'STATUSTEXT',
                   severity: MAV_SEVERITY.WARNING,
-                  text: `Motor test accepted for OUT${outputChannel} at ${throttlePercent}% for ${durationSeconds}s.`,
+                  text:
+                    motorCount > 1
+                      ? `Motor test accepted for ${motorCount} motors in sequence at ${throttlePercent}% for ${durationSeconds}s each.`
+                      : motorOrder === 2
+                        ? `Motor test accepted for M${targetIndex} at ${throttlePercent}% for ${durationSeconds}s.`
+                        : `Motor test accepted for target ${targetIndex} at ${throttlePercent}% for ${durationSeconds}s.`,
                   statusId: 0,
                   chunkSequence: 0
                 })

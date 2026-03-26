@@ -1,7 +1,7 @@
 import type { ConfiguratorSnapshot, MotorTestRequest } from './types.js'
 import { deriveOutputMappingSummary, type ServoOutputAssignment } from './airframe-outputs.js'
 
-export const MAX_MOTOR_TEST_THROTTLE_PERCENT = 15
+export const MAX_MOTOR_TEST_THROTTLE_PERCENT = 20
 export const MAX_MOTOR_TEST_DURATION_SECONDS = 2
 export const MIN_MOTOR_TEST_DURATION_SECONDS = 0.1
 
@@ -9,6 +9,7 @@ export interface MotorTestEligibility {
   allowed: boolean
   reasons: string[]
   selectedOutput?: ServoOutputAssignment
+  selectedOutputs: ServoOutputAssignment[]
 }
 
 export function evaluateMotorTestEligibility(
@@ -54,12 +55,20 @@ export function evaluateMotorTestEligibility(
   }
 
   let selectedOutput: ServoOutputAssignment | undefined
-  if (request.outputChannel === undefined) {
-    reasons.push('Select a mapped motor output.')
+  const selectedOutputs = outputMapping.motorOutputs
+
+  if (request.runAllOutputs) {
+    if (!hasContiguousMotorSequence(selectedOutputs)) {
+      reasons.push('All-motor tests require a contiguous motor sequence starting at M1. Fix the motor mapping or use an individual motor slider.')
+    }
   } else {
-    selectedOutput = outputMapping.motorOutputs.find((output) => output.channelNumber === request.outputChannel)
-    if (!selectedOutput) {
-      reasons.push(`OUT${request.outputChannel} is not mapped as a motor output.`)
+    if (request.outputChannel === undefined) {
+      reasons.push('Select a mapped motor output.')
+    } else {
+      selectedOutput = selectedOutputs.find((output) => output.channelNumber === request.outputChannel)
+      if (!selectedOutput) {
+        reasons.push(`OUT${request.outputChannel} is not mapped as a motor output.`)
+      }
     }
   }
 
@@ -82,13 +91,31 @@ export function evaluateMotorTestEligibility(
     allowed: reasons.length === 0,
     reasons,
     selectedOutput,
+    selectedOutputs,
   }
 }
 
-export function motorTestInstructions(request: MotorTestRequest, selectedOutput?: ServoOutputAssignment): string[] {
+export function motorTestInstructions(
+  request: MotorTestRequest,
+  selectedOutput?: ServoOutputAssignment,
+  selectedOutputs: ServoOutputAssignment[] = []
+): string[] {
+  if (request.runAllOutputs) {
+    return [
+      'Remove all propellers before running any motor test.',
+      'Keep the vehicle restrained and the test area clear of people, tools, and loose objects.',
+      `This request spins all ${selectedOutputs.length} mapped motors in sequence at ${request.throttlePercent}% for ${request.durationSeconds.toFixed(1)} seconds per motor.`,
+      'ArduPilot runs the ALL test one motor at a time in sequence, not all motors simultaneously.',
+    ]
+  }
+
   return [
     'Remove all propellers before running any motor test.',
     'Keep the vehicle restrained and the test area clear of people, tools, and loose objects.',
     `This request spins ${selectedOutput ? `OUT${selectedOutput.channelNumber}${selectedOutput.motorNumber !== undefined ? ` / M${selectedOutput.motorNumber}` : ''}` : 'the selected output'} at ${request.throttlePercent}% for ${request.durationSeconds.toFixed(1)} seconds and then stops automatically.`,
   ]
+}
+
+function hasContiguousMotorSequence(outputs: ServoOutputAssignment[]): boolean {
+  return outputs.every((output, index) => output.motorNumber === index + 1)
 }

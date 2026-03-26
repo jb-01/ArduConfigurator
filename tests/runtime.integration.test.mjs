@@ -766,6 +766,94 @@ test('command ack waiters are cleaned up when outbound COMMAND_LONG send fails',
   }
 })
 
+test('motor test supports all mapped motors in sequence', async () => {
+  const sentMessages = []
+  const runtime = new ArduPilotConfiguratorRuntime(
+    createMotorTestAckSession(
+      {
+        FLTMODE1: 0,
+        FRAME_CLASS: 1,
+        FRAME_TYPE: 1,
+        SERVO1_FUNCTION: 33,
+        SERVO2_FUNCTION: 34,
+        SERVO3_FUNCTION: 35,
+        SERVO4_FUNCTION: 36
+      },
+      sentMessages
+    ),
+    arducopterMetadata
+  )
+
+  try {
+    await runtime.connect()
+    await runtime.requestParameterList({ timeoutMs: 200 })
+    await runtime.waitForParameterSync({ timeoutMs: 200 })
+
+    await runtime.runMotorTest({
+      runAllOutputs: true,
+      throttlePercent: 5,
+      durationSeconds: 1
+    })
+
+    const command = sentMessages.find((message) => message.type === 'COMMAND_LONG' && message.command === MAV_CMD.DO_MOTOR_TEST)
+    assert.ok(command)
+    assert.deepEqual(command.params.slice(0, 6), [1, 0, 5, 1, 4, 1])
+
+    const snapshot = runtime.getSnapshot()
+    assert.equal(snapshot.motorTest.status, 'running')
+    assert.equal(snapshot.motorTest.allOutputsSelected, true)
+    assert.equal(snapshot.motorTest.selectedOutputCount, 4)
+    assert.match(snapshot.motorTest.summary, /all 4 mapped motors/i)
+  } finally {
+    await runtime.disconnect().catch(() => {})
+    runtime.destroy()
+  }
+})
+
+test('single motor test uses motor sequence number when board-order testing a remapped quad', async () => {
+  const sentMessages = []
+  const runtime = new ArduPilotConfiguratorRuntime(
+    createMotorTestAckSession(
+      {
+        FLTMODE1: 0,
+        FRAME_CLASS: 1,
+        FRAME_TYPE: 12,
+        SERVO1_FUNCTION: 34,
+        SERVO2_FUNCTION: 33,
+        SERVO3_FUNCTION: 36,
+        SERVO4_FUNCTION: 35
+      },
+      sentMessages
+    ),
+    arducopterMetadata
+  )
+
+  try {
+    await runtime.connect()
+    await runtime.requestParameterList({ timeoutMs: 200 })
+    await runtime.waitForParameterSync({ timeoutMs: 200 })
+
+    await runtime.runMotorTest({
+      outputChannel: 2,
+      throttlePercent: 5,
+      durationSeconds: 1
+    })
+
+    const command = sentMessages.find((message) => message.type === 'COMMAND_LONG' && message.command === MAV_CMD.DO_MOTOR_TEST)
+    assert.ok(command)
+    assert.deepEqual(command.params.slice(0, 6), [1, 0, 5, 1, 1, 2])
+
+    const snapshot = runtime.getSnapshot()
+    assert.equal(snapshot.motorTest.status, 'running')
+    assert.equal(snapshot.motorTest.selectedOutputChannel, 2)
+    assert.equal(snapshot.motorTest.selectedMotorNumber, 1)
+    assert.match(snapshot.motorTest.summary, /OUT2 \/ M1/i)
+  } finally {
+    await runtime.disconnect().catch(() => {})
+    runtime.destroy()
+  }
+})
+
 async function waitFor(predicate, timeoutMs) {
   const deadline = Date.now() + timeoutMs
 
@@ -939,6 +1027,88 @@ function createEchoSession(initialParameters, shouldDropWrite, shouldThrowSend =
           paramType: 9,
           paramCount: Object.keys(parameters).length,
           paramIndex: Object.keys(parameters).indexOf(message.paramId)
+        })
+      }
+    }
+  }
+}
+
+function createMotorTestAckSession(initialParameters, sentMessages = []) {
+  const statusListeners = []
+  const messageListeners = []
+  const parameters = { ...initialParameters }
+  let connected = false
+
+  const emit = (message) => {
+    messageListeners.forEach((listener) =>
+      listener({
+        header: {
+          systemId: 1,
+          componentId: 1,
+          sequence: 0
+        },
+        message,
+        timestampMs: Date.now()
+      })
+    )
+  }
+
+  return {
+    getTransportStatus() {
+      return connected ? { kind: 'connected' } : { kind: 'disconnected' }
+    },
+    onStatus(listener) {
+      statusListeners.push(listener)
+      return () => {}
+    },
+    onMessage(listener) {
+      messageListeners.push(listener)
+      return () => {}
+    },
+    async connect() {
+      connected = true
+      statusListeners.forEach((listener) => listener({ kind: 'connected' }))
+      emit({
+        type: 'HEARTBEAT',
+        autopilot: 3,
+        vehicleType: 2,
+        baseMode: 0,
+        customMode: 0,
+        systemStatus: 4,
+        mavlinkVersion: 3
+      })
+    },
+    async disconnect() {
+      connected = false
+      statusListeners.forEach((listener) => listener({ kind: 'disconnected', reason: 'test disconnect' }))
+    },
+    destroy() {},
+    async send(message) {
+      sentMessages.push(message)
+
+      if (message.type === 'PARAM_REQUEST_LIST') {
+        Object.entries(parameters).forEach(([paramId, paramValue], index, entries) => {
+          emit({
+            type: 'PARAM_VALUE',
+            paramId,
+            paramValue,
+            paramType: 9,
+            paramCount: entries.length,
+            paramIndex: index
+          })
+        })
+        return
+      }
+
+      if (message.type === 'COMMAND_LONG' && message.command === MAV_CMD.DO_MOTOR_TEST) {
+        emit({
+          type: 'COMMAND_ACK',
+          command: MAV_CMD.DO_MOTOR_TEST,
+          result: MAV_RESULT.ACCEPTED,
+          progress: 0,
+          resultParam2: 0,
+          targetSystem: 1,
+          targetComponent: 1
         })
       }
     }

@@ -1,7 +1,10 @@
 import { useCallback, useRef, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react'
 
 interface MotorTestSlidersProps {
-  motorCount: number
+  targets: Array<{
+    value: number
+    label: string
+  }>
   selectedOutput: number | undefined
   throttlePercent: number
   onSelectOutput: (output: number) => void
@@ -41,6 +44,7 @@ const TRACK_HEIGHT = 200
 const TRACK_WIDTH = 36
 const MASTER_TRACK_WIDTH = 48
 const HANDLE_HEIGHT = 10
+const MASTER_OUTPUT_VALUE = 0
 
 /* ── helpers ── */
 
@@ -192,7 +196,7 @@ function SliderColumn({
 /* ── main export ── */
 
 export function MotorTestSliders({
-  motorCount,
+  targets,
   selectedOutput,
   throttlePercent,
   onSelectOutput,
@@ -249,37 +253,35 @@ export function MotorTestSliders({
     transition: 'background 0.15s, border-color 0.15s, opacity 0.15s',
   }
 
-  const motors = Array.from({ length: motorCount }, (_, i) => i + 1)
-
   return (
     <div style={wrapperStyle} data-testid={testId}>
       <div style={slidersRowStyle}>
-        {motors.map((num) => (
+        {targets.map((target) => (
           <SliderColumn
-            key={num}
-            label={`M${num}`}
-            percent={selectedOutput === num ? throttlePercent : 0}
-            selected={selectedOutput === num}
-            onSelect={() => onSelectOutput(num)}
+            key={target.value}
+            label={target.label}
+            percent={selectedOutput === target.value ? throttlePercent : 0}
+            selected={selectedOutput === target.value}
+            onSelect={() => onSelectOutput(target.value)}
             onDrag={onThrottleChange}
           />
         ))}
 
-        {/* separator between motor columns and master */}
-        <div style={separatorStyle} />
-
-        {/* Master slider */}
-        <SliderColumn
-          label="ALL"
-          percent={masterEnabled ? throttlePercent : 0}
-          selected={masterEnabled && selectedOutput === undefined}
-          wide
-          onSelect={() => {
-            // selecting master: deselect individual, parent decides semantics
-            onSelectOutput(0)
-          }}
-          onDrag={onThrottleChange}
-        />
+        {masterEnabled ? (
+          <>
+            <div style={separatorStyle} />
+            <SliderColumn
+              label="ALL"
+              percent={selectedOutput === MASTER_OUTPUT_VALUE ? throttlePercent : 0}
+              selected={selectedOutput === MASTER_OUTPUT_VALUE}
+              wide
+              onSelect={() => {
+                onSelectOutput(MASTER_OUTPUT_VALUE)
+              }}
+              onDrag={onThrottleChange}
+            />
+          </>
+        ) : null}
       </div>
 
       <button

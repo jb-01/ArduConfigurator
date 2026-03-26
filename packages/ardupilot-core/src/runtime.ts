@@ -754,14 +754,25 @@ export class ArduPilotConfiguratorRuntime {
     }
 
     const selectedOutput = eligibility.selectedOutput
-    const instructions = motorTestInstructions(request, selectedOutput)
+    const selectedOutputs = eligibility.selectedOutputs
+    const runningAllOutputs = request.runAllOutputs === true
+    const selectedOutputCount = runningAllOutputs ? selectedOutputs.length : 1
+    const singleOutputChannel = selectedOutput?.channelNumber ?? request.outputChannel
+    const singleMotorSequence = selectedOutput?.motorNumber
+    const instructions = motorTestInstructions(request, selectedOutput, selectedOutputs)
     const startedAtMs = Date.now()
     this.motorTest = {
       status: 'requested',
-      summary: `Queueing a motor test for OUT${request.outputChannel}.`,
+      summary: runningAllOutputs
+        ? `Queueing a motor test across all ${selectedOutputCount} mapped motors.`
+        : selectedOutput?.motorNumber !== undefined
+          ? `Queueing a motor test for OUT${singleOutputChannel} / M${selectedOutput.motorNumber}.`
+          : `Queueing a motor test for OUT${singleOutputChannel}.`,
       instructions,
-      selectedOutputChannel: request.outputChannel,
-      selectedMotorNumber: selectedOutput?.motorNumber,
+      allOutputsSelected: runningAllOutputs,
+      selectedOutputChannel: runningAllOutputs ? undefined : singleOutputChannel,
+      selectedOutputCount,
+      selectedMotorNumber: runningAllOutputs ? undefined : selectedOutput?.motorNumber,
       throttlePercent: request.throttlePercent,
       durationSeconds: request.durationSeconds,
       startedAtMs,
@@ -771,25 +782,37 @@ export class ArduPilotConfiguratorRuntime {
     this.emit()
 
     try {
+      const commandParams: number[] = runningAllOutputs
+        ? [1, MOTOR_TEST_THROTTLE_TYPE.PERCENT, request.throttlePercent, request.durationSeconds, selectedOutputCount, MOTOR_TEST_ORDER.SEQUENCE, 0]
+        : [singleMotorSequence ?? 1, MOTOR_TEST_THROTTLE_TYPE.PERCENT, request.throttlePercent, request.durationSeconds, 1, MOTOR_TEST_ORDER.BOARD, 0]
+
       await this.sendCommand(
         MAV_CMD.DO_MOTOR_TEST,
-        [request.outputChannel, MOTOR_TEST_THROTTLE_TYPE.PERCENT, request.throttlePercent, request.durationSeconds, 1, MOTOR_TEST_ORDER.BOARD, 0],
+        commandParams,
         { waitForAck: true }
       )
 
       const runningAtMs = Date.now()
-      const selectedOutputLabel = selectedOutput?.motorNumber !== undefined ? `OUT${request.outputChannel} / M${selectedOutput.motorNumber}` : `OUT${request.outputChannel}`
+      const selectedOutputLabel = runningAllOutputs
+        ? `all ${selectedOutputCount} mapped motors`
+        : selectedOutput?.motorNumber !== undefined
+          ? `OUT${singleOutputChannel} / M${selectedOutput.motorNumber}`
+          : `OUT${singleOutputChannel}`
       this.motorTest = {
         ...this.motorTest,
         status: 'running',
-        summary: `Motor test running on ${selectedOutputLabel} at ${request.throttlePercent}% for ${request.durationSeconds.toFixed(1)} seconds.`,
+        summary: runningAllOutputs
+          ? `Motor test running across ${selectedOutputLabel} at ${request.throttlePercent}% for ${request.durationSeconds.toFixed(1)} seconds per motor.`
+          : `Motor test running on ${selectedOutputLabel} at ${request.throttlePercent}% for ${request.durationSeconds.toFixed(1)} seconds.`,
         instructions,
         updatedAtMs: runningAtMs,
         completedAtMs: undefined
       }
       this.appendStatusEntry(
         'warning',
-        `Motor test started on ${selectedOutputLabel} at ${request.throttlePercent}% for ${request.durationSeconds.toFixed(1)}s.`
+        runningAllOutputs
+          ? `Motor test started across ${selectedOutputLabel} at ${request.throttlePercent}% for ${request.durationSeconds.toFixed(1)}s per motor.`
+          : `Motor test started on ${selectedOutputLabel} at ${request.throttlePercent}% for ${request.durationSeconds.toFixed(1)}s.`
       )
       this.emit()
       this.scheduleMotorTestCompletion()
@@ -1992,27 +2015,40 @@ export class ArduPilotConfiguratorRuntime {
 
   private scheduleMotorTestCompletion(): void {
     this.clearMotorTestTimer()
+    const motorCount = Math.max(this.motorTest.selectedOutputCount ?? 1, 1)
     const durationMs = Math.max((this.motorTest.durationSeconds ?? 0) * 1000, 0)
+    const totalDurationMs = this.motorTest.allOutputsSelected
+      ? durationMs * motorCount + durationMs * 0.5 * Math.max(motorCount - 1, 0)
+      : durationMs
     this.motorTestTimer = setTimeout(() => {
       if (this.motorTest.status !== 'running') {
         return
       }
 
       const selectedOutputLabel =
-        this.motorTest.selectedOutputChannel !== undefined
+        this.motorTest.allOutputsSelected
+          ? `all ${this.motorTest.selectedOutputCount ?? 0} mapped motors`
+          : this.motorTest.selectedOutputChannel !== undefined
           ? `OUT${this.motorTest.selectedOutputChannel}${this.motorTest.selectedMotorNumber !== undefined ? ` / M${this.motorTest.selectedMotorNumber}` : ''}`
           : 'the selected output'
       this.motorTest = {
         ...this.motorTest,
         status: 'succeeded',
-        summary: `Motor test completed on ${selectedOutputLabel}.`,
+        summary: this.motorTest.allOutputsSelected
+          ? `Motor test completed across ${selectedOutputLabel}.`
+          : `Motor test completed on ${selectedOutputLabel}.`,
         updatedAtMs: Date.now(),
         completedAtMs: Date.now()
       }
-      this.appendStatusEntry('info', `Motor test window elapsed for ${selectedOutputLabel}.`)
+      this.appendStatusEntry(
+        'info',
+        this.motorTest.allOutputsSelected
+          ? `Motor test sequence elapsed for ${selectedOutputLabel}.`
+          : `Motor test window elapsed for ${selectedOutputLabel}.`
+      )
       this.emit()
       this.motorTestTimer = undefined
-    }, durationMs + MOTOR_TEST_COMPLETION_BUFFER_MS)
+    }, totalDurationMs + MOTOR_TEST_COMPLETION_BUFFER_MS)
   }
 
   private async performCommandGuidedAction(
