@@ -37,18 +37,16 @@ export function Panel({
             style={{
               margin: 0,
               color: palette.text,
-              fontSize: 24,
-              lineHeight: 1.05,
-              letterSpacing: 0,
-              fontWeight: 300,
-              paddingBottom: 6,
-              borderBottom: `2px solid ${palette.accent}`,
+              fontSize: 32,
+              lineHeight: 0.98,
+              letterSpacing: -0.04,
+              fontWeight: 600,
               display: 'inline-block'
             }}
           >
             {title}
           </h2>
-          {subtitle ? <p style={{ margin: '8px 0 0', color: palette.dim, lineHeight: 1.5, fontSize: 12 }}>{subtitle}</p> : null}
+          {subtitle ? <p style={{ margin: '10px 0 0', color: palette.muted, lineHeight: 1.6, fontSize: 14, maxWidth: 720 }}>{subtitle}</p> : null}
         </div>
         {actions}
       </div>
@@ -67,16 +65,17 @@ export function StatusBadge({ tone, children }: PropsWithChildren<{ tone: 'neutr
         display: 'inline-flex',
         alignItems: 'center',
         gap: 4,
-        padding: '2px 7px',
-        borderRadius: 3,
+        minHeight: 28,
+        padding: '4px 10px',
+        borderRadius: 999,
         border: `1px solid ${color}48`,
         color: tone === 'neutral' ? palette.text : color,
         background: tone === 'neutral' ? 'rgba(255, 187, 0, 0.12)' : `${color}14`,
         fontSize: 10,
-        fontWeight: 700,
+        fontWeight: 600,
         textTransform: 'uppercase',
-        letterSpacing: 0.04,
-        fontFamily: '"IBM Plex Mono", "SFMono-Regular", "SF Mono", Consolas, monospace',
+        letterSpacing: 0.06,
+        fontFamily: '"JetBrains Mono", "SFMono-Regular", "SF Mono", Consolas, monospace',
         lineHeight: 1.4
       }}
     >
@@ -108,22 +107,25 @@ export function buttonStyle(kind: 'primary' | 'secondary' | 'hero' = 'secondary'
       border: '1px solid var(--primary-600, #e8a803)',
       background: 'var(--primary-500, #ffbb00)',
       color: '#111111',
-      padding: '8px 14px',
-      borderRadius: 3,
-      fontWeight: 700,
-      fontSize: 12,
+      padding: '11px 16px',
+      borderRadius: 14,
+      fontWeight: 600,
+      fontSize: 13,
       letterSpacing: 0.01,
       cursor: 'pointer'
     }
   }
   return {
-    border: `1px solid ${kind === 'primary' ? 'var(--primary-action-border, #79b210)' : 'var(--surface-400, #333333)'}`,
-    background: kind === 'primary' ? 'var(--primary-action, #96e212)' : 'var(--surface-500, #3d3d3d)',
-    color: kind === 'primary' ? '#111111' : 'var(--surface-950, #cccccc)',
-    padding: '5px 10px',
-    borderRadius: 3,
-    fontWeight: 700,
-    fontSize: 12,
+    border: `1px solid ${kind === 'primary' ? 'var(--primary-action-border, #6f9e59)' : 'rgba(255, 255, 255, 0.08)'}`,
+    background:
+      kind === 'primary'
+        ? 'linear-gradient(180deg, var(--primary-action, #7fb966), var(--primary-action-border, #6f9e59))'
+        : 'linear-gradient(180deg, rgba(47, 55, 63, 0.96), rgba(35, 41, 48, 0.98))',
+    color: kind === 'primary' ? '#0a1308' : 'var(--text, #f2f2f2)',
+    padding: '10px 15px',
+    borderRadius: 14,
+    fontWeight: 600,
+    fontSize: 13,
     letterSpacing: 0.01,
     cursor: 'pointer'
   }

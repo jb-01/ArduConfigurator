@@ -12,6 +12,8 @@ import {
   createIdleModeSwitchExerciseState,
   createIdleRcRangeExerciseState,
   createModeSwitchExerciseState,
+  createParameterProvisioningLibrary,
+  createParameterProvisioningProfile,
   createRcRangeExerciseState,
   deriveCompassSetupAvailability,
   deriveEscSetupSummary,
@@ -23,6 +25,7 @@ import {
   deriveModeAssignments,
   deriveModeSwitchEstimate,
   deriveOutputMappingSummary,
+  deriveProvisioningProfileBackup,
   deriveRcAxisChannelMap,
   deriveRcAxisObservations,
   deriveRcMapDraftValues,
@@ -38,15 +41,19 @@ import {
   joinMavftpPath,
   normalizeMavftpPath,
   parseParameterBackup,
+  parseParameterProvisioningLibrary,
   parseParameterSnapshotInput,
   parentMavftpPath,
   serializeParameterBackup,
+  serializeParameterProvisioningLibrary,
   serializeParameterSnapshotLibrary,
+  sortParameterProvisioningProfiles,
   sortParameterSnapshots,
   summarizeParameterDraftEntries,
   type ConfiguratorSnapshot,
   type MavftpDirectoryEntry,
   type MotorTestRequest,
+  type ParameterBackupEntry,
   type ParameterDraftEntry,
   type ParameterDraftStatus,
   type ParameterState,
@@ -120,6 +127,12 @@ import { RcChannelBars } from './rc-channel-bars'
 import { MotorTestSliders } from './motor-test-sliders'
 import { RateCurveGraph } from './rate-curve-graph'
 import {
+  loadStoredProvisioningProfiles,
+  persistProvisioningProfiles,
+  type ProvisioningStorageLoadResult,
+  type SavedProvisioningProfile,
+} from './provisioning-library'
+import {
   createSavedSnapshot,
   loadStoredSnapshots,
   persistSnapshots,
@@ -188,6 +201,13 @@ const TUNING_FLIGHT_FEEL_PARAM_IDS = ['ATC_INPUT_TC', 'ANGLE_MAX', 'PILOT_Y_RATE
 const TUNING_ACRO_PARAM_IDS = ['ACRO_RP_RATE', 'ACRO_Y_RATE', 'ACRO_RP_EXPO', 'ACRO_Y_EXPO'] as const
 const TUNING_PARAM_IDS = [...TUNING_FLIGHT_FEEL_PARAM_IDS, ...TUNING_ACRO_PARAM_IDS] as const
 const PRESET_AUTO_BACKUP_TAGS = ['auto-backup', 'preset'] as const
+const DEFAULT_PROVISIONING_CHECKLIST_LINES = [
+  'Motor order verified on the bench.',
+  'Receiver inputs respond on the expected channels.',
+  'Attitude and sensor telemetry look sane.',
+  'Failsafe behavior was reviewed for the mission profile.',
+  'Profile-specific payload and OSD settings were confirmed.'
+] as const
 const DEFAULT_WEBSOCKET_URL = 'ws://127.0.0.1:14550'
 const SERIAL_BAUD_PRESET_RATES = [9600, 19200, 38400, 57600, 100000, 111100, 115200, 230400, 256000, 460800, 500000, 921600, 1200000, 1500000, 2000000] as const
 const ALL_MOTOR_TEST_OUTPUT = 0 as const
@@ -199,6 +219,7 @@ type StatusTone = 'neutral' | 'success' | 'warning' | 'danger'
 type ModeSwitchExerciseStatus = 'idle' | 'running' | 'passed' | 'failed'
 type ReceiverTaskId = 'mapping' | 'endpoints' | 'flight-modes' | 'advanced' | 'review'
 type OutputTaskId = 'motor-setup' | 'direction-test' | 'esc-protocol' | 'peripherals' | 'review'
+type ProvisioningProfileSourceMode = 'selected-snapshot' | 'live-controller'
 
 const PRODUCT_MODE_STORAGE_KEY = 'arduconfig:product-mode'
 const TRANSPORT_MODE_STORAGE_KEY = 'arduconfig:transport-mode'
@@ -218,6 +239,27 @@ function buildMotorTestRequest(
     throttlePercent,
     durationSeconds
   }
+}
+
+function AppHeaderLogo() {
+  return (
+    <svg viewBox="0 0 48 48" aria-hidden="true" focusable="false">
+      <g fill="none" stroke="rgba(236, 241, 247, 0.18)" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8">
+        <path d="M16 16 22.5 22.5" />
+        <path d="M32 16 25.5 22.5" />
+        <path d="M16 32 22.5 25.5" />
+        <path d="M32 32 25.5 25.5" />
+      </g>
+      <circle cx="16" cy="16" r="3.4" fill="var(--accent)" />
+      <circle cx="32" cy="16" r="3.4" fill="var(--accent)" />
+      <circle cx="16" cy="32" r="3.4" fill="var(--accent)" />
+      <circle cx="32" cy="32" r="3.4" fill="var(--accent)" />
+      <path
+        d="M24 12.5 31.4 29h-4.2l-1.55-3.75h-3.25L20.85 29h-4.25Zm0 7.2-1.35 3.35h2.7Z"
+        fill="rgba(244, 247, 250, 0.96)"
+      />
+    </svg>
+  )
 }
 
 interface AppViewDescriptor {
@@ -2351,6 +2393,20 @@ function buildSnapshotLibraryFilename(): string {
   return `arduconfig-snapshot-library-${dateLabel}.json`
 }
 
+function buildProvisioningLibraryFilename(): string {
+  const dateLabel = new Date().toISOString().replace(/[:]/g, '-').replace(/\..+$/, '')
+  return `arduconfig-provisioning-library-${dateLabel}.json`
+}
+
+function buildProvisioningProfileFilename(profile: SavedProvisioningProfile): string {
+  const label = profile.label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  const dateLabel = profile.createdAt.replace(/[:]/g, '-').replace(/\..+$/, '')
+  return `arduconfig-${label || 'provisioning-profile'}-${dateLabel}.json`
+}
+
 function buildPresetAutoBackupLabel(snapshot: ConfiguratorSnapshot, preset: NormalizedPresetDefinition): string {
   const vehicleLabel = snapshot.vehicle?.vehicle ?? 'Vehicle'
   return `${vehicleLabel} pre-preset ${preset.label}`
@@ -2365,6 +2421,28 @@ function parseSnapshotTags(rawValue: string): string[] {
     .split(',')
     .map((tag) => tag.trim())
     .filter((tag) => tag.length > 0)
+}
+
+function parseProvisioningChecklist(rawValue: string): string[] {
+  return rawValue
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+}
+
+function deriveProvisioningOverlayParametersFromDrafts(
+  draftEntries: readonly ParameterDraftEntry[]
+): ParameterBackupEntry[] {
+  return draftEntries
+    .filter((entry): entry is ParameterDraftEntry & { nextValue: number } => entry.status === 'staged' && entry.nextValue !== undefined)
+    .map((entry) => ({
+      id: entry.id,
+      value: entry.nextValue,
+      category: entry.definition?.category,
+      label: entry.definition?.label,
+      unit: entry.definition?.unit
+    }))
+    .sort((left, right) => left.id.localeCompare(right.id))
 }
 
 function mergeSavedSnapshots(
@@ -2385,6 +2463,27 @@ function updateSavedSnapshot(
 ): SavedParameterSnapshot[] {
   return sortParameterSnapshots(
     snapshots.map((savedSnapshot) => (savedSnapshot.id === snapshotId ? transform(savedSnapshot) : savedSnapshot))
+  )
+}
+
+function mergeSavedProvisioningProfiles(
+  existingProfiles: readonly SavedProvisioningProfile[],
+  incomingProfiles: readonly SavedProvisioningProfile[]
+): SavedProvisioningProfile[] {
+  const mergedById = new Map(existingProfiles.map((profile) => [profile.id, profile]))
+  incomingProfiles.forEach((profile) => {
+    mergedById.set(profile.id, profile)
+  })
+  return sortParameterProvisioningProfiles([...mergedById.values()])
+}
+
+function updateSavedProvisioningProfile(
+  profiles: readonly SavedProvisioningProfile[],
+  profileId: string,
+  transform: (profile: SavedProvisioningProfile) => SavedProvisioningProfile
+): SavedProvisioningProfile[] {
+  return sortParameterProvisioningProfiles(
+    profiles.map((profile) => (profile.id === profileId ? transform(profile) : profile))
   )
 }
 
@@ -2459,9 +2558,12 @@ export function App() {
     [selectedSerialPort, transportMode, websocketUrl]
   )
   const initialSnapshotStorage = useMemo<SnapshotStorageLoadResult>(() => loadStoredSnapshots(), [])
+  const initialProvisioningStorage = useMemo<ProvisioningStorageLoadResult>(() => loadStoredProvisioningProfiles(), [])
   const [snapshot, setSnapshot] = useState<ConfiguratorSnapshot>(runtime.getSnapshot())
   const [savedSnapshots, setSavedSnapshots] = useState<SavedParameterSnapshot[]>(initialSnapshotStorage.snapshots)
   const [selectedSnapshotId, setSelectedSnapshotId] = useState<string>()
+  const [savedProvisioningProfiles, setSavedProvisioningProfiles] = useState<SavedProvisioningProfile[]>(initialProvisioningStorage.profiles)
+  const [selectedProvisioningProfileId, setSelectedProvisioningProfileId] = useState<string>()
   const [selectedPresetId, setSelectedPresetId] = useState<string>()
   const [desktopSnapshotLibraryPath, setDesktopSnapshotLibraryPath] = useState<string>()
   const [desktopSnapshotLibraryName, setDesktopSnapshotLibraryName] = useState<string>()
@@ -2469,6 +2571,19 @@ export function App() {
   const [snapshotNoteInput, setSnapshotNoteInput] = useState('')
   const [snapshotTagsInput, setSnapshotTagsInput] = useState('')
   const [snapshotProtectedInput, setSnapshotProtectedInput] = useState(false)
+  const [provisioningProfileLabelInput, setProvisioningProfileLabelInput] = useState('')
+  const [provisioningProfileModelInput, setProvisioningProfileModelInput] = useState('')
+  const [provisioningProfileFleetInput, setProvisioningProfileFleetInput] = useState('')
+  const [provisioningProfileMissionInput, setProvisioningProfileMissionInput] = useState('')
+  const [provisioningProfileNoteInput, setProvisioningProfileNoteInput] = useState('')
+  const [provisioningProfileTagsInput, setProvisioningProfileTagsInput] = useState('')
+  const [provisioningProfileChecklistInput, setProvisioningProfileChecklistInput] = useState(
+    DEFAULT_PROVISIONING_CHECKLIST_LINES.join('\n')
+  )
+  const [provisioningProfileProtectedInput, setProvisioningProfileProtectedInput] = useState(false)
+  const [provisioningProfileSourceInput, setProvisioningProfileSourceInput] =
+    useState<ProvisioningProfileSourceMode>('selected-snapshot')
+  const [includeDraftOverlayInProvisioningProfile, setIncludeDraftOverlayInProvisioningProfile] = useState(false)
   const [parameterSearch, setParameterSearch] = useState('')
   const [editedValues, setEditedValues] = useState<Record<string, string>>({})
   const [selectedParameterId, setSelectedParameterId] = useState<string>()
@@ -2481,6 +2596,15 @@ export function App() {
       ? {
           tone: 'warning',
           text: initialSnapshotStorage.warning
+        }
+      : undefined
+  )
+  const [provisioningNotice, setProvisioningNotice] = useState<ParameterNotice>()
+  const [provisioningStorageNotice, setProvisioningStorageNotice] = useState<ParameterNotice | undefined>(() =>
+    initialProvisioningStorage.warning
+      ? {
+          tone: 'warning',
+          text: initialProvisioningStorage.warning
         }
       : undefined
   )
@@ -2512,6 +2636,7 @@ export function App() {
   const [customSerialBaudInputs, setCustomSerialBaudInputs] = useState<Record<string, string>>({})
   const [expandedSerialOptionsPortNumber, setExpandedSerialOptionsPortNumber] = useState<number>()
   const [snapshotRestoreAcknowledged, setSnapshotRestoreAcknowledged] = useState(false)
+  const [provisioningRestoreAcknowledged, setProvisioningRestoreAcknowledged] = useState(false)
   const [presetApplyAcknowledged, setPresetApplyAcknowledged] = useState(false)
   const [selectedSetupSectionId, setSelectedSetupSectionId] = useState<string | undefined>(guidedSetupShortcutSectionId)
   const [setupMode, setSetupMode] = useState<SetupMode>(() => (guidedSetupShortcutSectionId ? 'wizard' : 'overview'))
@@ -2521,6 +2646,7 @@ export function App() {
   const parameterBackupInputRef = useRef<HTMLInputElement>(null)
   const mavftpUploadInputRef = useRef<HTMLInputElement>(null)
   const snapshotImportInputRef = useRef<HTMLInputElement>(null)
+  const provisioningImportInputRef = useRef<HTMLInputElement>(null)
   const guidedSetupShortcutAppliedRef = useRef(false)
   const rcMappingCandidateRef = useRef<RcMappingCandidate | undefined>(undefined)
   const rcMappingTargetAxisRef = useRef<RcAxisId | undefined>(undefined)
@@ -3001,6 +3127,47 @@ export function App() {
   const selectedSnapshotDiffSignature = useMemo(
     () => createDraftSignature(selectedSnapshotDiffEntries),
     [selectedSnapshotDiffEntries]
+  )
+  const stagedProvisioningOverlayParameters = useMemo(
+    () => deriveProvisioningOverlayParametersFromDrafts(stagedParameterDrafts),
+    [stagedParameterDrafts]
+  )
+  const selectedProvisioningProfile = useMemo(
+    () =>
+      savedProvisioningProfiles.find((savedProfile) => savedProfile.id === selectedProvisioningProfileId) ??
+      savedProvisioningProfiles[0],
+    [savedProvisioningProfiles, selectedProvisioningProfileId]
+  )
+  const selectedProvisioningProfileBackup = useMemo(
+    () => (selectedProvisioningProfile ? deriveProvisioningProfileBackup(selectedProvisioningProfile) : undefined),
+    [selectedProvisioningProfile]
+  )
+  const selectedProvisioningProfileRestore = useMemo(
+    () =>
+      selectedProvisioningProfileBackup
+        ? deriveDraftValuesFromParameterBackup(snapshot.parameters, selectedProvisioningProfileBackup)
+        : undefined,
+    [selectedProvisioningProfileBackup, snapshot.parameters]
+  )
+  const selectedProvisioningProfileDiffEntries = useMemo(
+    () => deriveParameterDraftEntries(snapshot.parameters, selectedProvisioningProfileRestore?.draftValues ?? {}),
+    [selectedProvisioningProfileRestore, snapshot.parameters]
+  )
+  const selectedProvisioningProfileDiffGroups = useMemo(
+    () => groupParameterDraftEntries(selectedProvisioningProfileDiffEntries, ['staged']),
+    [selectedProvisioningProfileDiffEntries]
+  )
+  const selectedProvisioningProfileChangedEntries = useMemo(
+    () => selectedProvisioningProfileDiffEntries.filter((entry) => entry.status === 'staged'),
+    [selectedProvisioningProfileDiffEntries]
+  )
+  const selectedProvisioningProfileInvalidEntries = useMemo(
+    () => selectedProvisioningProfileDiffEntries.filter((entry) => entry.status === 'invalid'),
+    [selectedProvisioningProfileDiffEntries]
+  )
+  const selectedProvisioningProfileDiffSignature = useMemo(
+    () => createDraftSignature(selectedProvisioningProfileDiffEntries),
+    [selectedProvisioningProfileDiffEntries]
   )
   const presetDefinitions = useMemo(() => metadataCatalog.presets, [metadataCatalog.presets])
   const presetGroups = useMemo(
@@ -4538,6 +4705,190 @@ export function App() {
       tone: 'success',
       text: `Exported snapshot "${selectedSnapshot.label}".`
     })
+  }
+
+  function handleOpenProvisioningImport(): void {
+    provisioningImportInputRef.current?.click()
+  }
+
+  async function handleImportProvisioningLibrary(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+    const file = event.target.files?.[0]
+    if (!file) {
+      return
+    }
+
+    try {
+      const library = parseParameterProvisioningLibrary(await file.text())
+      setSavedProvisioningProfiles((current) => mergeSavedProvisioningProfiles(current, library.profiles))
+      setProvisioningNotice({
+        tone: 'success',
+        text: `Imported provisioning library "${library.name}" with ${library.profiles.length} profile(s).`
+      })
+    } catch (error) {
+      setProvisioningNotice({
+        tone: 'danger',
+        text: error instanceof Error ? error.message : 'Failed to import provisioning library.'
+      })
+    } finally {
+      event.target.value = ''
+    }
+  }
+
+  function handleCreateProvisioningProfile(): void {
+    const sourceMode = provisioningProfileSourceInput
+    const baseBackup =
+      sourceMode === 'selected-snapshot'
+        ? selectedSnapshot?.backup
+        : snapshot.parameters.length > 0
+          ? createParameterBackup(snapshot)
+          : undefined
+
+    if (!baseBackup) {
+      setProvisioningNotice({
+        tone: 'warning',
+        text:
+          sourceMode === 'selected-snapshot'
+            ? 'Select or capture a snapshot before creating a provisioning profile from it.'
+            : 'Pull parameters before creating a provisioning profile from the live controller.'
+      })
+      return
+    }
+
+    const overlayParameters = includeDraftOverlayInProvisioningProfile ? stagedProvisioningOverlayParameters : []
+    const profile = createParameterProvisioningProfile(baseBackup, provisioningProfileLabelInput, {
+      source: sourceMode === 'selected-snapshot' ? 'snapshot' : 'live',
+      note: provisioningProfileNoteInput,
+      tags: parseSnapshotTags(provisioningProfileTagsInput),
+      protected: provisioningProfileProtectedInput,
+      model: provisioningProfileModelInput,
+      fleet: provisioningProfileFleetInput,
+      mission: provisioningProfileMissionInput,
+      sourceSnapshotId: sourceMode === 'selected-snapshot' ? selectedSnapshot?.id : undefined,
+      sourceSnapshotLabel: sourceMode === 'selected-snapshot' ? selectedSnapshot?.label : undefined,
+      overlayParameters,
+      validationChecklist: parseProvisioningChecklist(provisioningProfileChecklistInput)
+    })
+
+    setSavedProvisioningProfiles((current) => [profile, ...current.filter((entry) => entry.id !== profile.id)])
+    setSelectedProvisioningProfileId(profile.id)
+    setProvisioningProfileLabelInput('')
+    setProvisioningProfileModelInput('')
+    setProvisioningProfileFleetInput('')
+    setProvisioningProfileMissionInput('')
+    setProvisioningProfileNoteInput('')
+    setProvisioningProfileTagsInput('')
+    setProvisioningProfileChecklistInput(DEFAULT_PROVISIONING_CHECKLIST_LINES.join('\n'))
+    setProvisioningProfileProtectedInput(false)
+    setIncludeDraftOverlayInProvisioningProfile(false)
+    setProvisioningNotice({
+      tone: 'success',
+      text: `Saved provisioning profile "${profile.label}" with ${profile.baseBackup.parameterCount} base parameters and ${profile.overlayParameters.length} overlay parameter(s).`
+    })
+  }
+
+  function handleExportProvisioningLibrary(): void {
+    const library = createParameterProvisioningLibrary('Browser Local Provisioning Library', savedProvisioningProfiles)
+    downloadTextFile(buildProvisioningLibraryFilename(), serializeParameterProvisioningLibrary(library))
+    setProvisioningNotice({
+      tone: 'success',
+      text: `Exported provisioning library with ${library.profiles.length} profile(s).`
+    })
+  }
+
+  function handleExportSelectedProvisioningProfile(): void {
+    if (!selectedProvisioningProfile) {
+      return
+    }
+
+    const library = createParameterProvisioningLibrary(selectedProvisioningProfile.label, [selectedProvisioningProfile])
+    downloadTextFile(buildProvisioningProfileFilename(selectedProvisioningProfile), serializeParameterProvisioningLibrary(library))
+    setProvisioningNotice({
+      tone: 'success',
+      text: `Exported provisioning profile "${selectedProvisioningProfile.label}".`
+    })
+  }
+
+  function handleDeleteSelectedProvisioningProfile(): void {
+    if (!selectedProvisioningProfile) {
+      return
+    }
+
+    if (selectedProvisioningProfile.protected) {
+      setProvisioningNotice({
+        tone: 'warning',
+        text: `Provisioning profile "${selectedProvisioningProfile.label}" is protected. Unprotect it before deleting it from the local library.`
+      })
+      return
+    }
+
+    setSavedProvisioningProfiles((current) => current.filter((entry) => entry.id !== selectedProvisioningProfile.id))
+    setProvisioningNotice({
+      tone: 'neutral',
+      text: `Deleted provisioning profile "${selectedProvisioningProfile.label}" from the local browser library.`
+    })
+  }
+
+  function handleToggleSelectedProvisioningProfileProtection(): void {
+    if (!selectedProvisioningProfile) {
+      return
+    }
+
+    const nextProtected = !selectedProvisioningProfile.protected
+    setSavedProvisioningProfiles((current) =>
+      updateSavedProvisioningProfile(current, selectedProvisioningProfile.id, (savedProfile) => ({
+        ...savedProfile,
+        protected: nextProtected
+      }))
+    )
+    setProvisioningNotice({
+      tone: 'success',
+      text: nextProtected
+        ? `Provisioning profile "${selectedProvisioningProfile.label}" is now protected against deletion.`
+        : `Provisioning profile "${selectedProvisioningProfile.label}" is no longer protected.`
+    })
+  }
+
+  function handleStageSelectedProvisioningProfileDiff(): void {
+    if (!selectedProvisioningProfile || !selectedProvisioningProfileRestore) {
+      return
+    }
+
+    if (selectedProvisioningProfileChangedEntries.length === 0) {
+      setProvisioningNotice({
+        tone: 'neutral',
+        text: `Provisioning profile "${selectedProvisioningProfile.label}" already matches the live controller values.`
+      })
+      return
+    }
+
+    setEditedValues(selectedProvisioningProfileRestore.draftValues)
+    setSelectedParameterId(selectedProvisioningProfileChangedEntries[0]?.id ?? selectedParameterId)
+    setActiveViewId('parameters')
+    setProvisioningNotice({
+      tone: 'warning',
+      text: `Loaded ${selectedProvisioningProfileRestore.changedCount} provisioning change(s) into the Expert parameter editor draft set.`
+    })
+  }
+
+  async function handleApplySelectedProvisioningProfile(): Promise<void> {
+    if (!selectedProvisioningProfile) {
+      return
+    }
+
+    if (!provisioningRestoreAcknowledged) {
+      setProvisioningNotice({
+        tone: 'warning',
+        text: 'Acknowledge the overwrite warning before applying a provisioning profile.'
+      })
+      return
+    }
+
+    await handleApplyScopedParameterDrafts(
+      selectedProvisioningProfileDiffEntries,
+      'provisioning:apply',
+      `Provisioning profile: ${selectedProvisioningProfile.label}`
+    )
+    setProvisioningRestoreAcknowledged(false)
   }
 
   function handleDeleteSelectedSnapshot(): void {
@@ -7533,6 +7884,18 @@ export function App() {
   }, [savedSnapshots])
 
   useEffect(() => {
+    const persistence = persistProvisioningProfiles(savedProvisioningProfiles)
+    setProvisioningStorageNotice(
+      persistence.warning
+        ? {
+            tone: 'warning',
+            text: persistence.warning
+          }
+        : undefined
+    )
+  }, [savedProvisioningProfiles])
+
+  useEffect(() => {
     setMavftpPathInput(mavftpBrowser.path)
   }, [mavftpBrowser.path])
 
@@ -7587,6 +7950,22 @@ export function App() {
   }, [savedSnapshots, selectedSnapshotId])
 
   useEffect(() => {
+    if (savedProvisioningProfiles.length === 0) {
+      if (selectedProvisioningProfileId !== undefined) {
+        setSelectedProvisioningProfileId(undefined)
+      }
+      return
+    }
+
+    if (
+      !selectedProvisioningProfileId ||
+      !savedProvisioningProfiles.some((savedProfile) => savedProfile.id === selectedProvisioningProfileId)
+    ) {
+      setSelectedProvisioningProfileId(savedProvisioningProfiles[0]?.id)
+    }
+  }, [savedProvisioningProfiles, selectedProvisioningProfileId])
+
+  useEffect(() => {
     if (presetDefinitions.length === 0) {
       if (selectedPresetId !== undefined) {
         setSelectedPresetId(undefined)
@@ -7625,6 +8004,10 @@ export function App() {
   useEffect(() => {
     setSnapshotRestoreAcknowledged(false)
   }, [selectedSnapshotDiffSignature])
+
+  useEffect(() => {
+    setProvisioningRestoreAcknowledged(false)
+  }, [selectedProvisioningProfileDiffSignature])
 
   useEffect(() => {
     setPresetApplyAcknowledged(false)
@@ -7842,17 +8225,24 @@ export function App() {
   return (
 	    <main className="app-shell">
 	      <header className="app-header">
-	        <div className="app-header__brand">
-            <div className="app-header__mark">AC</div>
-            <div className="app-header__brand-copy">
+	        <button
+            type="button"
+            className="app-header__brand"
+            data-testid="header-home-button"
+            aria-label="Go to Setup"
+            title="Go to Setup"
+            onClick={() => {
+              setActiveViewId('setup')
+              setSetupMode('overview')
+            }}
+          >
+            <span className="app-header__mark" aria-hidden="true">
+              <AppHeaderLogo />
+            </span>
+            <span className="app-header__brand-copy">
               <strong>ArduConfigurator</strong>
-              <small>
-                {snapshot.vehicle?.firmware
-                  ? `${snapshot.vehicle?.vehicle ?? 'ArduPilot'} · ${snapshot.vehicle.firmware}`
-                  : 'ArduPilot configuration utility'}
-              </small>
-            </div>
-	        </div>
+            </span>
+	        </button>
 
           <div className="app-header__connection" data-testid="header-session-strip">
             <select
@@ -12982,12 +13372,12 @@ export function App() {
       ) : null}
 
       {activeViewId === 'snapshots' ? (
-      <section className="grid one-up">
+      <section className="grid one-up snapshots-page">
         <Panel
           title="Snapshots"
-          subtitle="Capture, compare, and restore known-good parameter sets with the same verified write path used by the rest of the configurator."
+          subtitle="Trusted baselines and provisioning profiles."
         >
-          <div className="telemetry-stack">
+          <div className="telemetry-stack snapshots-page__stack">
             <input
               ref={snapshotImportInputRef}
               className="parameter-backup-input"
@@ -12995,43 +13385,73 @@ export function App() {
               accept="application/json,.json"
               onChange={(event) => void handleImportSnapshotFile(event)}
             />
+            <input
+              ref={provisioningImportInputRef}
+              className="parameter-backup-input"
+              type="file"
+              accept="application/json,.json"
+              onChange={(event) => void handleImportProvisioningLibrary(event)}
+            />
 
-            <div className="telemetry-header">
-              <div>
-                <h3>Local snapshot library</h3>
-                <p>
-                  Capture the current live configuration, keep named browser-local snapshots, compare them against the synced controller, and restore
-                  only the differing parameters when you need to roll back to a known-good baseline.
-                </p>
+            <div className="snapshots-page__hero">
+              <div className="snapshots-page__hero-copy">
+                <span className="snapshots-page__eyebrow">Configuration Baselines</span>
+                <h3>Local libraries for restore and batch provisioning</h3>
+                <p>Capture trusted baselines, build reusable provisioning profiles, and apply only the verified diff back to a live vehicle.</p>
               </div>
-              <StatusBadge tone={toneForScopedDraftReview(selectedSnapshotChangedEntries.length, selectedSnapshotInvalidEntries.length)}>
-                {selectedSnapshotInvalidEntries.length > 0
-                  ? `${selectedSnapshotInvalidEntries.length} invalid`
-                  : selectedSnapshotChangedEntries.length > 0
-                    ? `${selectedSnapshotChangedEntries.length} diff`
-                    : `${savedSnapshots.length} saved`}
-              </StatusBadge>
+              <div className="snapshots-page__hero-metrics">
+                <div className="snapshots-page__hero-metric">
+                  <span>Snapshots</span>
+                  <strong>{savedSnapshots.length}</strong>
+                </div>
+                <div className="snapshots-page__hero-metric">
+                  <span>Profiles</span>
+                  <strong>{savedProvisioningProfiles.length}</strong>
+                </div>
+                <div className="snapshots-page__hero-metric">
+                  <span>Active diff</span>
+                  <strong>{selectedSnapshotChangedEntries.length + selectedProvisioningProfileChangedEntries.length}</strong>
+                </div>
+              </div>
             </div>
 
-            <p className="telemetry-note">
-              The selected snapshot below becomes the active baseline for the whole app. The sidebar reflects the same baseline, drift count, and
-              restore state across every product view.
-            </p>
+            <section className="snapshots-slab snapshots-slab--library">
+            <div className="snapshots-section-header">
+              <div>
+                <span className="snapshots-section-kicker">Snapshot Library</span>
+                <h3>Capture and restore trusted baselines</h3>
+                <p>Keep known-good controller states close at hand and restore them through the verified write path.</p>
+              </div>
+              <div className="snapshots-section-meta">
+                <span className="snapshots-counter-chip">
+                  {selectedSnapshotInvalidEntries.length > 0
+                    ? `${selectedSnapshotInvalidEntries.length} invalid`
+                    : selectedSnapshotChangedEntries.length > 0
+                      ? `${selectedSnapshotChangedEntries.length} diff`
+                      : `${savedSnapshots.length} saved`}
+                </span>
+              </div>
+            </div>
 
-            <div className="snapshot-capture-row">
-              <label className="scoped-editor-field">
+            <div className="snapshot-capture-row snapshots-form-grid">
+              <div className="snapshots-form-group-heading">
+                <span>Baseline Metadata</span>
+                <p>Name the baseline and add only the context you will actually use later.</p>
+              </div>
+
+              <label className="scoped-editor-field snapshots-field">
                 <span>Snapshot label</span>
                 <input
                   data-testid="snapshot-label-input"
                   type="text"
                   value={snapshotLabelInput}
                   onChange={(event) => setSnapshotLabelInput(event.target.value)}
-                  placeholder="Optional label, e.g. MOZ7 known-good baseline"
+                  placeholder="MOZ7 known-good baseline"
                 />
-                <small>Leave this blank to generate a timestamped label from the connected vehicle identity.</small>
+                <small>Leave blank to generate a timestamped vehicle label.</small>
               </label>
 
-              <label className="scoped-editor-field">
+              <label className="scoped-editor-field snapshots-field">
                 <span>Tags</span>
                 <input
                   data-testid="snapshot-tags-input"
@@ -13040,71 +13460,83 @@ export function App() {
                   onChange={(event) => setSnapshotTagsInput(event.target.value)}
                   placeholder="moz7, baseline, tune"
                 />
-                <small>Optional comma-separated tags to make later library review easier.</small>
+                <small>Comma-separated metadata for later filtering.</small>
               </label>
 
-              <label className="scoped-editor-field">
+              <label className="scoped-editor-field snapshots-field snapshots-field--wide">
                 <span>Note</span>
                 <textarea
                   data-testid="snapshot-note-input"
                   value={snapshotNoteInput}
                   onChange={(event) => setSnapshotNoteInput(event.target.value)}
-                  placeholder="Optional context for when and why this snapshot was captured."
-                  rows={3}
+                  placeholder="Context for when and why this baseline was captured."
+                  rows={4}
                 />
-                <small>Notes travel with exported snapshot-library files.</small>
+                <small>Notes travel with exported libraries.</small>
               </label>
 
-              <div className="snapshot-capture-actions">
-                <label className="snapshot-protected-toggle">
+              <div className="snapshot-capture-actions snapshots-capture-actions">
+                <div className="snapshots-form-group-heading">
+                  <span>Capture Controls</span>
+                  <p>One primary action, plus quieter library import and export utilities.</p>
+                </div>
+
+                <label className="snapshot-protected-toggle snapshots-setting-row">
                   <input
                     data-testid="snapshot-protected-toggle"
                     type="checkbox"
                     checked={snapshotProtectedInput}
                     onChange={(event) => setSnapshotProtectedInput(event.target.checked)}
                   />
-                  <span>Mark as protected baseline</span>
+                  <span>
+                    <strong>Protect this baseline</strong>
+                    <small>Prevents accidental removal of a known-good restore point.</small>
+                  </span>
                 </label>
-                <button
-                  data-testid="capture-live-snapshot-button"
-                  style={buttonStyle('primary')}
-                  onClick={handleCaptureLiveSnapshot}
-                  disabled={busyAction !== undefined || snapshot.parameters.length === 0}
-                >
-                  Capture Live Snapshot
-                </button>
-                <button data-testid="import-snapshot-file-button" style={buttonStyle()} onClick={handleOpenSnapshotImport} disabled={busyAction !== undefined}>
-                  Import Snapshot or Library
-                </button>
-                <button
-                  data-testid="export-snapshot-library-button"
-                  style={buttonStyle()}
-                  onClick={handleExportSnapshotLibrary}
-                  disabled={busyAction !== undefined || savedSnapshots.length === 0}
-                >
-                  Export Library
-                </button>
+
+                <div className="snapshots-action-row">
+                  <button
+                    data-testid="capture-live-snapshot-button"
+                    className="snapshots-button snapshots-button--primary"
+                    onClick={handleCaptureLiveSnapshot}
+                    disabled={busyAction !== undefined || snapshot.parameters.length === 0}
+                  >
+                    Capture Live Snapshot
+                  </button>
+                  <button
+                    data-testid="import-snapshot-file-button"
+                    className="snapshots-button snapshots-button--secondary"
+                    onClick={handleOpenSnapshotImport}
+                    disabled={busyAction !== undefined}
+                  >
+                    Import Library
+                  </button>
+                  <button
+                    data-testid="export-snapshot-library-button"
+                    className="snapshots-button snapshots-button--secondary"
+                    onClick={handleExportSnapshotLibrary}
+                    disabled={busyAction !== undefined || savedSnapshots.length === 0}
+                  >
+                    Export Library
+                  </button>
+                </div>
               </div>
             </div>
 
-            <p className="telemetry-note">
-              Browser snapshots stay local by default, but `Export Library` writes a portable snapshot-library file that the desktop CLI and later web
-              sessions can import directly.
+            <p className="telemetry-note snapshots-inline-note">
+              Snapshot libraries stay local by default, but exported libraries remain portable across later sessions and desktop tooling.
             </p>
 
             {desktopBridge ? (
               <div className="desktop-snapshot-workspace">
-                <div className="telemetry-header">
+                <div className="snapshots-subsection-header">
                   <div>
                     <h3>Desktop snapshot files</h3>
-                    <p>
-                      The Electron shell can open and save snapshot libraries through native file dialogs while keeping compare and restore in this same
-                      browser-first workflow.
-                    </p>
+                    <p>Open or save a named library file through the desktop shell without leaving this workflow.</p>
                   </div>
-                  <StatusBadge tone={desktopSnapshotLibraryPath ? 'success' : 'neutral'}>
+                  <span className={`snapshots-counter-chip${desktopSnapshotLibraryPath ? ' is-success' : ''}`}>
                     {desktopSnapshotLibraryPath ? 'linked library' : 'local only'}
-                  </StatusBadge>
+                  </span>
                 </div>
 
                 {desktopSnapshotLibraryPath ? (
@@ -13118,10 +13550,10 @@ export function App() {
                   </p>
                 )}
 
-                <div className="button-row">
+                <div className="snapshots-action-row">
                   <button
                     data-testid="desktop-open-snapshot-file-button"
-                    style={buttonStyle()}
+                    className="snapshots-button snapshots-button--secondary"
                     onClick={() => void handleOpenDesktopSnapshotFile()}
                     disabled={busyAction !== undefined}
                   >
@@ -13129,7 +13561,7 @@ export function App() {
                   </button>
                   <button
                     data-testid="desktop-save-snapshot-library-button"
-                    style={buttonStyle()}
+                    className="snapshots-button snapshots-button--secondary"
                     onClick={() => void handleSaveDesktopSnapshotLibrary()}
                     disabled={busyAction !== undefined || savedSnapshots.length === 0}
                   >
@@ -13137,7 +13569,7 @@ export function App() {
                   </button>
                   <button
                     data-testid="desktop-export-selected-snapshot-button"
-                    style={buttonStyle()}
+                    className="snapshots-button snapshots-button--ghost"
                     onClick={() => void handleExportSelectedSnapshotToDesktop()}
                     disabled={busyAction !== undefined || !selectedSnapshot}
                   >
@@ -13147,51 +13579,62 @@ export function App() {
               </div>
             ) : null}
 
+            <div className="snapshots-feedback-stack">
             {snapshotStorageNotice ? (
-              <div className="parameter-review__notice">
+              <div className="parameter-review__notice snapshots-notice">
                 <StatusBadge tone={snapshotStorageNotice.tone}>{snapshotStorageNotice.tone}</StatusBadge>
                 <p>{snapshotStorageNotice.text}</p>
               </div>
             ) : null}
 
             {snapshotNotice ? (
-              <div className="parameter-review__notice">
+              <div className="parameter-review__notice snapshots-notice">
                 <StatusBadge tone={snapshotNotice.tone}>{snapshotNotice.tone}</StatusBadge>
                 <p>{snapshotNotice.text}</p>
               </div>
             ) : null}
 
             {parameterFollowUp ? (
-              <div className="parameter-follow-up">
+              <div className="parameter-follow-up snapshots-follow-up">
                 <StatusBadge tone={parameterFollowUp.requiresReboot ? 'warning' : 'neutral'}>
                   {parameterFollowUp.requiresReboot ? 'reboot' : 'refresh'}
                 </StatusBadge>
                 <p>{parameterFollowUp.text}</p>
-                <small>Use the header session strip to complete the pending reboot or refresh after a restore.</small>
+                <small>Use the header session strip to complete the pending reboot or refresh.</small>
               </div>
             ) : null}
+            </div>
 
-            <div className="telemetry-metric-grid">
-              <article className="telemetry-metric-card">
+            <div className="telemetry-metric-grid snapshots-metrics-grid">
+              <article className="telemetry-metric-card snapshots-metric-card">
                 <span>Saved snapshots</span>
                 <strong>{savedSnapshots.length}</strong>
               </article>
-              <article className="telemetry-metric-card">
+              <article className="telemetry-metric-card snapshots-metric-card">
                 <span>Snapshot params</span>
                 <strong>{selectedSnapshot?.backup.parameterCount ?? 0}</strong>
               </article>
-              <article className="telemetry-metric-card">
+              <article className="telemetry-metric-card snapshots-metric-card">
                 <span>Changed vs live</span>
                 <strong>{selectedSnapshotRestore?.changedCount ?? 0}</strong>
               </article>
-              <article className="telemetry-metric-card">
+              <article className="telemetry-metric-card snapshots-metric-card">
                 <span>Reboot-sensitive</span>
                 <strong>{selectedSnapshotChangedEntries.filter((entry) => entry.definition?.rebootRequired).length}</strong>
               </article>
             </div>
 
+            <div className="snapshots-workspace">
+            <div className="snapshots-browser-rail">
+            <div className="snapshots-browser-rail__header">
+              <div>
+                <span className="snapshots-section-kicker">Baseline Library</span>
+                <h4>Saved snapshots</h4>
+              </div>
+              <span className="snapshots-counter-chip">{savedSnapshots.length}</span>
+            </div>
             {savedSnapshots.length > 0 ? (
-              <div className="snapshot-library-grid">
+              <div className="snapshot-library-grid snapshots-library-grid--rail">
                 {savedSnapshots.map((savedSnapshot) => {
                   const isActive = savedSnapshot.id === selectedSnapshot?.id
                   const restorePreview =
@@ -13216,9 +13659,9 @@ export function App() {
                           <strong>{savedSnapshot.label}</strong>
                           <small>{formatSnapshotTimestamp(savedSnapshot.capturedAt)}</small>
                         </div>
-                        <StatusBadge tone={restorePreview.changedCount > 0 ? 'warning' : 'neutral'}>
-                          {restorePreview.changedCount > 0 ? `${restorePreview.changedCount} diff` : 'matches'}
-                        </StatusBadge>
+                        <span className="snapshots-counter-chip">
+                          {restorePreview.changedCount > 0 ? `${restorePreview.changedCount} diff` : 'matched'}
+                        </span>
                       </div>
 
                       <div className="config-pills">
@@ -13242,13 +13685,16 @@ export function App() {
                 })}
               </div>
             ) : (
-              <p className="telemetry-note">
-                No saved snapshots yet. Capture the live controller or import a previously exported backup to build a restore library.
-              </p>
+              <div className="snapshots-empty-state">
+                <span className="snapshots-section-kicker">Empty Library</span>
+                <h4>No saved snapshots yet</h4>
+                <p>Capture the current controller or import an existing library to create your first restore baseline.</p>
+              </div>
             )}
+            </div>
 
             {selectedSnapshot ? (
-              <div className="snapshot-selected">
+              <div className="snapshot-selected snapshots-detail-panel">
                 <div className="telemetry-header">
                   <div>
                     <h3>{selectedSnapshot.label}</h3>
@@ -13263,20 +13709,20 @@ export function App() {
                   </StatusBadge>
                 </div>
 
-                <div className="telemetry-metric-grid">
-                  <article className="telemetry-metric-card">
+                <div className="telemetry-metric-grid snapshots-metrics-grid">
+                  <article className="telemetry-metric-card snapshots-metric-card">
                     <span>Captured</span>
                     <strong>{formatSnapshotTimestamp(selectedSnapshot.capturedAt)}</strong>
                   </article>
-                  <article className="telemetry-metric-card">
+                  <article className="telemetry-metric-card snapshots-metric-card">
                     <span>Matched live</span>
                     <strong>{selectedSnapshotRestore?.unchangedCount ?? 0}</strong>
                   </article>
-                  <article className="telemetry-metric-card">
+                  <article className="telemetry-metric-card snapshots-metric-card">
                     <span>Unknown on live</span>
                     <strong>{selectedSnapshotRestore?.unknownParameterIds.length ?? 0}</strong>
                   </article>
-                  <article className="telemetry-metric-card">
+                  <article className="telemetry-metric-card snapshots-metric-card">
                     <span>Restore writes</span>
                     <strong>{selectedSnapshotChangedEntries.length}</strong>
                   </article>
@@ -13304,6 +13750,14 @@ export function App() {
                     </p>
                   </div>
                 ) : null}
+
+                <div className="snapshots-detail-section-heading">
+                  <div>
+                    <span className="snapshots-section-kicker">Restore Preview</span>
+                    <h4>Changed parameters</h4>
+                  </div>
+                  <span className="snapshots-counter-chip">{selectedSnapshotChangedEntries.length} writes</span>
+                </div>
 
                 {selectedSnapshotChangedEntries.length > 0 ? (
                   <div className="parameter-diff-grid">
@@ -13338,6 +13792,14 @@ export function App() {
                 )}
 
                 {selectedSnapshotInvalidEntries.length > 0 ? (
+                  <>
+                    <div className="snapshots-detail-section-heading snapshots-detail-section-heading--compact">
+                      <div>
+                        <span className="snapshots-section-kicker">Blocked values</span>
+                        <h4>Review invalid restore entries</h4>
+                      </div>
+                      <span className="snapshots-counter-chip is-danger">{selectedSnapshotInvalidEntries.length} blocked</span>
+                    </div>
                   <div className="parameter-diff-grid parameter-diff-grid--invalid">
                     <section className="parameter-diff-group parameter-diff-group--invalid">
                       <header>
@@ -13357,7 +13819,15 @@ export function App() {
                       ))}
                     </section>
                   </div>
+                  </>
                 ) : null}
+
+                <div className="snapshots-detail-section-heading snapshots-detail-section-heading--compact">
+                  <div>
+                    <span className="snapshots-section-kicker">Apply restore</span>
+                    <h4>Verified write path</h4>
+                  </div>
+                </div>
 
                 <div className="parameter-follow-up parameter-follow-up--warning">
                   <StatusBadge tone="warning">overwrite</StatusBadge>
@@ -13378,10 +13848,10 @@ export function App() {
                   <span>I understand that applying this restore will overwrite the current live values shown in the diff above.</span>
                 </label>
 
-                <div className="switch-exercise-controls">
+                <div className="snapshots-action-row snapshots-action-row--detail">
                   <button
                     data-testid="apply-snapshot-restore-button"
-                    style={buttonStyle('primary')}
+                    className="snapshots-button snapshots-button--primary"
                     onClick={() => void handleApplySelectedSnapshotRestore()}
                     disabled={
                       busyAction !== undefined ||
@@ -13395,19 +13865,19 @@ export function App() {
                   </button>
                   {isExpertMode ? (
                     <button
-                      style={buttonStyle()}
+                      className="snapshots-button snapshots-button--secondary"
                       onClick={handleStageSelectedSnapshotDiff}
                       disabled={busyAction !== undefined || selectedSnapshotChangedEntries.length === 0}
                     >
                       Send Diff to Parameters
                     </button>
                   ) : null}
-                  <button style={buttonStyle()} onClick={handleExportSelectedSnapshot} disabled={busyAction !== undefined}>
+                  <button className="snapshots-button snapshots-button--secondary" onClick={handleExportSelectedSnapshot} disabled={busyAction !== undefined}>
                     Export Selected
                   </button>
                   <button
                     data-testid="toggle-selected-snapshot-protection-button"
-                    style={buttonStyle()}
+                    className="snapshots-button snapshots-button--ghost"
                     onClick={handleToggleSelectedSnapshotProtection}
                     disabled={busyAction !== undefined}
                   >
@@ -13415,7 +13885,7 @@ export function App() {
                   </button>
                   <button
                     data-testid="delete-selected-snapshot-button"
-                    style={buttonStyle()}
+                    className="snapshots-button snapshots-button--ghost"
                     onClick={handleDeleteSelectedSnapshot}
                     disabled={busyAction !== undefined || selectedSnapshot.protected}
                   >
@@ -13423,7 +13893,558 @@ export function App() {
                   </button>
                 </div>
               </div>
-            ) : null}
+            ) : (
+              <div className="snapshots-empty-state snapshots-empty-state--detail">
+                <span className="snapshots-section-kicker">Select a baseline</span>
+                <h4>Choose a snapshot to inspect its restore diff</h4>
+                <p>The active baseline becomes the app-wide restore reference and keeps drift visible across the rest of the product.</p>
+              </div>
+            )}
+            </div>
+            </section>
+
+            <section className="snapshot-selected provisioning-section snapshots-slab snapshots-slab--provisioning">
+              <div className="snapshots-section-header">
+                <div>
+                  <span className="snapshots-section-kicker">Batch Provisioning</span>
+                  <h3>Reusable profiles for production-line setup</h3>
+                  <p>Create reusable model, fleet, and mission profiles from trusted baselines, then apply them through the same verified restore path.</p>
+                </div>
+                <div className="snapshots-section-meta">
+                <span
+                  className={`snapshots-counter-chip${
+                    selectedProvisioningProfileInvalidEntries.length > 0 ? ' is-danger' : selectedProvisioningProfileChangedEntries.length > 0 ? ' is-warning' : ''
+                  }`}
+                >
+                  {selectedProvisioningProfileInvalidEntries.length > 0
+                    ? `${selectedProvisioningProfileInvalidEntries.length} invalid`
+                    : selectedProvisioningProfileChangedEntries.length > 0
+                      ? `${selectedProvisioningProfileChangedEntries.length} diff`
+                      : `${savedProvisioningProfiles.length} profiles`}
+                </span>
+                </div>
+              </div>
+
+              <p className="telemetry-note snapshots-inline-note">
+                This first provisioning pass is profile-driven: build reusable batches now, then apply and validate one connected vehicle at a time
+                through the existing runtime.
+              </p>
+
+              <div className="snapshot-capture-row snapshots-form-grid snapshots-form-grid--provisioning">
+                <div className="snapshots-form-group-heading">
+                  <span>Profile Identity</span>
+                  <p>Describe the unit, fleet, and mission variant this profile is intended for.</p>
+                </div>
+
+                <label className="scoped-editor-field snapshots-field">
+                  <span>Profile label</span>
+                  <input
+                    data-testid="provisioning-profile-label-input"
+                    type="text"
+                    value={provisioningProfileLabelInput}
+                    onChange={(event) => setProvisioningProfileLabelInput(event.target.value)}
+                    placeholder="TAF Model X battalion baseline"
+                  />
+                  <small>Use a durable operator-facing name.</small>
+                </label>
+
+                <label className="scoped-editor-field snapshots-field">
+                  <span>Source</span>
+                  <select
+                    data-testid="provisioning-profile-source-select"
+                    value={provisioningProfileSourceInput}
+                    onChange={(event) => setProvisioningProfileSourceInput(event.target.value as ProvisioningProfileSourceMode)}
+                  >
+                    <option value="selected-snapshot">Selected snapshot baseline</option>
+                    <option value="live-controller">Current live controller</option>
+                  </select>
+                  <small>Choose whether the baseline comes from a saved snapshot or the live FC.</small>
+                </label>
+
+                <label className="scoped-editor-field snapshots-field">
+                  <span>Drone model</span>
+                  <input
+                    type="text"
+                    value={provisioningProfileModelInput}
+                    onChange={(event) => setProvisioningProfileModelInput(event.target.value)}
+                    placeholder="BETAFPV Pavo20"
+                  />
+                  <small>Model metadata makes filtering and assignment clearer later.</small>
+                </label>
+
+                <label className="scoped-editor-field snapshots-field">
+                  <span>Fleet / customer</span>
+                  <input
+                    type="text"
+                    value={provisioningProfileFleetInput}
+                    onChange={(event) => setProvisioningProfileFleetInput(event.target.value)}
+                    placeholder="3rd Battalion"
+                  />
+                  <small>Use this for unit-level or customer-level packages.</small>
+                </label>
+
+                <label className="scoped-editor-field snapshots-field">
+                  <span>Mission profile</span>
+                  <input
+                    type="text"
+                    value={provisioningProfileMissionInput}
+                    onChange={(event) => setProvisioningProfileMissionInput(event.target.value)}
+                    placeholder="Night ops"
+                  />
+                  <small>Optional mission-specific label for payload, OSD, failsafe, or rate variants.</small>
+                </label>
+
+                <label className="scoped-editor-field snapshots-field">
+                  <span>Tags</span>
+                  <input
+                    type="text"
+                    value={provisioningProfileTagsInput}
+                    onChange={(event) => setProvisioningProfileTagsInput(event.target.value)}
+                    placeholder="batch, taf, elrs"
+                  />
+                  <small>Optional comma-separated tags for search and export context.</small>
+                </label>
+
+                <div className="snapshots-form-group-heading">
+                  <span>Source</span>
+                  <p>Choose the baseline, then decide whether staged draft values should ride on top as an overlay.</p>
+                </div>
+
+                <div className="snapshot-capture-actions provisioning-capture-actions">
+                  <label className="snapshot-protected-toggle snapshots-setting-row">
+                    <input
+                      type="checkbox"
+                      checked={provisioningProfileProtectedInput}
+                      onChange={(event) => setProvisioningProfileProtectedInput(event.target.checked)}
+                    />
+                    <span>
+                      <strong>Protect this profile</strong>
+                      <small>Prevents accidental removal of a trusted production template.</small>
+                    </span>
+                  </label>
+
+                  <label className="snapshot-protected-toggle snapshots-setting-row">
+                    <input
+                      data-testid="provisioning-profile-include-drafts-toggle"
+                      type="checkbox"
+                      checked={includeDraftOverlayInProvisioningProfile}
+                      onChange={(event) => setIncludeDraftOverlayInProvisioningProfile(event.target.checked)}
+                      disabled={stagedProvisioningOverlayParameters.length === 0}
+                    />
+                    <span>
+                      <strong>Include staged parameter drafts as an overlay</strong>
+                      <small>{stagedProvisioningOverlayParameters.length} staged parameter(s) available right now.</small>
+                    </span>
+                  </label>
+                </div>
+
+                <div className="snapshots-form-group-heading">
+                  <span>Validation</span>
+                  <p>Store the operational checklist each unit should pass before it leaves the bench.</p>
+                </div>
+
+                <label className="scoped-editor-field snapshots-field snapshots-field--wide">
+                  <span>Checklist</span>
+                  <textarea
+                    data-testid="provisioning-profile-checklist-input"
+                    value={provisioningProfileChecklistInput}
+                    onChange={(event) => setProvisioningProfileChecklistInput(event.target.value)}
+                    rows={6}
+                    placeholder="One validation item per line."
+                  />
+                  <small>Store the bench checklist every unit should pass after provisioning.</small>
+                </label>
+
+                <div className="snapshots-form-group-heading">
+                  <span>Notes & Actions</span>
+                  <p>Keep the supporting context brief, then create or exchange the profile library.</p>
+                </div>
+
+                <label className="scoped-editor-field snapshots-field snapshots-field--wide">
+                  <span>Note</span>
+                  <textarea
+                    value={provisioningProfileNoteInput}
+                    onChange={(event) => setProvisioningProfileNoteInput(event.target.value)}
+                    rows={4}
+                    placeholder="Optional context for operators, manufacturing, or sustainment."
+                  />
+                  <small>Use this for build notes, payload assumptions, or deployment caveats.</small>
+                </label>
+
+                <div className="snapshot-capture-actions provisioning-capture-actions">
+                  <div className="snapshots-action-row">
+                    <button
+                      data-testid="capture-provisioning-profile-button"
+                      className="snapshots-button snapshots-button--primary"
+                      onClick={handleCreateProvisioningProfile}
+                      disabled={
+                        busyAction !== undefined ||
+                        (provisioningProfileSourceInput === 'selected-snapshot' ? !selectedSnapshot : snapshot.parameters.length === 0)
+                      }
+                    >
+                      Create Provisioning Profile
+                    </button>
+                    <button
+                      className="snapshots-button snapshots-button--secondary"
+                      onClick={handleOpenProvisioningImport}
+                      disabled={busyAction !== undefined}
+                    >
+                      Import Provisioning Library
+                    </button>
+                    <button
+                      data-testid="export-provisioning-library-button"
+                      className="snapshots-button snapshots-button--secondary"
+                      onClick={handleExportProvisioningLibrary}
+                      disabled={busyAction !== undefined || savedProvisioningProfiles.length === 0}
+                    >
+                      Export Provisioning Library
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="snapshots-feedback-stack">
+              {provisioningStorageNotice ? (
+                <div className="parameter-review__notice snapshots-notice">
+                  <StatusBadge tone={provisioningStorageNotice.tone}>{provisioningStorageNotice.tone}</StatusBadge>
+                  <p>{provisioningStorageNotice.text}</p>
+                </div>
+              ) : null}
+
+              {provisioningNotice ? (
+                <div className="parameter-review__notice snapshots-notice">
+                  <StatusBadge tone={provisioningNotice.tone}>{provisioningNotice.tone}</StatusBadge>
+                  <p>{provisioningNotice.text}</p>
+                </div>
+              ) : null}
+              </div>
+
+              <div className="telemetry-metric-grid snapshots-metrics-grid">
+                <article className="telemetry-metric-card snapshots-metric-card">
+                  <span>Saved profiles</span>
+                  <strong>{savedProvisioningProfiles.length}</strong>
+                </article>
+                <article className="telemetry-metric-card snapshots-metric-card">
+                  <span>Base params</span>
+                  <strong>{selectedProvisioningProfile?.baseBackup.parameterCount ?? 0}</strong>
+                </article>
+                <article className="telemetry-metric-card snapshots-metric-card">
+                  <span>Overlay params</span>
+                  <strong>{selectedProvisioningProfile?.overlayParameters.length ?? 0}</strong>
+                </article>
+                <article className="telemetry-metric-card snapshots-metric-card">
+                  <span>Checklist items</span>
+                  <strong>{selectedProvisioningProfile?.validationChecklist.length ?? 0}</strong>
+                </article>
+              </div>
+
+              <div className="snapshots-workspace">
+              <div className="snapshots-browser-rail">
+              <div className="snapshots-browser-rail__header">
+                <div>
+                  <span className="snapshots-section-kicker">Provisioning Library</span>
+                  <h4>Saved profiles</h4>
+                </div>
+                <span className="snapshots-counter-chip">{savedProvisioningProfiles.length}</span>
+              </div>
+              {savedProvisioningProfiles.length > 0 ? (
+                <div className="snapshot-library-grid snapshots-library-grid--rail">
+                  {savedProvisioningProfiles.map((savedProfile) => {
+                    const isActive = savedProfile.id === selectedProvisioningProfile?.id
+                    const restorePreview =
+                      (savedProfile.id === selectedProvisioningProfile?.id
+                        ? selectedProvisioningProfileRestore
+                        : deriveDraftValuesFromParameterBackup(snapshot.parameters, deriveProvisioningProfileBackup(savedProfile))) ?? {
+                        draftValues: {},
+                        matchedCount: 0,
+                        changedCount: 0,
+                        unchangedCount: 0,
+                        unknownParameterIds: []
+                      }
+
+                    return (
+                      <button
+                        key={savedProfile.id}
+                        type="button"
+                        data-testid={`provisioning-profile-card-${savedProfile.id}`}
+                        className={`snapshot-card${isActive ? ' is-active' : ''}`}
+                        onClick={() => setSelectedProvisioningProfileId(savedProfile.id)}
+                      >
+                        <div className="snapshot-card__header">
+                          <div>
+                            <strong>{savedProfile.label}</strong>
+                            <small>{formatSnapshotTimestamp(savedProfile.createdAt)}</small>
+                          </div>
+                          <span className="snapshots-counter-chip">
+                            {restorePreview.changedCount > 0 ? `${restorePreview.changedCount} diff` : 'matched'}
+                          </span>
+                        </div>
+
+                        <div className="config-pills">
+                          <span>{savedProfile.model ?? 'Model not set'}</span>
+                          {savedProfile.fleet ? <span>{savedProfile.fleet}</span> : null}
+                          {savedProfile.mission ? <span>{savedProfile.mission}</span> : null}
+                          <span>{savedProfile.overlayParameters.length} overlay</span>
+                          {savedProfile.protected ? <span className="is-target">protected</span> : null}
+                        </div>
+
+                        <p>
+                          {savedProfile.sourceSnapshotLabel
+                            ? `Built from snapshot "${savedProfile.sourceSnapshotLabel}" and ${savedProfile.overlayParameters.length} overlay parameter(s).`
+                            : `Built from a live controller baseline and ${savedProfile.overlayParameters.length} overlay parameter(s).`}
+                        </p>
+                        {savedProfile.note ? <small className="snapshot-card__note">{savedProfile.note}</small> : null}
+                      </button>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="snapshots-empty-state">
+                  <span className="snapshots-section-kicker">No Profiles Yet</span>
+                  <h4>Create the first provisioning profile</h4>
+                  <p>Use a selected snapshot or the live controller as a base, then attach model metadata and a validation checklist.</p>
+                </div>
+              )}
+              </div>
+
+              {selectedProvisioningProfile ? (
+                <div className="snapshot-selected snapshots-detail-panel">
+                  <div className="telemetry-header">
+                    <div>
+                      <h3>{selectedProvisioningProfile.label}</h3>
+                      <p>
+                        {selectedProvisioningProfile.sourceSnapshotLabel
+                          ? `Provisioning profile built from snapshot "${selectedProvisioningProfile.sourceSnapshotLabel}".`
+                          : 'Provisioning profile built from a live controller baseline.'}
+                      </p>
+                    </div>
+                    <StatusBadge tone={selectedProvisioningProfileChangedEntries.length > 0 ? 'warning' : 'success'}>
+                      {selectedProvisioningProfileChangedEntries.length > 0 ? 'profile diff ready' : 'already matched'}
+                    </StatusBadge>
+                  </div>
+
+                  <div className="telemetry-metric-grid snapshots-metrics-grid">
+                    <article className="telemetry-metric-card snapshots-metric-card">
+                      <span>Created</span>
+                      <strong>{formatSnapshotTimestamp(selectedProvisioningProfile.createdAt)}</strong>
+                    </article>
+                    <article className="telemetry-metric-card snapshots-metric-card">
+                      <span>Matched live</span>
+                      <strong>{selectedProvisioningProfileRestore?.unchangedCount ?? 0}</strong>
+                    </article>
+                    <article className="telemetry-metric-card snapshots-metric-card">
+                      <span>Unknown on live</span>
+                      <strong>{selectedProvisioningProfileRestore?.unknownParameterIds.length ?? 0}</strong>
+                    </article>
+                    <article className="telemetry-metric-card snapshots-metric-card">
+                      <span>Provisioning writes</span>
+                      <strong>{selectedProvisioningProfileChangedEntries.length}</strong>
+                    </article>
+                  </div>
+
+                  <div className="config-pills">
+                    <span>{selectedProvisioningProfile.model ?? 'Model not set'}</span>
+                    {selectedProvisioningProfile.fleet ? <span>{selectedProvisioningProfile.fleet}</span> : null}
+                    {selectedProvisioningProfile.mission ? <span>{selectedProvisioningProfile.mission}</span> : null}
+                    <span>{selectedProvisioningProfile.baseBackup.parameterCount} base params</span>
+                    <span>{selectedProvisioningProfile.overlayParameters.length} overlay params</span>
+                    {selectedProvisioningProfile.sourceSnapshotLabel ? <span>{selectedProvisioningProfile.sourceSnapshotLabel}</span> : null}
+                    {selectedProvisioningProfile.protected ? <span className="is-target">protected profile</span> : null}
+                    {selectedProvisioningProfile.tags.map((tag) => (
+                      <span key={`${selectedProvisioningProfile.id}:detail:${tag}`}>#{tag}</span>
+                    ))}
+                  </div>
+
+                  {selectedProvisioningProfile.note ? <p className="snapshot-selected__note">{selectedProvisioningProfile.note}</p> : null}
+
+                  <div className="snapshots-detail-section-heading snapshots-detail-section-heading--compact">
+                    <div>
+                      <span className="snapshots-section-kicker">Validation</span>
+                      <h4>Bench checklist</h4>
+                    </div>
+                    <span className="snapshots-counter-chip">{selectedProvisioningProfile.validationChecklist.length} items</span>
+                  </div>
+
+                  <div className="provisioning-checklist">
+                    {selectedProvisioningProfile.validationChecklist.length > 0 ? (
+                      <ul className="output-note-list">
+                        {selectedProvisioningProfile.validationChecklist.map((item) => (
+                          <li key={item.id}>
+                            {item.label}
+                            {item.instruction ? <small>{item.instruction}</small> : null}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="telemetry-note">No validation checklist is attached to this profile yet.</p>
+                    )}
+                  </div>
+
+                  {selectedProvisioningProfileRestore && selectedProvisioningProfileRestore.unknownParameterIds.length > 0 ? (
+                    <div className="parameter-follow-up parameter-follow-up--warning">
+                      <StatusBadge tone="warning">partial</StatusBadge>
+                      <p>
+                        {selectedProvisioningProfileRestore.unknownParameterIds.length} profile parameter(s) do not exist in the current live metadata
+                        set and will be ignored during apply.
+                      </p>
+                    </div>
+                  ) : null}
+
+                  <div className="snapshots-detail-section-heading">
+                    <div>
+                      <span className="snapshots-section-kicker">Profile Preview</span>
+                      <h4>Changed parameters</h4>
+                    </div>
+                    <span className="snapshots-counter-chip">{selectedProvisioningProfileChangedEntries.length} writes</span>
+                  </div>
+
+                  {selectedProvisioningProfileChangedEntries.length > 0 ? (
+                    <div className="parameter-diff-grid">
+                      {selectedProvisioningProfileDiffGroups.map((group) => (
+                        <section key={group.category} className="parameter-diff-group">
+                          <header>
+                            <strong>{formatCategoryLabel(group.category)}</strong>
+                            <span>{group.entries.length} changed</span>
+                          </header>
+
+                          {group.entries.map((draft) => (
+                            <div key={draft.id} className="parameter-diff-item">
+                              <span>
+                                <strong>{draft.id}</strong>
+                                <small>{draft.label}</small>
+                              </span>
+                              <span className="parameter-diff-values">
+                                {formatParameterValue(draft.currentValue, draft.definition?.unit)} to{' '}
+                                {formatParameterValue(draft.nextValue, draft.definition?.unit)}
+                              </span>
+                              <span className="parameter-diff-delta">{formatParameterDelta(draft.delta, draft.definition?.unit)}</span>
+                            </div>
+                          ))}
+                        </section>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="telemetry-note">
+                      This provisioning profile already matches the currently synced controller values. Choose another profile or adjust the baseline and
+                      overlay inputs to create a new batch variant.
+                    </p>
+                  )}
+
+                  {selectedProvisioningProfileInvalidEntries.length > 0 ? (
+                    <>
+                    <div className="snapshots-detail-section-heading snapshots-detail-section-heading--compact">
+                      <div>
+                        <span className="snapshots-section-kicker">Blocked values</span>
+                        <h4>Review invalid provisioning entries</h4>
+                      </div>
+                      <span className="snapshots-counter-chip is-danger">{selectedProvisioningProfileInvalidEntries.length} blocked</span>
+                    </div>
+                    <div className="parameter-diff-grid parameter-diff-grid--invalid">
+                      <section className="parameter-diff-group parameter-diff-group--invalid">
+                        <header>
+                          <strong>Invalid provisioning values</strong>
+                          <span>{selectedProvisioningProfileInvalidEntries.length} blocked</span>
+                        </header>
+
+                        {selectedProvisioningProfileInvalidEntries.map((draft) => (
+                          <div key={draft.id} className="parameter-diff-item">
+                            <span>
+                              <strong>{draft.id}</strong>
+                              <small>{draft.label}</small>
+                            </span>
+                            <span className="parameter-diff-values">{draft.rawValue || 'Empty draft'}</span>
+                            <span className="parameter-diff-delta">{draft.reason ?? 'Invalid value'}</span>
+                          </div>
+                        ))}
+                      </section>
+                    </div>
+                    </>
+                  ) : null}
+
+                  <div className="snapshots-detail-section-heading snapshots-detail-section-heading--compact">
+                    <div>
+                      <span className="snapshots-section-kicker">Apply profile</span>
+                      <h4>Verified write path</h4>
+                    </div>
+                  </div>
+
+                  <div className="parameter-follow-up parameter-follow-up--warning">
+                    <StatusBadge tone="warning">production</StatusBadge>
+                    <p>
+                      Applying a provisioning profile writes only the diff against the current live controller, verifies readback, and keeps the same
+                      rollback behavior as snapshot restore. It still overwrites every changed value listed above.
+                    </p>
+                  </div>
+
+                  <label className="snapshot-restore-ack">
+                    <input
+                      data-testid="provisioning-profile-restore-ack"
+                      type="checkbox"
+                      checked={provisioningRestoreAcknowledged}
+                      onChange={(event) => setProvisioningRestoreAcknowledged(event.target.checked)}
+                      disabled={busyAction !== undefined || selectedProvisioningProfileChangedEntries.length === 0}
+                    />
+                    <span>I understand that applying this provisioning profile will overwrite the current live values shown in the diff above.</span>
+                  </label>
+
+                  <div className="snapshots-action-row snapshots-action-row--detail">
+                    <button
+                      data-testid="apply-provisioning-profile-button"
+                      className="snapshots-button snapshots-button--primary"
+                      onClick={() => void handleApplySelectedProvisioningProfile()}
+                      disabled={
+                        busyAction !== undefined ||
+                        selectedProvisioningProfileChangedEntries.length === 0 ||
+                        selectedProvisioningProfileInvalidEntries.length > 0 ||
+                        !provisioningRestoreAcknowledged ||
+                        !canApplyDraftParameters
+                      }
+                    >
+                      {busyAction === 'provisioning:apply'
+                        ? 'Applying…'
+                        : `Apply Provisioning Profile (${selectedProvisioningProfileChangedEntries.length})`}
+                    </button>
+                    {isExpertMode ? (
+                      <button
+                        className="snapshots-button snapshots-button--secondary"
+                        onClick={handleStageSelectedProvisioningProfileDiff}
+                        disabled={busyAction !== undefined || selectedProvisioningProfileChangedEntries.length === 0}
+                      >
+                        Send Diff to Parameters
+                      </button>
+                    ) : null}
+                    <button
+                      className="snapshots-button snapshots-button--secondary"
+                      onClick={handleExportSelectedProvisioningProfile}
+                      disabled={busyAction !== undefined}
+                    >
+                      Export Selected Profile
+                    </button>
+                    <button
+                      className="snapshots-button snapshots-button--ghost"
+                      onClick={handleToggleSelectedProvisioningProfileProtection}
+                      disabled={busyAction !== undefined}
+                    >
+                      {selectedProvisioningProfile.protected ? 'Unprotect Selected' : 'Protect Selected'}
+                    </button>
+                    <button
+                      className="snapshots-button snapshots-button--ghost"
+                      onClick={handleDeleteSelectedProvisioningProfile}
+                      disabled={busyAction !== undefined || selectedProvisioningProfile.protected}
+                    >
+                      Delete Selected
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="snapshots-empty-state snapshots-empty-state--detail">
+                  <span className="snapshots-section-kicker">Select a profile</span>
+                  <h4>Choose a provisioning profile to inspect its diff</h4>
+                  <p>The selected profile shows the exact writes, checklist, and metadata that would be applied to the connected vehicle.</p>
+                </div>
+              )}
+              </div>
+            </section>
           </div>
         </Panel>
       </section>

@@ -5,13 +5,18 @@ import {
   ArduPilotConfiguratorRuntime,
   ParameterBatchWriteError,
   createParameterBackup,
+  createParameterProvisioningLibrary,
+  createParameterProvisioningProfile,
   createParameterSnapshot,
   createParameterSnapshotLibrary,
   deriveDraftValuesFromParameterBackup,
+  deriveProvisioningProfileBackup,
   parseParameterBackup,
+  parseParameterProvisioningLibrary,
   parseParameterSnapshotInput,
   parseParameterSnapshotLibrary,
   resolveParameterSnapshotInput,
+  serializeParameterProvisioningLibrary,
   serializeParameterBackup,
   serializeParameterSnapshotLibrary
 } from '../packages/ardupilot-core/dist/index.js'
@@ -368,6 +373,53 @@ test('snapshot libraries round-trip and select snapshots by label', async () => 
     assert.equal(selectedSnapshot.label, 'Known-good baseline')
     assert.equal(selectedSnapshot.protected, true)
     assert.deepEqual(selectedSnapshot.tags, [])
+  } finally {
+    await sitl.disconnect().catch(() => {})
+    sitl.destroy()
+  }
+})
+
+test('provisioning profiles round-trip and apply overlay parameters on top of a snapshot baseline', async () => {
+  const sitl = createMockSITL()
+
+  try {
+    const initialSnapshot = await sitl.connectAndSync({
+      heartbeatTimeoutMs: 2000,
+      parameterTimeoutMs: 5000
+    })
+
+    const baseBackup = createParameterBackup(initialSnapshot)
+    const profile = createParameterProvisioningProfile(baseBackup, 'Battalion night ops', {
+      model: 'BETAFPV Pavo20',
+      fleet: '3rd Battalion',
+      mission: 'Night ops',
+      tags: ['batch', 'night'],
+      sourceSnapshotLabel: 'Known-good baseline',
+      overlayParameters: [
+        {
+          id: 'FLTMODE1',
+          value: 5,
+          category: 'Flight modes',
+          label: 'Flight Mode 1'
+        }
+      ],
+      validationChecklist: ['Motor order verified', 'Receiver responds']
+    })
+
+    const library = createParameterProvisioningLibrary('Field kits', [profile])
+    const parsedLibrary = parseParameterProvisioningLibrary(serializeParameterProvisioningLibrary(library))
+
+    assert.equal(parsedLibrary.profiles.length, 1)
+    assert.equal(parsedLibrary.profiles[0].fleet, '3rd Battalion')
+    assert.equal(parsedLibrary.profiles[0].validationChecklist.length, 2)
+
+    const effectiveBackup = deriveProvisioningProfileBackup(parsedLibrary.profiles[0])
+    const restore = deriveDraftValuesFromParameterBackup(initialSnapshot.parameters, effectiveBackup)
+
+    assert.equal(restore.changedCount, 1)
+    assert.deepEqual(restore.draftValues, {
+      FLTMODE1: '5'
+    })
   } finally {
     await sitl.disconnect().catch(() => {})
     sitl.destroy()

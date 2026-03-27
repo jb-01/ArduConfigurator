@@ -195,7 +195,9 @@ test.describe('browser configurator regression flows', () => {
 
     await openView(page, 'outputs')
     await expect(page.getByText('Output assignments', { exact: true })).toBeVisible()
+    await page.getByTestId('outputs-task-nav').getByRole('button', { name: /Peripherals & Alerts/i }).click()
     await expect(page.getByText('LED & buzzer notifications', { exact: true })).toBeVisible()
+    await page.getByTestId('outputs-task-nav').getByRole('button', { name: /Direction & Test/i }).click()
     await page.getByLabel('All propellers are removed.').check()
     await page.getByLabel('The vehicle is restrained and the test area is clear.').check()
     await page.getByTestId('motor-test-sliders').getByRole('button', { name: 'Test' }).click()
@@ -338,6 +340,31 @@ test.describe('browser configurator regression flows', () => {
     await page.getByTestId('toggle-selected-snapshot-protection-button').click()
     await expect(page.getByText('is no longer protected.')).toBeVisible()
     await expect(page.getByTestId('delete-selected-snapshot-button')).toBeEnabled()
+  })
+
+  test('snapshots can build a provisioning profile with batch metadata and a staged overlay', async ({ page }) => {
+    await connectToVehicle(page, 'demo')
+
+    await openView(page, 'snapshots')
+    await page.getByTestId('snapshot-label-input').fill('Provisioning baseline')
+    await page.getByTestId('capture-live-snapshot-button').click()
+    await expect(page.getByText('Saved snapshot "Provisioning baseline" with 134 parameters.')).toBeVisible()
+
+    await openView(page, 'tuning')
+    await page.getByTestId('tuning-input-ATC_INPUT_TC').fill('0.2')
+
+    await openView(page, 'snapshots')
+    await page.getByTestId('provisioning-profile-label-input').fill('Battalion night ops')
+    await page.getByTestId('provisioning-profile-checklist-input').fill('Motor order verified\nReceiver responds')
+    await page.getByTestId('provisioning-profile-include-drafts-toggle').check()
+    await page.getByTestId('capture-provisioning-profile-button').click()
+
+    await expect(page.getByText('Saved provisioning profile "Battalion night ops"')).toBeVisible()
+    await expect(page.getByText('profile diff ready')).toBeVisible()
+    await expect(page.getByTestId('provisioning-profile-restore-ack')).not.toBeChecked()
+    await expect(page.getByRole('button', { name: 'Apply Provisioning Profile (1)' })).toBeVisible()
+    await expect(page.locator('.provisioning-checklist').getByText('Motor order verified', { exact: true })).toBeVisible()
+    await expect(page.locator('.provisioning-checklist').getByText('Receiver responds', { exact: true })).toBeVisible()
   })
 
   test('snapshot view degrades gracefully when browser local storage is unavailable', async ({ page }) => {
