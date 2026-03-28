@@ -29,6 +29,8 @@ This repository is not pretending those efforts do not exist. The goal here is d
 
 This project is not trying to become a general-purpose GCS. The focus is a modern configuration app that makes ArduPilot more approachable for small multirotors while keeping the underlying runtime portable to future web tools or other ground-control surfaces.
 
+Betaflight Configurator has also been used as a direct UI reference for parts of the FPV-oriented workflow, and the rotating craft preview models in [apps/web/public/models](apps/web/public/models) were copied from that project under their upstream GPL-compatible terms. See [apps/web/public/models/ATTRIBUTION.txt](apps/web/public/models/ATTRIBUTION.txt).
+
 ## Current State
 
 The repository is beyond prototype stage, but not finished.
