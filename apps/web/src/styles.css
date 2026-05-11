@@ -8916,3 +8916,41 @@ textarea:focus {
     padding: 18px;
   }
 }
+
+/* Receiver: hoist live monitor to hero, then task picker, then active task. */
+.receiver-workspace--task-deck {
+  display: contents;
+}
+
+.receiver-workspace__live {
+  order: 1;
+}
+
+.receiver-summary-grid {
+  order: 2;
+}
+
+.receiver-workspace__config {
+  order: 3;
+}
+
+.telemetry-stack--receiver .receiver-live-primary-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.telemetry-stack--receiver .receiver-monitor__meta {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.telemetry-stack--receiver .receiver-summary-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.telemetry-stack--receiver .receiver-summary-card {
+  padding: 10px 12px;
+  gap: 6px;
+}
+
+.telemetry-stack--receiver .receiver-summary-card p {
+  font-size: 12px;
+}
