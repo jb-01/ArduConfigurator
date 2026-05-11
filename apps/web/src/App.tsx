@@ -127,6 +127,7 @@ import { LiveGpsMapCard } from './live-gps-map'
 import { RcChannelBars } from './rc-channel-bars'
 import { MotorTestSliders } from './motor-test-sliders'
 import { RateCurveGraph } from './rate-curve-graph'
+import { DisconnectedLanding } from './disconnected-landing'
 import {
   loadStoredProvisioningProfiles,
   persistProvisioningProfiles,
@@ -9094,6 +9095,8 @@ export function App() {
     }
   ] as const
 
+  const showLanding = activeViewId === 'setup' && snapshot.connection.kind !== 'connected'
+
   return (
 	    <main className="app-shell">
 	      <header className="app-header">
@@ -9378,7 +9381,7 @@ export function App() {
             </div>
           ) : null}
 
-          {activeViewDescriptor ? (
+          {activeViewDescriptor && !showLanding ? (
             <header className="workspace-main__header workspace-main__header--betaflight" aria-hidden="true">
               <div className="workspace-main__tab-copy">
                 <h2 data-testid="workspace-view-title">{activeViewDescriptor.label}</h2>
@@ -9389,7 +9392,21 @@ export function App() {
               </div>
             </header>
           ) : null}
-	      {activeViewId === 'setup' ? (
+	      {showLanding ? (
+            <DisconnectedLanding
+              transportMode={transportMode}
+              onTransportModeChange={setTransportMode}
+              webSerialSupported={webSerialSupported}
+              websocketUrl={websocketUrl}
+              onWebsocketUrlChange={setWebsocketUrl}
+              websocketUrlPlaceholder={DEFAULT_WEBSOCKET_URL}
+              sessionProfile={sessionProfile}
+              onSessionProfileChange={setSessionProfile}
+              connectLabel={connectButtonLabel(snapshot, parameterFollowUp)}
+              onConnect={() => void handleConnect()}
+              connectDisabled={busyAction !== undefined || snapshot.connection.kind === 'connected'}
+            />
+          ) : activeViewId === 'setup' ? (
 	      <>
 	      <section className="grid one-up">
 	        <Panel

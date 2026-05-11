@@ -8677,3 +8677,234 @@ textarea:focus {
     grid-template-columns: 1fr;
   }
 }
+
+.landing {
+  display: grid;
+  gap: 32px;
+  padding: 32px 8px 64px;
+}
+
+.landing__hero {
+  display: grid;
+  gap: 12px;
+  max-width: 760px;
+}
+
+.landing__eyebrow {
+  display: inline-block;
+  align-self: start;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--primary-transparent-1);
+  border: 1px solid var(--border-accent);
+  color: var(--primary-400);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.landing__title {
+  margin: 0;
+  font-size: 34px;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.landing__lede {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.landing__connect {
+  display: grid;
+  gap: 20px;
+  padding: 24px;
+  border-radius: 14px;
+  border: 1px solid var(--border-accent);
+  background: linear-gradient(180deg, var(--surface-warm-glow), transparent 60%), var(--bg-panel-raised);
+}
+
+.landing__connect-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.landing__connect-copy h2 {
+  margin: 0;
+  font-size: 20px;
+  color: var(--text);
+}
+
+.landing__connect-copy p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.landing__connect-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.landing__field {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.landing__field--wide {
+  grid-column: 1 / -1;
+}
+
+.landing__field select,
+.landing__field input {
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text);
+  font-size: 14px;
+}
+
+.landing__field select:focus,
+.landing__field input:focus {
+  outline: none;
+  border-color: var(--primary-500);
+}
+
+.landing__connect-button {
+  height: 40px;
+  padding: 0 20px;
+  border-radius: 8px;
+  border: 1px solid var(--primary-500);
+  background: var(--primary-500);
+  color: var(--text-on-light);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.landing__connect-button:hover:not(:disabled) {
+  background: var(--primary-400);
+  border-color: var(--primary-400);
+}
+
+.landing__connect-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.landing__section {
+  display: grid;
+  gap: 16px;
+}
+
+.landing__section-header {
+  display: grid;
+  gap: 4px;
+}
+
+.landing__section-header h2 {
+  margin: 0;
+  font-size: 18px;
+  color: var(--text);
+}
+
+.landing__section-header p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.landing__capability-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.landing__capability {
+  display: grid;
+  gap: 6px;
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid var(--card-outline);
+  background: var(--bg-panel-raised);
+}
+
+.landing__capability strong {
+  color: var(--text);
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.landing__capability span {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.landing__board-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.landing__board {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid var(--card-outline);
+  background: var(--bg-panel-raised);
+}
+
+.landing__board-image {
+  display: grid;
+  place-items: center;
+  height: 120px;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+
+.landing__board-image img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.landing__board-name {
+  font-size: 13px;
+  color: var(--text);
+  font-weight: 500;
+}
+
+@media (max-width: 720px) {
+  .landing {
+    padding: 20px 4px 48px;
+  }
+
+  .landing__title {
+    font-size: 26px;
+  }
+
+  .landing__connect {
+    padding: 18px;
+  }
+}
