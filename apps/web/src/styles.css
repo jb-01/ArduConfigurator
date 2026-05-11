@@ -2494,24 +2494,49 @@ textarea:focus {
   left: 14px;
 }
 
+.bf-osd-preview-screen__item--top-center {
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: var(--primary-400);
+  letter-spacing: 0.08em;
+}
+
 .bf-osd-preview-screen__item--top-right {
   top: 14px;
   right: 14px;
+}
+
+.bf-osd-preview-screen__item--mid-left {
+  top: 50%;
+  left: 14px;
+  transform: translateY(-50%);
 }
 
 .bf-osd-preview-screen__item--center {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  padding: 8px 12px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 187, 0, 0.28);
-  background: rgba(255, 187, 0, 0.08);
+  color: rgba(255, 243, 189, 0.4);
+  font-size: 22px;
+  line-height: 1;
+}
+
+.bf-osd-preview-screen__item--mid-right {
+  top: 50%;
+  right: 14px;
+  transform: translateY(-50%);
 }
 
 .bf-osd-preview-screen__item--bottom-left {
   left: 14px;
   bottom: 14px;
+}
+
+.bf-osd-preview-screen__item--bottom-center {
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
 }
 
 .bf-osd-preview-screen__item--bottom-right {

@@ -11301,23 +11301,33 @@ export function App() {
                       <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--top-left">
                         LINK {osdLinkPorts.length > 0 ? osdLinkPorts[0]?.label : 'NONE'}
                       </span>
+                      <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--top-center">
+                        {snapshot.vehicle?.flightMode ?? 'STABILIZE'}
+                      </span>
                       <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--top-right">
                         {formatArducopterOsdType(osdType)}
                       </span>
-                      <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--center">
-                        Drag-and-drop editor pending
+                      <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--mid-left">
+                        ALT {(snapshot.liveVerification.globalPosition.relativeAltitudeM ?? snapshot.liveVerification.globalPosition.altitudeM)?.toFixed(1) ?? '0.0'}m
+                      </span>
+                      <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--center" aria-hidden="true">+</span>
+                      <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--mid-right">
+                        HDG {snapshot.liveVerification.attitudeTelemetry.yawDeg !== undefined ? Math.round(((snapshot.liveVerification.attitudeTelemetry.yawDeg % 360) + 360) % 360) : 0}&deg;
                       </span>
                       <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--bottom-left">
+                        BAT {snapshot.liveVerification.batteryTelemetry.voltageV !== undefined ? `${formatVoltage(snapshot.liveVerification.batteryTelemetry.voltageV)}` : '0.0 V'}
+                      </span>
+                      <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--bottom-center">
                         {formatArducopterMspOsdCellCount(mspOsdCellCount)}
                       </span>
                       <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--bottom-right">
-                        {formatArducopterOsdSwitchMethod(osdSwitchMethod)}
+                        RSSI {snapshot.liveVerification.rcInput.rssi ?? 0}
                       </span>
                     </div>
                   </div>
                   <div className="bf-osd-preview-footer">
-                    <StatusBadge tone="warning">layout editor pending</StatusBadge>
-                    <p>This preview establishes the center stage, but full element positioning still needs broader ArduPilot OSD metadata coverage.</p>
+                    <StatusBadge tone="neutral">read-only preview</StatusBadge>
+                    <p>Live battery, attitude, and link telemetry render here. Element positions are illustrative until per-element OSD parameters are wired through.</p>
                   </div>
                 </div>
               </article>
