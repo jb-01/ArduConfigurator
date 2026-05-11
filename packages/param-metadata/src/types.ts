@@ -12,6 +12,7 @@ export type AppViewId =
   | 'vtx'
   | 'osd'
   | 'receiver'
+  | 'modes'
   | 'outputs'
   | 'power'
   | 'snapshots'

@@ -39,40 +39,46 @@ const DEFAULT_APP_VIEWS: AppViewDefinition[] = [
     order: 5
   },
   {
+    id: 'modes',
+    label: 'Modes',
+    description: 'Flight-mode switch assignments and live position.',
+    order: 6
+  },
+  {
     id: 'outputs',
     label: 'Outputs',
     description: 'Airframe, output mapping, motor tests, and ESC review.',
-    order: 6
+    order: 7
   },
   {
     id: 'power',
     label: 'Power',
     description: 'Battery, failsafe, and pre-arm review.',
-    order: 7
+    order: 8
   },
   {
     id: 'snapshots',
     label: 'Snapshots',
     description: 'Capture, compare, and restore known-good parameter sets.',
-    order: 8
+    order: 9
   },
   {
     id: 'tuning',
     label: 'Tuning',
     description: 'Beginner-safe flight-feel and acro-rate tuning.',
-    order: 9
+    order: 10
   },
   {
     id: 'presets',
     label: 'Presets',
     description: 'Curated, explainable tuning bundles with automatic backup.',
-    order: 10
+    order: 11
   },
   {
     id: 'parameters',
     label: 'Parameters',
     description: 'Low-level parameter editing, diffing, and backup work.',
-    order: 11
+    order: 12
   }
 ]
 

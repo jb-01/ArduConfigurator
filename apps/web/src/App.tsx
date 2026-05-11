@@ -681,6 +681,8 @@ function viewMonogram(viewId: AppViewId): string {
       return 'OSD'
     case 'receiver':
       return 'RX'
+    case 'modes':
+      return 'MOD'
     case 'outputs':
       return 'OUT'
     case 'power':
@@ -710,6 +712,8 @@ function missionTitleForView(viewId: AppViewId): string {
       return 'On-Screen Display'
     case 'receiver':
       return 'Receiver'
+    case 'modes':
+      return 'Modes'
     case 'outputs':
       return 'Outputs'
     case 'power':
@@ -11434,8 +11438,8 @@ export function App() {
       </section>
         ) : null}
 
-	      {(activeViewId === 'receiver' || activeViewId === 'power') ? (
-      <section className={`grid ${activeViewId === 'receiver' || activeViewId === 'power' ? 'one-up' : 'two-up'}`}>
+	      {(activeViewId === 'receiver' || activeViewId === 'modes' || activeViewId === 'power') ? (
+      <section className={`grid ${activeViewId === 'receiver' || activeViewId === 'modes' || activeViewId === 'power' ? 'one-up' : 'two-up'}`}>
         {activeViewId === 'receiver' ? (
         <div id="setup-panel-rc">
           <Panel
@@ -12447,6 +12451,93 @@ export function App() {
               </div>
             ) : null}
           </div>
+          </Panel>
+        </div>
+        ) : null}
+
+        {activeViewId === 'modes' ? (
+        <div id="setup-panel-modes">
+          <Panel
+            title="Modes"
+            subtitle="Flight-mode assignments for the configured switch channel and a live indicator on the active slot."
+          >
+            <div className="modes-stack">
+              <div className="modes-status">
+                <article className="modes-status__card">
+                  <span>Mode channel</span>
+                  <strong>{configuredModeChannel !== undefined ? `CH${configuredModeChannel}` : 'Not configured'}</strong>
+                  <small>FLTMODE_CH selects which RC channel switches the flight mode.</small>
+                </article>
+                <article className="modes-status__card">
+                  <span>Current slot</span>
+                  <strong>{modeSwitchEstimate.estimatedSlot !== undefined ? `Slot ${modeSwitchEstimate.estimatedSlot}` : 'Waiting'}</strong>
+                  <small>{modeSwitchEstimate.pwm !== undefined ? `${modeSwitchEstimate.pwm} us live` : 'No live RC input.'}</small>
+                </article>
+                <article className="modes-status__card">
+                  <span>Active mode</span>
+                  <strong>{snapshot.vehicle?.flightMode ?? 'Unknown'}</strong>
+                  <small>Mode reported by the vehicle heartbeat.</small>
+                </article>
+              </div>
+
+              <div className="modes-table" role="table" aria-label="Flight mode slots" data-testid="modes-slot-table">
+                <div className="modes-table__row modes-table__row--head" role="row">
+                  <span role="columnheader">Slot</span>
+                  <span role="columnheader">PWM range</span>
+                  <span role="columnheader">Assigned mode</span>
+                  <span role="columnheader">State</span>
+                </div>
+                {[
+                  { position: 1 as const, paramId: 'FLTMODE1' as const, pwmLabel: '0 – 1230 us' },
+                  { position: 2 as const, paramId: 'FLTMODE2' as const, pwmLabel: '1231 – 1360 us' },
+                  { position: 3 as const, paramId: 'FLTMODE3' as const, pwmLabel: '1361 – 1490 us' },
+                  { position: 4 as const, paramId: 'FLTMODE4' as const, pwmLabel: '1491 – 1620 us' },
+                  { position: 5 as const, paramId: 'FLTMODE5' as const, pwmLabel: '1621 – 1749 us' },
+                  { position: 6 as const, paramId: 'FLTMODE6' as const, pwmLabel: '1750+ us' }
+                ].map((slot) => {
+                  const paramValue = readRoundedParameter(snapshot, slot.paramId)
+                  const isActive = modeSwitchEstimate.estimatedSlot === slot.position
+                  return (
+                    <div
+                      key={slot.position}
+                      className={`modes-table__row${isActive ? ' is-active' : ''}`}
+                      role="row"
+                      data-testid={`modes-slot-${slot.position}`}
+                    >
+                      <span role="cell"><strong>{slot.position}</strong></span>
+                      <span role="cell">{slot.pwmLabel}</span>
+                      <span role="cell">{formatModeAssignment(paramValue)}</span>
+                      <span role="cell">
+                        {isActive ? (
+                          <StatusBadge tone="success">live</StatusBadge>
+                        ) : paramValue === undefined ? (
+                          <StatusBadge tone="warning">not synced</StatusBadge>
+                        ) : (
+                          <StatusBadge tone="neutral">—</StatusBadge>
+                        )}
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+
+              <div className="modes-help">
+                <p>
+                  Edit per-slot mode assignments from the Receiver view&apos;s Flight Mode task.
+                </p>
+                <button
+                  type="button"
+                  style={buttonStyle()}
+                  data-testid="modes-go-to-flight-mode-task"
+                  onClick={() => {
+                    setActiveViewId('receiver')
+                    setReceiverTaskOverride('flight-modes')
+                  }}
+                >
+                  Open Receiver → Flight Mode
+                </button>
+              </div>
+            </div>
           </Panel>
         </div>
         ) : null}
