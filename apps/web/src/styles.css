@@ -517,6 +517,14 @@ textarea:focus {
   background-image: url('/betaflight-header/cf_icon_rx_white.svg');
 }
 
+.header-sensor-status__icon--rng {
+  background-image: url('/betaflight-header/sensor_sonar_off.png');
+}
+
+.header-sensor-status__item.is-active .header-sensor-status__icon--rng {
+  background-image: url('/betaflight-header/sensor_sonar_on.png');
+}
+
 .header-sync-panel {
   min-width: 164px;
   display: grid;

@@ -9032,6 +9032,9 @@ export function App() {
     snapshot.connection.kind === 'connected' &&
     (snapshot.liveVerification.globalPosition.altitudeM !== undefined ||
       snapshot.liveVerification.globalPosition.relativeAltitudeM !== undefined)
+  const headerRangefinderActive =
+    snapshot.connection.kind === 'connected' &&
+    (snapshot.parameters.find((parameter) => parameter.id === 'RNGFND1_TYPE' || parameter.id === 'RNGFND_TYPE')?.value ?? 0) !== 0
   const headerWarningActive =
     !snapshot.preArmStatus.healthy || snapshot.statusTexts.some((entry) => entry.severity === 'warning' || entry.severity === 'error')
   const headerBatteryLabel = snapshot.liveVerification.batteryTelemetry.verified
@@ -9092,6 +9095,14 @@ export function App() {
       title: snapshot.liveVerification.rcInput.verified
         ? `${snapshot.liveVerification.rcInput.channelCount} RC channels are live.`
         : 'RC waiting.'
+    },
+    {
+      id: 'rng',
+      label: 'Rng',
+      stateClass: headerRangefinderActive ? 'is-active' : '',
+      title: headerRangefinderActive
+        ? 'Rangefinder is configured (RNGFND1_TYPE non-zero).'
+        : 'No rangefinder configured.'
     }
   ] as const
 
