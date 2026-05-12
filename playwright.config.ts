@@ -8,10 +8,25 @@ function detectBrowserExecutable(): string | undefined {
     return explicitPath
   }
 
-  const knownPaths = [
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    '/Applications/Chromium.app/Contents/MacOS/Chromium'
-  ]
+  const knownPaths: string[] =
+    process.platform === 'darwin'
+      ? [
+          '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+          '/Applications/Chromium.app/Contents/MacOS/Chromium'
+        ]
+      : process.platform === 'linux'
+        ? [
+            '/usr/bin/google-chrome',
+            '/usr/bin/google-chrome-stable',
+            '/usr/bin/chromium',
+            '/usr/bin/chromium-browser'
+          ]
+        : process.platform === 'win32'
+          ? [
+              'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+              'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe'
+            ]
+          : []
 
   return knownPaths.find((candidate) => existsSync(candidate))
 }
