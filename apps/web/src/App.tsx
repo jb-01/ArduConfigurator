@@ -128,6 +128,8 @@ import { RcChannelBars } from './rc-channel-bars'
 import { MotorTestSliders } from './motor-test-sliders'
 import { RateCurveGraph } from './rate-curve-graph'
 import { DisconnectedLanding } from './disconnected-landing'
+import { ModesView } from './views/Modes'
+import { FailsafeView, type FailsafeViewRow } from './views/Failsafe'
 import {
   loadStoredProvisioningProfiles,
   persistProvisioningProfiles,
@@ -2751,6 +2753,85 @@ function createIdleMavftpBrowserState(path = '@SYS'): MavftpBrowserState {
     path,
     entries: []
   }
+}
+
+type FltModeParamId = 'FLTMODE1' | 'FLTMODE2' | 'FLTMODE3' | 'FLTMODE4' | 'FLTMODE5' | 'FLTMODE6'
+
+const MODES_SLOT_DEFINITIONS: ReadonlyArray<{
+  position: number
+  paramId: FltModeParamId
+  pwmLabel: string
+}> = [
+  { position: 1, paramId: 'FLTMODE1', pwmLabel: '0 – 1230 us' },
+  { position: 2, paramId: 'FLTMODE2', pwmLabel: '1231 – 1360 us' },
+  { position: 3, paramId: 'FLTMODE3', pwmLabel: '1361 – 1490 us' },
+  { position: 4, paramId: 'FLTMODE4', pwmLabel: '1491 – 1620 us' },
+  { position: 5, paramId: 'FLTMODE5', pwmLabel: '1621 – 1749 us' },
+  { position: 6, paramId: 'FLTMODE6', pwmLabel: '1750+ us' }
+]
+
+function buildFailsafeRows(input: {
+  snapshot: ConfiguratorSnapshot
+  throttleFailsafe: number | undefined
+  throttleFailsafeValue: number | undefined
+  batteryFailsafe: number | undefined
+  batteryCriticalFailsafe: number | undefined
+  batteryLowVoltage: number | undefined
+  batteryCriticalVoltage: number | undefined
+}): readonly FailsafeViewRow[] {
+  const rcTimeout = readParameterValue(input.snapshot, 'RC_FS_TIMEOUT')
+  const fsOptions = readRoundedParameter(input.snapshot, 'FS_OPTIONS')
+
+  return [
+    {
+      source: 'RC failsafe',
+      paramId: 'FS_THR_ENABLE',
+      formatted: formatArducopterThrottleFailsafe(input.throttleFailsafe),
+      isSynced: input.throttleFailsafe !== undefined
+    },
+    {
+      source: 'RC failsafe',
+      paramId: 'FS_THR_VALUE',
+      formatted: input.throttleFailsafeValue !== undefined ? `${Math.round(input.throttleFailsafeValue)} us` : 'Not synced',
+      isSynced: input.throttleFailsafeValue !== undefined
+    },
+    {
+      source: 'RC failsafe',
+      paramId: 'RC_FS_TIMEOUT',
+      formatted: rcTimeout !== undefined ? `${rcTimeout.toFixed(1)} s` : 'Not synced',
+      isSynced: rcTimeout !== undefined
+    },
+    {
+      source: 'Battery failsafe',
+      paramId: 'BATT_LOW_VOLT',
+      formatted: input.batteryLowVoltage !== undefined ? `${input.batteryLowVoltage.toFixed(2)} V` : 'Not synced',
+      isSynced: input.batteryLowVoltage !== undefined
+    },
+    {
+      source: 'Battery failsafe',
+      paramId: 'BATT_FS_LOW_ACT',
+      formatted: formatArducopterBatteryFailsafeAction(input.batteryFailsafe),
+      isSynced: input.batteryFailsafe !== undefined
+    },
+    {
+      source: 'Battery failsafe',
+      paramId: 'BATT_CRT_VOLT',
+      formatted: input.batteryCriticalVoltage !== undefined ? `${input.batteryCriticalVoltage.toFixed(2)} V` : 'Not synced',
+      isSynced: input.batteryCriticalVoltage !== undefined
+    },
+    {
+      source: 'Battery failsafe',
+      paramId: 'BATT_FS_CRT_ACT',
+      formatted: formatArducopterBatteryFailsafeAction(input.batteryCriticalFailsafe),
+      isSynced: input.batteryCriticalFailsafe !== undefined
+    },
+    {
+      source: 'Advanced',
+      paramId: 'FS_OPTIONS',
+      formatted: fsOptions !== undefined ? `Bitmask 0x${fsOptions.toString(16).toUpperCase()}` : 'Not synced',
+      isSynced: fsOptions !== undefined
+    }
+  ]
 }
 
 export function App() {
@@ -12460,90 +12541,26 @@ export function App() {
         ) : null}
 
         {activeViewId === 'modes' ? (
-        <div id="setup-panel-modes">
-          <Panel
-            title="Modes"
-            subtitle="Flight-mode assignments for the configured switch channel and a live indicator on the active slot."
-          >
-            <div className="modes-stack">
-              <div className="modes-status">
-                <article className="modes-status__card">
-                  <span>Mode channel</span>
-                  <strong>{configuredModeChannel !== undefined ? `CH${configuredModeChannel}` : 'Not configured'}</strong>
-                  <small>FLTMODE_CH selects which RC channel switches the flight mode.</small>
-                </article>
-                <article className="modes-status__card">
-                  <span>Current slot</span>
-                  <strong>{modeSwitchEstimate.estimatedSlot !== undefined ? `Slot ${modeSwitchEstimate.estimatedSlot}` : 'Waiting'}</strong>
-                  <small>{modeSwitchEstimate.pwm !== undefined ? `${modeSwitchEstimate.pwm} us live` : 'No live RC input.'}</small>
-                </article>
-                <article className="modes-status__card">
-                  <span>Active mode</span>
-                  <strong>{snapshot.vehicle?.flightMode ?? 'Unknown'}</strong>
-                  <small>Mode reported by the vehicle heartbeat.</small>
-                </article>
-              </div>
-
-              <div className="modes-table" role="table" aria-label="Flight mode slots" data-testid="modes-slot-table">
-                <div className="modes-table__row modes-table__row--head" role="row">
-                  <span role="columnheader">Slot</span>
-                  <span role="columnheader">PWM range</span>
-                  <span role="columnheader">Assigned mode</span>
-                  <span role="columnheader">State</span>
-                </div>
-                {[
-                  { position: 1 as const, paramId: 'FLTMODE1' as const, pwmLabel: '0 – 1230 us' },
-                  { position: 2 as const, paramId: 'FLTMODE2' as const, pwmLabel: '1231 – 1360 us' },
-                  { position: 3 as const, paramId: 'FLTMODE3' as const, pwmLabel: '1361 – 1490 us' },
-                  { position: 4 as const, paramId: 'FLTMODE4' as const, pwmLabel: '1491 – 1620 us' },
-                  { position: 5 as const, paramId: 'FLTMODE5' as const, pwmLabel: '1621 – 1749 us' },
-                  { position: 6 as const, paramId: 'FLTMODE6' as const, pwmLabel: '1750+ us' }
-                ].map((slot) => {
-                  const paramValue = readRoundedParameter(snapshot, slot.paramId)
-                  const isActive = modeSwitchEstimate.estimatedSlot === slot.position
-                  return (
-                    <div
-                      key={slot.position}
-                      className={`modes-table__row${isActive ? ' is-active' : ''}`}
-                      role="row"
-                      data-testid={`modes-slot-${slot.position}`}
-                    >
-                      <span role="cell"><strong>{slot.position}</strong></span>
-                      <span role="cell">{slot.pwmLabel}</span>
-                      <span role="cell">{formatModeAssignment(paramValue)}</span>
-                      <span role="cell">
-                        {isActive ? (
-                          <StatusBadge tone="success">live</StatusBadge>
-                        ) : paramValue === undefined ? (
-                          <StatusBadge tone="warning">not synced</StatusBadge>
-                        ) : (
-                          <StatusBadge tone="neutral">—</StatusBadge>
-                        )}
-                      </span>
-                    </div>
-                  )
-                })}
-              </div>
-
-              <div className="modes-help">
-                <p>
-                  Edit per-slot mode assignments from the Receiver view&apos;s Flight Mode task.
-                </p>
-                <button
-                  type="button"
-                  style={buttonStyle()}
-                  data-testid="modes-go-to-flight-mode-task"
-                  onClick={() => {
-                    setActiveViewId('receiver')
-                    setReceiverTaskOverride('flight-modes')
-                  }}
-                >
-                  Open Receiver → Flight Mode
-                </button>
-              </div>
-            </div>
-          </Panel>
-        </div>
+        <ModesView
+          modeChannelLabel={configuredModeChannel !== undefined ? `CH${configuredModeChannel}` : 'Not configured'}
+          currentSlotLabel={modeSwitchEstimate.estimatedSlot !== undefined ? `Slot ${modeSwitchEstimate.estimatedSlot}` : 'Waiting'}
+          currentSlotSubtext={modeSwitchEstimate.pwm !== undefined ? `${modeSwitchEstimate.pwm} us live` : 'No live RC input.'}
+          activeModeLabel={snapshot.vehicle?.flightMode ?? 'Unknown'}
+          slots={MODES_SLOT_DEFINITIONS.map((slot) => {
+            const paramValue = readRoundedParameter(snapshot, slot.paramId)
+            return {
+              position: slot.position,
+              pwmLabel: slot.pwmLabel,
+              modeLabel: formatModeAssignment(paramValue),
+              paramSynced: paramValue !== undefined,
+              isActive: modeSwitchEstimate.estimatedSlot === slot.position
+            }
+          })}
+          onOpenFlightModeTask={() => {
+            setActiveViewId('receiver')
+            setReceiverTaskOverride('flight-modes')
+          }}
+        />
         ) : null}
 
         {activeViewId === 'power' ? (
@@ -12980,144 +12997,36 @@ export function App() {
 
       {activeViewId === 'failsafe' ? (
       <section className="grid one-up">
-        <div id="setup-panel-failsafe">
-          <Panel
-            title="Failsafe"
-            subtitle="Read-only overview of RC, battery, and advanced failsafe parameters. Edit values from the Power view."
-          >
-            <div className="modes-stack">
-              <div className="modes-status">
-                <article className="modes-status__card">
-                  <span>RC failsafe</span>
-                  <strong>{formatArducopterThrottleFailsafe(throttleFailsafe)}</strong>
-                  <small>
-                    {throttleFailsafeValue !== undefined
-                      ? `Triggers below ${Math.round(throttleFailsafeValue)} us throttle PWM.`
-                      : 'No FS_THR_VALUE threshold configured.'}
-                  </small>
-                </article>
-                <article className="modes-status__card">
-                  <span>Battery low</span>
-                  <strong>{formatArducopterBatteryFailsafeAction(batteryFailsafe)}</strong>
-                  <small>
-                    {batteryLowVoltage !== undefined
-                      ? `Threshold ${batteryLowVoltage.toFixed(1)} V (BATT_LOW_VOLT).`
-                      : 'No BATT_LOW_VOLT threshold configured.'}
-                  </small>
-                </article>
-                <article className="modes-status__card">
-                  <span>Battery critical</span>
-                  <strong>{formatArducopterBatteryFailsafeAction(batteryCriticalFailsafe)}</strong>
-                  <small>
-                    {batteryCriticalVoltage !== undefined
-                      ? `Threshold ${batteryCriticalVoltage.toFixed(1)} V (BATT_CRT_VOLT).`
-                      : 'No BATT_CRT_VOLT threshold configured.'}
-                  </small>
-                </article>
-              </div>
-
-              <div className="modes-table" role="table" aria-label="Failsafe parameters" data-testid="failsafe-summary-table">
-                <div className="modes-table__row modes-table__row--head" role="row">
-                  <span role="columnheader">Source</span>
-                  <span role="columnheader">Parameter</span>
-                  <span role="columnheader">Value</span>
-                  <span role="columnheader">State</span>
-                </div>
-                {[
-                  {
-                    source: 'RC failsafe',
-                    paramId: 'FS_THR_ENABLE',
-                    rawValue: throttleFailsafe,
-                    formatted: formatArducopterThrottleFailsafe(throttleFailsafe),
-                    isActive: false
-                  },
-                  {
-                    source: 'RC failsafe',
-                    paramId: 'FS_THR_VALUE',
-                    rawValue: throttleFailsafeValue,
-                    formatted: throttleFailsafeValue !== undefined ? `${Math.round(throttleFailsafeValue)} us` : 'Not synced',
-                    isActive: false
-                  },
-                  {
-                    source: 'RC failsafe',
-                    paramId: 'RC_FS_TIMEOUT',
-                    rawValue: readParameterValue(snapshot, 'RC_FS_TIMEOUT'),
-                    formatted: (() => {
-                      const v = readParameterValue(snapshot, 'RC_FS_TIMEOUT')
-                      return v !== undefined ? `${v.toFixed(1)} s` : 'Not synced'
-                    })(),
-                    isActive: false
-                  },
-                  {
-                    source: 'Battery failsafe',
-                    paramId: 'BATT_LOW_VOLT',
-                    rawValue: batteryLowVoltage,
-                    formatted: batteryLowVoltage !== undefined ? `${batteryLowVoltage.toFixed(2)} V` : 'Not synced',
-                    isActive: false
-                  },
-                  {
-                    source: 'Battery failsafe',
-                    paramId: 'BATT_FS_LOW_ACT',
-                    rawValue: batteryFailsafe,
-                    formatted: formatArducopterBatteryFailsafeAction(batteryFailsafe),
-                    isActive: false
-                  },
-                  {
-                    source: 'Battery failsafe',
-                    paramId: 'BATT_CRT_VOLT',
-                    rawValue: batteryCriticalVoltage,
-                    formatted: batteryCriticalVoltage !== undefined ? `${batteryCriticalVoltage.toFixed(2)} V` : 'Not synced',
-                    isActive: false
-                  },
-                  {
-                    source: 'Battery failsafe',
-                    paramId: 'BATT_FS_CRT_ACT',
-                    rawValue: batteryCriticalFailsafe,
-                    formatted: formatArducopterBatteryFailsafeAction(batteryCriticalFailsafe),
-                    isActive: false
-                  },
-                  {
-                    source: 'Advanced',
-                    paramId: 'FS_OPTIONS',
-                    rawValue: readRoundedParameter(snapshot, 'FS_OPTIONS'),
-                    formatted: (() => {
-                      const v = readRoundedParameter(snapshot, 'FS_OPTIONS')
-                      return v !== undefined ? `Bitmask 0x${v.toString(16).toUpperCase()}` : 'Not synced'
-                    })(),
-                    isActive: false
-                  }
-                ].map((row) => (
-                  <div key={row.paramId} className="modes-table__row" role="row" data-testid={`failsafe-row-${row.paramId}`}>
-                    <span role="cell">{row.source}</span>
-                    <span role="cell"><strong>{row.paramId}</strong></span>
-                    <span role="cell">{row.formatted}</span>
-                    <span role="cell">
-                      {row.rawValue === undefined ? (
-                        <StatusBadge tone="warning">not synced</StatusBadge>
-                      ) : (
-                        <StatusBadge tone="neutral">synced</StatusBadge>
-                      )}
-                    </span>
-                  </div>
-                ))}
-              </div>
-
-              <div className="modes-help">
-                <p>
-                  Edit failsafe thresholds and actions from the Power view&apos;s failsafe section. GCS- and EKF-failsafe parameters are not yet wired into the metadata catalog.
-                </p>
-                <button
-                  type="button"
-                  style={buttonStyle()}
-                  data-testid="failsafe-go-to-power"
-                  onClick={() => setActiveViewId('power')}
-                >
-                  Open Power
-                </button>
-              </div>
-            </div>
-          </Panel>
-        </div>
+        <FailsafeView
+          rcFailsafeLabel={formatArducopterThrottleFailsafe(throttleFailsafe)}
+          rcFailsafeThresholdText={
+            throttleFailsafeValue !== undefined
+              ? `Triggers below ${Math.round(throttleFailsafeValue)} us throttle PWM.`
+              : 'No FS_THR_VALUE threshold configured.'
+          }
+          batteryLowLabel={formatArducopterBatteryFailsafeAction(batteryFailsafe)}
+          batteryLowThresholdText={
+            batteryLowVoltage !== undefined
+              ? `Threshold ${batteryLowVoltage.toFixed(1)} V (BATT_LOW_VOLT).`
+              : 'No BATT_LOW_VOLT threshold configured.'
+          }
+          batteryCriticalLabel={formatArducopterBatteryFailsafeAction(batteryCriticalFailsafe)}
+          batteryCriticalThresholdText={
+            batteryCriticalVoltage !== undefined
+              ? `Threshold ${batteryCriticalVoltage.toFixed(1)} V (BATT_CRT_VOLT).`
+              : 'No BATT_CRT_VOLT threshold configured.'
+          }
+          rows={buildFailsafeRows({
+            snapshot,
+            throttleFailsafe,
+            throttleFailsafeValue,
+            batteryFailsafe,
+            batteryCriticalFailsafe,
+            batteryLowVoltage,
+            batteryCriticalVoltage
+          })}
+          onOpenPower={() => setActiveViewId('power')}
+        />
       </section>
       ) : null}
 
