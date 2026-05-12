@@ -687,6 +687,8 @@ function viewMonogram(viewId: AppViewId): string {
       return 'OUT'
     case 'power':
       return 'PWR'
+    case 'failsafe':
+      return 'FS'
     case 'snapshots':
       return 'SNP'
     case 'tuning':
@@ -718,6 +720,8 @@ function missionTitleForView(viewId: AppViewId): string {
       return 'Outputs'
     case 'power':
       return 'Power'
+    case 'failsafe':
+      return 'Failsafe'
     case 'snapshots':
       return 'Snapshots'
     case 'tuning':
@@ -12971,6 +12975,149 @@ export function App() {
           </Panel>
         </div>
         ) : null}
+      </section>
+      ) : null}
+
+      {activeViewId === 'failsafe' ? (
+      <section className="grid one-up">
+        <div id="setup-panel-failsafe">
+          <Panel
+            title="Failsafe"
+            subtitle="Read-only overview of RC, battery, and advanced failsafe parameters. Edit values from the Power view."
+          >
+            <div className="modes-stack">
+              <div className="modes-status">
+                <article className="modes-status__card">
+                  <span>RC failsafe</span>
+                  <strong>{formatArducopterThrottleFailsafe(throttleFailsafe)}</strong>
+                  <small>
+                    {throttleFailsafeValue !== undefined
+                      ? `Triggers below ${Math.round(throttleFailsafeValue)} us throttle PWM.`
+                      : 'No FS_THR_VALUE threshold configured.'}
+                  </small>
+                </article>
+                <article className="modes-status__card">
+                  <span>Battery low</span>
+                  <strong>{formatArducopterBatteryFailsafeAction(batteryFailsafe)}</strong>
+                  <small>
+                    {batteryLowVoltage !== undefined
+                      ? `Threshold ${batteryLowVoltage.toFixed(1)} V (BATT_LOW_VOLT).`
+                      : 'No BATT_LOW_VOLT threshold configured.'}
+                  </small>
+                </article>
+                <article className="modes-status__card">
+                  <span>Battery critical</span>
+                  <strong>{formatArducopterBatteryFailsafeAction(batteryCriticalFailsafe)}</strong>
+                  <small>
+                    {batteryCriticalVoltage !== undefined
+                      ? `Threshold ${batteryCriticalVoltage.toFixed(1)} V (BATT_CRT_VOLT).`
+                      : 'No BATT_CRT_VOLT threshold configured.'}
+                  </small>
+                </article>
+              </div>
+
+              <div className="modes-table" role="table" aria-label="Failsafe parameters" data-testid="failsafe-summary-table">
+                <div className="modes-table__row modes-table__row--head" role="row">
+                  <span role="columnheader">Source</span>
+                  <span role="columnheader">Parameter</span>
+                  <span role="columnheader">Value</span>
+                  <span role="columnheader">State</span>
+                </div>
+                {[
+                  {
+                    source: 'RC failsafe',
+                    paramId: 'FS_THR_ENABLE',
+                    rawValue: throttleFailsafe,
+                    formatted: formatArducopterThrottleFailsafe(throttleFailsafe),
+                    isActive: false
+                  },
+                  {
+                    source: 'RC failsafe',
+                    paramId: 'FS_THR_VALUE',
+                    rawValue: throttleFailsafeValue,
+                    formatted: throttleFailsafeValue !== undefined ? `${Math.round(throttleFailsafeValue)} us` : 'Not synced',
+                    isActive: false
+                  },
+                  {
+                    source: 'RC failsafe',
+                    paramId: 'RC_FS_TIMEOUT',
+                    rawValue: readParameterValue(snapshot, 'RC_FS_TIMEOUT'),
+                    formatted: (() => {
+                      const v = readParameterValue(snapshot, 'RC_FS_TIMEOUT')
+                      return v !== undefined ? `${v.toFixed(1)} s` : 'Not synced'
+                    })(),
+                    isActive: false
+                  },
+                  {
+                    source: 'Battery failsafe',
+                    paramId: 'BATT_LOW_VOLT',
+                    rawValue: batteryLowVoltage,
+                    formatted: batteryLowVoltage !== undefined ? `${batteryLowVoltage.toFixed(2)} V` : 'Not synced',
+                    isActive: false
+                  },
+                  {
+                    source: 'Battery failsafe',
+                    paramId: 'BATT_FS_LOW_ACT',
+                    rawValue: batteryFailsafe,
+                    formatted: formatArducopterBatteryFailsafeAction(batteryFailsafe),
+                    isActive: false
+                  },
+                  {
+                    source: 'Battery failsafe',
+                    paramId: 'BATT_CRT_VOLT',
+                    rawValue: batteryCriticalVoltage,
+                    formatted: batteryCriticalVoltage !== undefined ? `${batteryCriticalVoltage.toFixed(2)} V` : 'Not synced',
+                    isActive: false
+                  },
+                  {
+                    source: 'Battery failsafe',
+                    paramId: 'BATT_FS_CRT_ACT',
+                    rawValue: batteryCriticalFailsafe,
+                    formatted: formatArducopterBatteryFailsafeAction(batteryCriticalFailsafe),
+                    isActive: false
+                  },
+                  {
+                    source: 'Advanced',
+                    paramId: 'FS_OPTIONS',
+                    rawValue: readRoundedParameter(snapshot, 'FS_OPTIONS'),
+                    formatted: (() => {
+                      const v = readRoundedParameter(snapshot, 'FS_OPTIONS')
+                      return v !== undefined ? `Bitmask 0x${v.toString(16).toUpperCase()}` : 'Not synced'
+                    })(),
+                    isActive: false
+                  }
+                ].map((row) => (
+                  <div key={row.paramId} className="modes-table__row" role="row" data-testid={`failsafe-row-${row.paramId}`}>
+                    <span role="cell">{row.source}</span>
+                    <span role="cell"><strong>{row.paramId}</strong></span>
+                    <span role="cell">{row.formatted}</span>
+                    <span role="cell">
+                      {row.rawValue === undefined ? (
+                        <StatusBadge tone="warning">not synced</StatusBadge>
+                      ) : (
+                        <StatusBadge tone="neutral">synced</StatusBadge>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="modes-help">
+                <p>
+                  Edit failsafe thresholds and actions from the Power view&apos;s failsafe section. GCS- and EKF-failsafe parameters are not yet wired into the metadata catalog.
+                </p>
+                <button
+                  type="button"
+                  style={buttonStyle()}
+                  data-testid="failsafe-go-to-power"
+                  onClick={() => setActiveViewId('power')}
+                >
+                  Open Power
+                </button>
+              </div>
+            </div>
+          </Panel>
+        </div>
       </section>
       ) : null}
 

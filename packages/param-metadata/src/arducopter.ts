@@ -357,28 +357,34 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       order: 8
     },
     {
+      id: 'failsafe',
+      label: 'Failsafe',
+      description: 'RC, battery, and advanced failsafe overview.',
+      order: 9
+    },
+    {
       id: 'snapshots',
       label: 'Snapshots',
       description: 'Capture, compare, and restore known-good parameter sets.',
-      order: 9
+      order: 10
     },
     {
       id: 'tuning',
       label: 'Tuning',
       description: 'Beginner-safe flight-feel and acro-rate tuning.',
-      order: 10
+      order: 11
     },
     {
       id: 'presets',
       label: 'Presets',
       description: 'Curated, explainable tuning bundles with automatic backup.',
-      order: 11
+      order: 12
     },
     {
       id: 'parameters',
       label: 'Parameters',
       description: 'Low-level parameter editing and backup work.',
-      order: 12
+      order: 13
     }
   ],
   categories: {

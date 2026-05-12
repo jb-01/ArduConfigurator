@@ -15,6 +15,7 @@ export type AppViewId =
   | 'modes'
   | 'outputs'
   | 'power'
+  | 'failsafe'
   | 'snapshots'
   | 'tuning'
   | 'presets'
