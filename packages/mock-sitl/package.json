@@ -1,6 +1,6 @@
 {
   "name": "@arduconfig/mock-sitl",
-  "version": "0.1.0",
+  "version": "0.1.0-alpha",
   "private": true,
   "license": "GPL-3.0-only",
   "type": "module",
@@ -11,9 +11,9 @@
     "typecheck": "tsc -b tsconfig.json --pretty false"
   },
   "dependencies": {
-    "@arduconfig/ardupilot-core": "0.1.0",
-    "@arduconfig/param-metadata": "0.1.0",
-    "@arduconfig/protocol-mavlink": "0.1.0",
-    "@arduconfig/transport": "0.1.0"
+    "@arduconfig/ardupilot-core": "0.1.0-alpha",
+    "@arduconfig/param-metadata": "0.1.0-alpha",
+    "@arduconfig/protocol-mavlink": "0.1.0-alpha",
+    "@arduconfig/transport": "0.1.0-alpha"
   }
 }
