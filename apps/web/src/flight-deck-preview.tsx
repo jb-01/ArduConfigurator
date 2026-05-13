@@ -1,6 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
-import * as THREE from 'three'
+import {
+  AmbientLight,
+  Box3,
+  BoxGeometry,
+  ConeGeometry,
+  CylinderGeometry,
+  DirectionalLight,
+  Euler,
+  FrontSide,
+  Group,
+  Mesh,
+  MeshStandardMaterial,
+  type Object3D,
+  PerspectiveCamera,
+  Quaternion,
+  Scene,
+  SRGBColorSpace,
+  TorusGeometry,
+  Vector3,
+  WebGLRenderer
+} from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 
 interface FlightDeckPreviewProps {
@@ -17,16 +37,16 @@ interface FlightDeckPreviewProps {
 }
 
 interface ModelSceneState {
-  renderer: THREE.WebGLRenderer
-  scene: THREE.Scene
-  camera: THREE.PerspectiveCamera
-  modelWrapper: THREE.Group
-  attitudeGroup: THREE.Group
-  model?: THREE.Object3D
+  renderer: WebGLRenderer
+  scene: Scene
+  camera: PerspectiveCamera
+  modelWrapper: Group
+  attitudeGroup: Group
+  model?: Object3D
 }
 
 interface TelemetryState {
-  attitudeQuaternion: THREE.Quaternion
+  attitudeQuaternion: Quaternion
   pitchVisual: number
   rollVisual: number
   headingDeg: number
@@ -44,16 +64,16 @@ interface DisplayTelemetryState {
 
 const HEADING_TAPE_WINDOW_DEGREES = 120
 const HEADING_TAPE_STEP_DEGREES = 5
-const PITCH_AXIS = new THREE.Vector3(1, 0, 0)
-const ROLL_AXIS = new THREE.Vector3(0, 0, 1)
-const YAW_AXIS = new THREE.Vector3(0, 1, 0)
+const PITCH_AXIS = new Vector3(1, 0, 0)
+const ROLL_AXIS = new Vector3(0, 0, 1)
+const YAW_AXIS = new Vector3(0, 1, 0)
 // Flight assets are authored Y-up with the nose on -Z. Rotate once so zero-attitude
 // renders nose-up on screen, then keep live roll/pitch/yaw purely on the attitude group.
-const MODEL_MOUNT_QUATERNION = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0))
+const MODEL_MOUNT_QUATERNION = new Quaternion().setFromEuler(new Euler(Math.PI / 2, 0, 0))
 
 function createTelemetryState(): TelemetryState {
   return {
-    attitudeQuaternion: new THREE.Quaternion(),
+    attitudeQuaternion: new Quaternion(),
     pitchVisual: 0,
     rollVisual: 0,
     headingDeg: 0
@@ -84,7 +104,7 @@ function approachWrappedDegrees(current: number, target: number, factor: number)
 
 function mountModel(
   state: ModelSceneState,
-  model: THREE.Object3D,
+  model: Object3D,
   compact: boolean,
   scaleMode: 'betaflight' | 'fit' = 'fit'
 ): void {
@@ -96,9 +116,9 @@ function mountModel(
     model.scale.setScalar(compact ? 15 : 16.5)
     model.position.set(0, 0, 0)
   } else {
-    const box = new THREE.Box3().setFromObject(model)
-    const center = new THREE.Vector3()
-    const size = new THREE.Vector3()
+    const box = new Box3().setFromObject(model)
+    const center = new Vector3()
+    const size = new Vector3()
     box.getCenter(center)
     box.getSize(size)
 
@@ -111,7 +131,7 @@ function mountModel(
   }
 
   model.traverse((object) => {
-    if (!(object instanceof THREE.Mesh)) {
+    if (!(object instanceof Mesh)) {
       return
     }
 
@@ -120,12 +140,12 @@ function mountModel(
 
     if (Array.isArray(object.material)) {
       object.material.forEach((material) => {
-        material.side = THREE.FrontSide
+        material.side = FrontSide
       })
       return
     }
 
-    object.material.side = THREE.FrontSide
+    object.material.side = FrontSide
   })
 
   state.model = model
@@ -133,10 +153,10 @@ function mountModel(
   renderScene(state)
 }
 
-function createArm(length: number, headingRad: number): THREE.Mesh {
-  const arm = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.12, 0.16, length, 18),
-    new THREE.MeshStandardMaterial({ color: 0x182435, metalness: 0.35, roughness: 0.55 })
+function createArm(length: number, headingRad: number): Mesh {
+  const arm = new Mesh(
+    new CylinderGeometry(0.12, 0.16, length, 18),
+    new MeshStandardMaterial({ color: 0x182435, metalness: 0.35, roughness: 0.55 })
   )
   arm.rotation.z = Math.PI / 2
   arm.rotation.y = headingRad
@@ -144,20 +164,20 @@ function createArm(length: number, headingRad: number): THREE.Mesh {
   return arm
 }
 
-function createMotor(x: number, z: number, accentColor: number): THREE.Group {
-  const motor = new THREE.Group()
+function createMotor(x: number, z: number, accentColor: number): Group {
+  const motor = new Group()
   motor.position.set(x, 0, z)
 
-  const can = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.34, 0.34, 0.24, 24),
-    new THREE.MeshStandardMaterial({ color: 0x111821, metalness: 0.5, roughness: 0.36 })
+  const can = new Mesh(
+    new CylinderGeometry(0.34, 0.34, 0.24, 24),
+    new MeshStandardMaterial({ color: 0x111821, metalness: 0.5, roughness: 0.36 })
   )
   can.position.y = 0.16
   motor.add(can)
 
-  const propRing = new THREE.Mesh(
-    new THREE.TorusGeometry(0.64, 0.04, 10, 36),
-    new THREE.MeshStandardMaterial({ color: accentColor, metalness: 0.1, roughness: 0.45 })
+  const propRing = new Mesh(
+    new TorusGeometry(0.64, 0.04, 10, 36),
+    new MeshStandardMaterial({ color: accentColor, metalness: 0.1, roughness: 0.45 })
   )
   propRing.rotation.x = Math.PI / 2
   propRing.position.y = 0.24
@@ -204,26 +224,26 @@ function motorLayoutForModel(modelFile: string): Array<{ x: number; z: number }>
   }
 }
 
-function createProceduralModel(modelFile: string): THREE.Group {
-  const craft = new THREE.Group()
+function createProceduralModel(modelFile: string): Group {
+  const craft = new Group()
 
-  const body = new THREE.Mesh(
-    new THREE.BoxGeometry(1.95, 0.34, 1.45),
-    new THREE.MeshStandardMaterial({ color: 0xd8e3f3, metalness: 0.18, roughness: 0.56 })
+  const body = new Mesh(
+    new BoxGeometry(1.95, 0.34, 1.45),
+    new MeshStandardMaterial({ color: 0xd8e3f3, metalness: 0.18, roughness: 0.56 })
   )
   body.position.y = 0.08
   craft.add(body)
 
-  const topPlate = new THREE.Mesh(
-    new THREE.BoxGeometry(1.35, 0.12, 1.1),
-    new THREE.MeshStandardMaterial({ color: 0x0f1722, metalness: 0.3, roughness: 0.5 })
+  const topPlate = new Mesh(
+    new BoxGeometry(1.35, 0.12, 1.1),
+    new MeshStandardMaterial({ color: 0x0f1722, metalness: 0.3, roughness: 0.5 })
   )
   topPlate.position.y = 0.33
   craft.add(topPlate)
 
-  const stack = new THREE.Mesh(
-    new THREE.BoxGeometry(0.6, 0.16, 0.6),
-    new THREE.MeshStandardMaterial({ color: 0x61dafb, metalness: 0.12, roughness: 0.38 })
+  const stack = new Mesh(
+    new BoxGeometry(0.6, 0.16, 0.6),
+    new MeshStandardMaterial({ color: 0x61dafb, metalness: 0.12, roughness: 0.38 })
   )
   stack.position.y = 0.48
   craft.add(stack)
@@ -236,17 +256,17 @@ function createProceduralModel(modelFile: string): THREE.Group {
     craft.add(createMotor(x, z, index % 2 === 0 ? 0x61dafb : 0xff815f))
   })
 
-  const nose = new THREE.Mesh(
-    new THREE.ConeGeometry(0.24, 0.56, 3),
-    new THREE.MeshStandardMaterial({ color: 0xff815f, metalness: 0.08, roughness: 0.32 })
+  const nose = new Mesh(
+    new ConeGeometry(0.24, 0.56, 3),
+    new MeshStandardMaterial({ color: 0xff815f, metalness: 0.08, roughness: 0.32 })
   )
   nose.rotation.z = Math.PI / 2
   nose.position.set(0, 0.18, -1.08)
   craft.add(nose)
 
-  const cameraPod = new THREE.Mesh(
-    new THREE.BoxGeometry(0.42, 0.28, 0.32),
-    new THREE.MeshStandardMaterial({ color: 0x1a2330, metalness: 0.24, roughness: 0.42 })
+  const cameraPod = new Mesh(
+    new BoxGeometry(0.42, 0.28, 0.32),
+    new MeshStandardMaterial({ color: 0x1a2330, metalness: 0.24, roughness: 0.42 })
   )
   cameraPod.position.set(0, 0.18, -0.76)
   craft.add(cameraPod)
@@ -338,14 +358,14 @@ function headingTapeLabelTone(value: number): 'north' | 'cardinal' | 'numeric' {
   return 'numeric'
 }
 
-function buildAttitudeQuaternion(rollDeg: number | undefined, pitchDeg: number | undefined, yawDeg: number | undefined): THREE.Quaternion {
+function buildAttitudeQuaternion(rollDeg: number | undefined, pitchDeg: number | undefined, yawDeg: number | undefined): Quaternion {
   const pitchRad = clampDegrees(pitchDeg, 70) * (Math.PI / 180)
   const rollRad = clampDegrees(rollDeg, 70) * (Math.PI / 180)
   const yawRad = normalizeHeading(yawDeg) * (Math.PI / 180)
 
-  const yawQuaternion = new THREE.Quaternion().setFromAxisAngle(YAW_AXIS, -yawRad)
-  const pitchQuaternion = new THREE.Quaternion().setFromAxisAngle(PITCH_AXIS, pitchRad)
-  const rollQuaternion = new THREE.Quaternion().setFromAxisAngle(ROLL_AXIS, -rollRad)
+  const yawQuaternion = new Quaternion().setFromAxisAngle(YAW_AXIS, -yawRad)
+  const pitchQuaternion = new Quaternion().setFromAxisAngle(PITCH_AXIS, pitchRad)
+  const rollQuaternion = new Quaternion().setFromAxisAngle(ROLL_AXIS, -rollRad)
 
   return yawQuaternion.multiply(pitchQuaternion).multiply(rollQuaternion)
 }
@@ -417,32 +437,32 @@ export function FlightDeckPreview({
       return
     }
 
-    const renderer = new THREE.WebGLRenderer({
+    const renderer = new WebGLRenderer({
       canvas,
       alpha: true,
       antialias: true
     })
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
-    renderer.outputColorSpace = THREE.SRGBColorSpace
+    renderer.outputColorSpace = SRGBColorSpace
 
-    const scene = new THREE.Scene()
-    const camera = new THREE.PerspectiveCamera(60, 1, 1, 10000)
+    const scene = new Scene()
+    const camera = new PerspectiveCamera(60, 1, 1, 10000)
     camera.position.set(0, 0, 112)
     camera.lookAt(0, 0, 0)
 
-    const modelWrapper = new THREE.Group()
+    const modelWrapper = new Group()
     modelWrapper.quaternion.copy(MODEL_MOUNT_QUATERNION)
-    const attitudeGroup = new THREE.Group()
+    const attitudeGroup = new Group()
     modelWrapper.add(attitudeGroup)
     scene.add(camera)
     scene.add(modelWrapper)
 
-    const ambient = new THREE.AmbientLight(0x565656, 1.05)
-    const keyLight = new THREE.DirectionalLight(0xffffff, 1.65)
+    const ambient = new AmbientLight(0x565656, 1.05)
+    const keyLight = new DirectionalLight(0xffffff, 1.65)
     keyLight.position.set(0.12, 1, 0.28)
-    const fillLight = new THREE.DirectionalLight(0xa9bcc9, 0.78)
+    const fillLight = new DirectionalLight(0xa9bcc9, 0.78)
     fillLight.position.set(-0.55, 0.38, 1)
-    const rimLight = new THREE.DirectionalLight(0x5f7486, 0.42)
+    const rimLight = new DirectionalLight(0x5f7486, 0.42)
     rimLight.position.set(0, -0.3, -1)
 
     scene.add(ambient)
