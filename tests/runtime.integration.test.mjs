@@ -435,10 +435,21 @@ test('guided accelerometer flow completes through mock status text feedback', as
       parameterTimeoutMs: 5000
     })
 
+    // The mock now mirrors real ArduPilot: it stops after the first pose
+    // prompt and waits for the operator to confirm each of the six poses
+    // before sending the next prompt. Drive the calibration through to
+    // completion by issuing six advance commands.
     await sitl.runtime.runGuidedAction('calibrate-accelerometer')
+    for (let step = 0; step < 6; step += 1) {
+      await waitFor(
+        () => sitl.runtime.getSnapshot().guidedActions['calibrate-accelerometer'].ctaLabel !== undefined,
+        2000
+      )
+      await sitl.runtime.runGuidedAction('calibrate-accelerometer')
+    }
     await waitFor(
       () => sitl.runtime.getSnapshot().guidedActions['calibrate-accelerometer'].status === 'succeeded',
-      1000
+      5000
     )
 
     const action = sitl.runtime.getSnapshot().guidedActions['calibrate-accelerometer']
