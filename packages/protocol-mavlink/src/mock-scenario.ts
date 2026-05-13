@@ -15,6 +15,7 @@ import {
 import { decodeSingleV2Envelope, MavlinkV2Codec } from './mavlink-v2-codec.js'
 import type {
   AutopilotVersionMessage,
+  CommandAckMessage,
   CommandLongMessage,
   FileTransferProtocolMessage,
   GlobalPositionIntMessage,
@@ -349,6 +350,13 @@ export function createArduCopterMockScenario(): MockScenario {
   const ftpFiles = createMockFtpFiles()
   const ftpSessions = new Map<number, { path: string; mode: 'read' | 'write' }>()
   let nextFtpSession = 1
+  // Tracks the pose the FC is currently asking the operator to confirm.
+  // 0 means the calibration is not running. 1..6 maps to the six
+  // ACCELCAL_VEHICLE_POS commandValues (level, left, right, nose-down,
+  // nose-up, back). When the configurator confirms the sixth pose, the
+  // mock emits the calibration-complete STATUSTEXT and resets the counter.
+  let nextAccelPoseCommandValue = 0
+  let accelSequence = 300
 
   return {
     initialFrames: [
@@ -496,6 +504,14 @@ export function createArduCopterMockScenario(): MockScenario {
               )
             )
           } else if (isAccelerometerCalibration(outbound.message)) {
+            // Real ArduPilot waits for the operator to confirm each pose
+            // before sending the next prompt. Earlier revisions of this mock
+            // emitted every STATUSTEXT in one batch, which let the UI race
+            // through all six steps before tests could observe the
+            // intermediate pose-guide. We now emit only the first two
+            // STATUSTEXTs plus an ACCELCAL_VEHICLE_POS prompt for the level
+            // step, then wait for the configurator's COMMAND_ACK confirms.
+            nextAccelPoseCommandValue = 1
             responses.push(
               codec.encode(
                 envelope(101, {
@@ -508,26 +524,25 @@ export function createArduCopterMockScenario(): MockScenario {
                   targetComponent: outbound.header.componentId
                 })
               ),
-              ...[
-                'Accelerometer calibration started.',
-                'Place vehicle level and keep it still.',
-                'Place vehicle on its LEFT side.',
-                'Place vehicle on its RIGHT side.',
-                'Place vehicle nose down.',
-                'Place vehicle nose up.',
-                'Place vehicle on its back.',
-                'Accelerometer calibration complete.'
-              ].map((text, index) =>
-                codec.encode(
-                  envelope(102 + index, {
-                    type: 'STATUSTEXT',
-                    severity: MAV_SEVERITY.INFO,
-                    text,
-                    statusId: 0,
-                    chunkSequence: 0
-                  })
-                )
-              )
+              codec.encode(
+                envelope(102, {
+                  type: 'STATUSTEXT',
+                  severity: MAV_SEVERITY.INFO,
+                  text: 'Accelerometer calibration started.',
+                  statusId: 0,
+                  chunkSequence: 0
+                })
+              ),
+              codec.encode(
+                envelope(103, {
+                  type: 'STATUSTEXT',
+                  severity: MAV_SEVERITY.INFO,
+                  text: 'Place vehicle level and keep it still.',
+                  statusId: 0,
+                  chunkSequence: 0
+                })
+              ),
+              codec.encode(envelope(104, buildAccelPosePromptMessage(1)))
             )
           } else if (isCompassCalibration(outbound.message)) {
             responses.push(
@@ -572,6 +587,51 @@ export function createArduCopterMockScenario(): MockScenario {
             )
           }
           break
+        case 'COMMAND_ACK': {
+          // The configurator confirms each accelerometer pose by sending a
+          // COMMAND_ACK with command=0 and result=TEMPORARILY_REJECTED (see
+          // runtime.advanceAccelerometerCalibration). Treat that as the
+          // signal to advance the mock to the next pose prompt.
+          const ack = outbound.message as CommandAckMessage
+          if (
+            ack.command === 0 &&
+            ack.result === MAV_RESULT.TEMPORARILY_REJECTED &&
+            nextAccelPoseCommandValue > 0
+          ) {
+            const nextCommandValue = nextAccelPoseCommandValue + 1
+            const promptText = accelPosePromptText(nextCommandValue)
+            if (promptText) {
+              nextAccelPoseCommandValue = nextCommandValue
+              responses.push(
+                codec.encode(
+                  envelope(accelSequence++, {
+                    type: 'STATUSTEXT',
+                    severity: MAV_SEVERITY.INFO,
+                    text: promptText,
+                    statusId: 0,
+                    chunkSequence: 0
+                  })
+                ),
+                codec.encode(envelope(accelSequence++, buildAccelPosePromptMessage(nextCommandValue)))
+              )
+            } else {
+              // Sixth pose confirmed — finish the calibration.
+              nextAccelPoseCommandValue = 0
+              responses.push(
+                codec.encode(
+                  envelope(accelSequence++, {
+                    type: 'STATUSTEXT',
+                    severity: MAV_SEVERITY.INFO,
+                    text: 'Accelerometer calibration complete.',
+                    statusId: 0,
+                    chunkSequence: 0
+                  })
+                )
+              )
+            }
+          }
+          break
+        }
         case 'FILE_TRANSFER_PROTOCOL': {
           const request = decodeFtpPayload((outbound.message as FileTransferProtocolMessage).payload)
           const response = handleMockFtpRequest(request, ftpSessions, () => nextFtpSession++, ftpFiles)
@@ -603,6 +663,32 @@ function isAccelerometerCalibration(message: CommandLongMessage): boolean {
 
 function isCompassCalibration(message: CommandLongMessage): boolean {
   return message.command === MAV_CMD.PREFLIGHT_CALIBRATION && message.params[1] === 1
+}
+
+// Pose prompts mirror the STATUSTEXT strings real ArduPilot emits between
+// ACCELCAL_VEHICLE_POS commands. The runtime keys its UI off these texts and
+// off the accompanying ACCELCAL_VEHICLE_POS COMMAND_LONG (commandValue 1..6).
+const ACCEL_POSE_PROMPT_TEXTS: Record<number, string> = {
+  2: 'Place vehicle on its LEFT side.',
+  3: 'Place vehicle on its RIGHT side.',
+  4: 'Place vehicle nose down.',
+  5: 'Place vehicle nose up.',
+  6: 'Place vehicle on its back.'
+}
+
+function accelPosePromptText(commandValue: number): string | undefined {
+  return ACCEL_POSE_PROMPT_TEXTS[commandValue]
+}
+
+function buildAccelPosePromptMessage(commandValue: number): CommandLongMessage {
+  return {
+    type: 'COMMAND_LONG',
+    command: MAV_CMD.ACCELCAL_VEHICLE_POS,
+    targetSystem: 0,
+    targetComponent: 0,
+    confirmation: 0,
+    params: [commandValue, 0, 0, 0, 0, 0, 0]
+  }
 }
 
 interface MockFtpPayload {

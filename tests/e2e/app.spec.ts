@@ -43,7 +43,20 @@ async function applySingleTuningChange(page: Page, value: string): Promise<void>
 }
 
 async function completeAccelerometerCalibrationFromSetup(page: Page): Promise<void> {
+  // The demo mock now mirrors real ArduPilot semantics: each pose prompt
+  // arrives only after the previous one has been confirmed. Walk the
+  // calibration through every posture so the run can reach "complete".
   await page.getByRole('button', { name: 'Calibrate Accelerometer' }).click()
+  for (const ctaLabel of [
+    'Confirm Level Position',
+    'Confirm Left Side Position',
+    'Confirm Right Side Position',
+    'Confirm Nose Down Position',
+    'Confirm Nose Up Position',
+    'Confirm Back Position'
+  ]) {
+    await page.getByRole('button', { name: ctaLabel }).click()
+  }
   await expect(page.getByText('Accelerometer calibration complete.').first()).toBeVisible()
 }
 
@@ -64,13 +77,16 @@ test.describe('browser configurator regression flows', () => {
     await page.getByRole('button', { name: 'Calibrate Accelerometer' }).click()
     await expect(page.getByTestId('setup-inline-accelerometer-guide')).toBeVisible()
     await expect(page.getByText('Current Posture')).toBeVisible()
-    // The pose-validation label is intentionally not asserted here. The demo mock fast-forwards
-    // through all eight calibration STATUSTEXTs in roughly 100-200 ms, which is fast enough on
-    // headless Chromium CI that the calibration reaches status='succeeded' (and showAccelerometer
-    // PoseGuide flips to false) before a follow-up assertion can poll the validation row. The
-    // two assertions above are sufficient to confirm the guide renders during the active phase;
-    // the next test in this file covers the completion edge by waiting for the calibration-
-    // complete STATUSTEXT.
+    // Now that the demo mock advances pose-by-pose only on confirms, the
+    // calibration parks on the level step until the operator clicks
+    // "Confirm Level Position". That gives the pose-guide enough time to
+    // render its validation row, which surfaces one of the four poses
+    // ("Waiting for attitude" while telemetry is still spinning up,
+    // "Pose aligned" / "Wrong pose" / "Adjust posture" once attitude data
+    // is live).
+    await expect(
+      page.getByText(/Waiting for attitude|Pose aligned|Wrong pose|Adjust posture/)
+    ).toBeVisible()
   })
 
   test('guided setup marks accelerometer complete after the in-app calibration succeeds', async ({ page }) => {
