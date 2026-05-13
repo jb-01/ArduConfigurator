@@ -118,6 +118,23 @@ export const ARDUCOPTER_THROTTLE_FAILSAFE_LABELS: Record<number, string> = {
   7: 'Brake or Land'
 }
 
+export const ARDUCOPTER_FS_GCS_LABELS: Record<number, string> = {
+  0: 'Disabled',
+  1: 'Always RTL',
+  2: 'Continue Mission in Auto (removed in 4.0+)',
+  3: 'SmartRTL or RTL',
+  4: 'SmartRTL or Land',
+  5: 'Always Land',
+  6: 'Auto DO_LAND_START or RTL',
+  7: 'Brake or Land'
+}
+
+export const ARDUCOPTER_FS_EKF_ACTION_LABELS: Record<number, string> = {
+  1: 'Land',
+  2: 'AltHold',
+  3: 'Land Even In Stabilize'
+}
+
 export const ARDUCOPTER_MOT_PWM_TYPE_LABELS: Record<number, string> = {
   0: 'Normal',
   1: 'OneShot',

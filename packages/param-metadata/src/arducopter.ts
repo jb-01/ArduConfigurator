@@ -7,6 +7,8 @@ import {
   ARDUCOPTER_FLIGHT_MODE_LABELS,
   ARDUCOPTER_FRAME_CLASS_LABELS,
   ARDUCOPTER_FRAME_TYPE_LABELS,
+  ARDUCOPTER_FS_EKF_ACTION_LABELS,
+  ARDUCOPTER_FS_GCS_LABELS,
   ARDUCOPTER_GPS_AUTO_CONFIG_LABELS,
   ARDUCOPTER_GPS_AUTO_SWITCH_LABELS,
   ARDUCOPTER_GPS_PRIMARY_LABELS,
@@ -1173,6 +1175,40 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       minimum: 0,
       maximum: 65535,
       step: 1,
+      notes: advancedFailsafeNotes
+    },
+    // GCS and EKF failsafe metadata. These entries are the basis for surfacing
+    // GCS- and EKF-failsafe rows in the Failsafe view in a follow-up PR; the
+    // current Failsafe view intentionally omits them until they land in the
+    // catalog.
+    FS_GCS_ENABLE: {
+      id: 'FS_GCS_ENABLE',
+      label: 'GCS Failsafe',
+      description: 'What the copter does when the ground-station telemetry link drops out.',
+      category: 'failsafe',
+      minimum: 0,
+      maximum: 7,
+      notes: advancedFailsafeNotes,
+      options: enumOptions(ARDUCOPTER_FS_GCS_LABELS)
+    },
+    FS_EKF_ACTION: {
+      id: 'FS_EKF_ACTION',
+      label: 'EKF Failsafe Action',
+      description: 'Action taken when the EKF flags position or velocity variance over the threshold.',
+      category: 'failsafe',
+      minimum: 1,
+      maximum: 3,
+      notes: advancedFailsafeNotes,
+      options: enumOptions(ARDUCOPTER_FS_EKF_ACTION_LABELS)
+    },
+    FS_EKF_THRESH: {
+      id: 'FS_EKF_THRESH',
+      label: 'EKF Failsafe Threshold',
+      description: 'Compass and velocity-Z variance level that trips the EKF failsafe; lower values trigger sooner.',
+      category: 'failsafe',
+      minimum: 0,
+      maximum: 1,
+      step: 0.1,
       notes: advancedFailsafeNotes
     },
     RCMAP_ROLL: {
