@@ -263,7 +263,12 @@ const osdLayoutElements: readonly OsdElementDescriptor[] = [
   { paramSuffix: 'RSSI', label: 'RC RSSI' },
   { paramSuffix: 'ALTITUDE', label: 'Altitude' },
   { paramSuffix: 'THROTTLE', label: 'Throttle' },
-  { paramSuffix: 'CURRENT', label: 'Battery Current' }
+  { paramSuffix: 'CURRENT', label: 'Battery Current' },
+  { paramSuffix: 'HEADING', label: 'Heading' },
+  { paramSuffix: 'GSPEED', label: 'Ground Speed' },
+  { paramSuffix: 'HOME', label: 'Home Arrow' },
+  { paramSuffix: 'HORIZON', label: 'Artificial Horizon' },
+  { paramSuffix: 'FLTMODE', label: 'Flight Mode' }
 ]
 
 function buildOsdElementParameterDefinitions(screenNumber: number): FirmwareMetadataBundle['parameters'] {
@@ -893,6 +898,9 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       options: enumOptions(ARDUCOPTER_OSD_SWITCH_METHOD_LABELS)
     },
     ...buildOsdElementParameterDefinitions(1),
+    ...buildOsdElementParameterDefinitions(2),
+    ...buildOsdElementParameterDefinitions(3),
+    ...buildOsdElementParameterDefinitions(4),
     MSP_OPTIONS: {
       id: 'MSP_OPTIONS',
       label: 'MSP Options',

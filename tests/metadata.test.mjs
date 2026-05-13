@@ -127,11 +127,31 @@ test('metadata catalog exposes per-element OSD layout parameters on the OSD surf
   assert.equal(metadata.parameters.OSD1_RSSI_Y.minimum, 0)
   assert.equal(metadata.parameters.OSD1_RSSI_Y.maximum, 15)
 
-  for (const element of ['BAT_VOLT', 'RSSI', 'ALTITUDE', 'THROTTLE', 'CURRENT']) {
-    for (const suffix of ['EN', 'X', 'Y']) {
-      const entry = metadata.parameters[`OSD1_${element}_${suffix}`]
-      assert.ok(entry, `expected OSD1_${element}_${suffix} in catalog`)
-      assert.equal(entry.categoryDefinition.viewId, 'osd')
+  const expectedElements = [
+    'BAT_VOLT',
+    'RSSI',
+    'ALTITUDE',
+    'THROTTLE',
+    'CURRENT',
+    'HEADING',
+    'GSPEED',
+    'HOME',
+    'HORIZON',
+    'FLTMODE'
+  ]
+  for (const screen of [1, 2, 3, 4]) {
+    for (const element of expectedElements) {
+      for (const suffix of ['EN', 'X', 'Y']) {
+        const id = `OSD${screen}_${element}_${suffix}`
+        const entry = metadata.parameters[id]
+        assert.ok(entry, `expected ${id} in catalog`)
+        assert.equal(entry.categoryDefinition.viewId, 'osd')
+      }
     }
   }
+
+  // Spot-check a screen-2 entry and a newly added element label
+  assert.equal(metadata.parameters.OSD2_HEADING_X.maximum, 29)
+  assert.equal(metadata.parameters.OSD3_HORIZON_EN.options.length, 2)
+  assert.equal(metadata.parameters.OSD1_HEADING_EN.label, 'OSD1 Heading Enabled')
 })
