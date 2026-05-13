@@ -14,6 +14,7 @@ import {
   ARDUCOPTER_GPS_PRIMARY_LABELS,
   ARDUCOPTER_GPS_RATE_MS_LABELS,
   ARDUCOPTER_GPS_TYPE_LABELS,
+  ARDUCOPTER_LOG_BACKEND_LABELS,
   ARDUCOPTER_MSP_OSD_CELL_COUNT_LABELS,
   ARDUCOPTER_MOT_PWM_TYPE_LABELS,
   ARDUCOPTER_NOTIFICATION_LED_BRIGHTNESS_LABELS,
@@ -120,6 +121,21 @@ const mspOsdNotes = [
 const osdElementNotes = [
   'OSD element placement is measured in character cells on the active video format. Confirm the layout in goggles or on a bench display before flight.',
   'Set the matching enable flag to 0 to hide the element entirely; the X/Y coordinates remain for when it is re-enabled.'
+]
+
+const loggingBackendNotes = [
+  'Onboard SD-card logging (the File backend) is typically the right choice for FPV freestyle; MAVLink-only streams logs to the GCS and depends on the radio link.',
+  'After changing the logging backend, verify a fresh log file is created on the next arm before relying on it for post-flight review.'
+]
+
+const loggingBitmaskNotes = [
+  'LOG_BITMASK selects which message families are written to the log. Leaving it at the firmware default is safe; only narrow it for log-size pressure.',
+  'Some advanced tooling (replay, autotune review) expects specific bits enabled. Confirm requirements before disabling categories.'
+]
+
+const loggingBehaviorNotes = [
+  'These options control when logs are written and how the SD card is managed. Keep at least a few free megabytes available so a flight is never lost to a full card.',
+  'Replay logging substantially increases log size; only enable it when you intend to use the captured logs for offline replay.'
 ]
 
 const batteryMonitorNotes = [
@@ -561,6 +577,13 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       description: 'Rate-controller filter and bandwidth settings.',
       order: 15,
       viewId: 'tuning'
+    },
+    logging: {
+      id: 'logging',
+      label: 'Logging',
+      description: 'Onboard log backend, retention, and bitmask configuration.',
+      order: 16,
+      viewId: 'parameters'
     }
   },
   presetGroups: {
@@ -2174,6 +2197,67 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       category: 'outputs',
       notes: ['After remapping outputs, confirm the new assignment with a guarded motor or output review before flight.'],
       options: enumOptions(ARDUCOPTER_SERVO_FUNCTION_LABELS)
+    },
+    LOG_BACKEND_TYPE: {
+      id: 'LOG_BACKEND_TYPE',
+      label: 'Log Backend',
+      description: 'Where the autopilot writes the onboard flight log.',
+      category: 'logging',
+      minimum: 0,
+      maximum: 4,
+      rebootRequired: true,
+      notes: loggingBackendNotes,
+      options: enumOptions(ARDUCOPTER_LOG_BACKEND_LABELS)
+    },
+    LOG_BITMASK: {
+      id: 'LOG_BITMASK',
+      label: 'Log Bitmask',
+      description: 'Advanced bitmask selecting which message families are written to the log.',
+      category: 'logging',
+      minimum: 0,
+      maximum: 0xFFFFFFFF,
+      notes: loggingBitmaskNotes
+    },
+    LOG_FILE_DSRMROT: {
+      id: 'LOG_FILE_DSRMROT',
+      label: 'Rotate Log on Disarm',
+      description: 'Start a fresh log file each time the vehicle disarms.',
+      category: 'logging',
+      minimum: 0,
+      maximum: 1,
+      notes: loggingBehaviorNotes,
+      options: enabledDisabledOptions
+    },
+    LOG_FILE_MB_FREE: {
+      id: 'LOG_FILE_MB_FREE',
+      label: 'Minimum Free Space',
+      description: 'Reserve a minimum amount of free space on the SD card by deleting the oldest logs.',
+      category: 'logging',
+      unit: 'MB',
+      minimum: 0,
+      maximum: 8192,
+      step: 1,
+      notes: loggingBehaviorNotes
+    },
+    LOG_REPLAY: {
+      id: 'LOG_REPLAY',
+      label: 'Replay Logging',
+      description: 'Enable replay-quality logging for offline EKF and controller replay.',
+      category: 'logging',
+      minimum: 0,
+      maximum: 1,
+      notes: loggingBehaviorNotes,
+      options: enabledDisabledOptions
+    },
+    LOG_DISARMED: {
+      id: 'LOG_DISARMED',
+      label: 'Log While Disarmed',
+      description: 'Continue writing log data while the vehicle is disarmed.',
+      category: 'logging',
+      minimum: 0,
+      maximum: 1,
+      notes: loggingBehaviorNotes,
+      options: enabledDisabledOptions
     }
   },
   setupSections: [

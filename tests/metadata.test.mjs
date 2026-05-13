@@ -9,6 +9,7 @@ import {
   findBoardCatalogEntry,
   formatArducopterNotificationLedBrightness,
   formatArducopterOsdType,
+  formatArducopterLogBackend,
   formatArducopterVtxEnable,
   formatArduplaneFlightMode,
   normalizeFirmwareMetadata
@@ -154,4 +155,36 @@ test('metadata catalog exposes per-element OSD layout parameters on the OSD surf
   assert.equal(metadata.parameters.OSD2_HEADING_X.maximum, 29)
   assert.equal(metadata.parameters.OSD3_HORIZON_EN.options.length, 2)
   assert.equal(metadata.parameters.OSD1_HEADING_EN.label, 'OSD1 Heading Enabled')
+})
+
+test('metadata catalog exposes onboard logging parameters under a dedicated logging category', () => {
+  const metadata = normalizeFirmwareMetadata(arducopterMetadata)
+
+  const backend = metadata.parameters.LOG_BACKEND_TYPE
+  assert.equal(backend.categoryDefinition.id, 'logging')
+  assert.equal(backend.categoryDefinition.viewId, 'parameters')
+  assert.equal(backend.options.length, 5)
+  assert.equal(backend.options[0].label, 'None')
+  assert.equal(backend.options[4].label, 'Block')
+  assert.equal(backend.rebootRequired, true)
+
+  // The MB-free retention knob carries a unit and a non-trivial upper bound
+  assert.equal(metadata.parameters.LOG_FILE_MB_FREE.unit, 'MB')
+  assert.ok(metadata.parameters.LOG_FILE_MB_FREE.maximum >= 1024)
+
+  // The boolean LOG_* knobs reuse the shared Disabled/Enabled option pair
+  for (const id of ['LOG_FILE_DSRMROT', 'LOG_REPLAY', 'LOG_DISARMED']) {
+    const entry = metadata.parameters[id]
+    assert.equal(entry.categoryDefinition.id, 'logging')
+    assert.equal(entry.options.length, 2)
+    assert.equal(entry.options[0].label, 'Disabled')
+    assert.equal(entry.options[1].label, 'Enabled')
+  }
+})
+
+test('Log-backend formatting stays user-facing', () => {
+  assert.equal(formatArducopterLogBackend(0), 'None')
+  assert.equal(formatArducopterLogBackend(3), 'File + MAVLink')
+  assert.equal(formatArducopterLogBackend(undefined), 'Unknown')
+  assert.equal(formatArducopterLogBackend(99), 'Backend 99')
 })

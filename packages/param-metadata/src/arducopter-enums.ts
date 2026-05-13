@@ -816,3 +816,15 @@ export function formatArducopterGcsFailsafe(value: number | undefined): string {
 export function formatArducopterEkfFailsafeAction(value: number | undefined): string {
   return ARDUCOPTER_FS_EKF_ACTION_LABELS[value ?? Number.NaN] ?? (value === undefined ? 'Unknown' : `Action ${value}`)
 }
+
+export const ARDUCOPTER_LOG_BACKEND_LABELS: Record<number, string> = {
+  0: 'None',
+  1: 'File',
+  2: 'MAVLink',
+  3: 'File + MAVLink',
+  4: 'Block'
+}
+
+export function formatArducopterLogBackend(value: number | undefined): string {
+  return ARDUCOPTER_LOG_BACKEND_LABELS[value ?? Number.NaN] ?? (value === undefined ? 'Unknown' : `Backend ${value}`)
+}
