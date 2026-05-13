@@ -9098,3 +9098,18 @@ textarea:focus {
     align-items: stretch;
   }
 }
+
+/* Outputs view density tightening (mirrors the Receiver hero treatment) */
+.telemetry-stack--outputs .outputs-summary-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.telemetry-stack--outputs .outputs-summary-card {
+  padding: 10px 12px;
+  gap: 6px;
+}
+
+.telemetry-stack--outputs .outputs-summary-card p {
+  font-size: 12px;
+}
+
