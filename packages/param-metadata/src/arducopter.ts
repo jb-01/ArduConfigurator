@@ -509,6 +509,26 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
     }
   },
   presets: {
+    'flight-feel-cinematic': {
+      id: 'flight-feel-cinematic',
+      label: 'Cinematic Glide',
+      description: 'Maximum smoothing with low lean angle and slow yaw for cinematic, drift-free shots.',
+      groupId: 'flight-feel',
+      order: 0,
+      values: [
+        { paramId: 'ATC_INPUT_TC', value: 0.5 },
+        { paramId: 'ANGLE_MAX', value: 2500 },
+        { paramId: 'PILOT_Y_RATE', value: 100 },
+        { paramId: 'PILOT_Y_EXPO', value: 0.25 }
+      ],
+      note: 'For deliberately slow, smooth FPV cinematography. Combine with a soft acro/rate profile if the airframe will be flown manually.',
+      tags: ['cinematic', 'smooth', 'video'],
+      prerequisites: presetPrerequisites,
+      cautions: flightFeelPresetCautions,
+      compatibility: {
+        frameClasses: [...multirotorPresetFrameClasses]
+      }
+    },
     'flight-feel-soft': {
       id: 'flight-feel-soft',
       label: 'Smooth Explorer',
@@ -621,10 +641,33 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
         { paramId: 'ACRO_RP_EXPO', value: 0.04 },
         { paramId: 'ACRO_Y_EXPO', value: 0.03 }
       ],
-      note: 'This is the most aggressive preset in the initial library; start lower unless you already know the airframe can handle it.',
+      note: 'Aggressive freestyle baseline; start lower unless you already know the airframe can handle it.',
       tags: ['acro', 'sport', 'responsive'],
       prerequisites: presetPrerequisites,
       cautions: acroRatePresetCautions,
+      compatibility: {
+        frameClasses: [...multirotorPresetFrameClasses]
+      }
+    },
+    'acro-rates-race': {
+      id: 'acro-rates-race',
+      label: 'Race Acro',
+      description: 'High rotation rates with linear (zero-expo) stick response for FPV race lines.',
+      groupId: 'acro-rates',
+      order: 4,
+      values: [
+        { paramId: 'ACRO_RP_RATE', value: 540 },
+        { paramId: 'ACRO_Y_RATE', value: 380 },
+        { paramId: 'ACRO_RP_EXPO', value: 0 },
+        { paramId: 'ACRO_Y_EXPO', value: 0 }
+      ],
+      note: 'For pilots already comfortable with Sport Acro who want a linear, race-style stick response. Expect noticeably more sensitivity around center.',
+      tags: ['acro', 'race', 'aggressive', 'fpv'],
+      prerequisites: presetPrerequisites,
+      cautions: [
+        ...acroRatePresetCautions,
+        'Linear (zero-expo) rates leave no center-stick deadband softening, so accidental stick input directly drives full rate. Test on a familiar airframe before flying lines.'
+      ],
       compatibility: {
         frameClasses: [...multirotorPresetFrameClasses]
       }
