@@ -808,3 +808,11 @@ export function formatArducopterBatteryVoltageSource(value: number | undefined):
 export function formatArducopterThrottleFailsafe(value: number | undefined): string {
   return ARDUCOPTER_THROTTLE_FAILSAFE_LABELS[value ?? Number.NaN] ?? (value === undefined ? 'Unknown' : `Setting ${value}`)
 }
+
+export function formatArducopterGcsFailsafe(value: number | undefined): string {
+  return ARDUCOPTER_FS_GCS_LABELS[value ?? Number.NaN] ?? (value === undefined ? 'Unknown' : `Setting ${value}`)
+}
+
+export function formatArducopterEkfFailsafeAction(value: number | undefined): string {
+  return ARDUCOPTER_FS_EKF_ACTION_LABELS[value ?? Number.NaN] ?? (value === undefined ? 'Unknown' : `Action ${value}`)
+}

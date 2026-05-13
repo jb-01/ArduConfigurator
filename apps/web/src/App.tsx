@@ -77,6 +77,8 @@ import {
   findBoardCatalogEntry,
   formatArducopterBatteryMonitor,
   formatArducopterBatteryFailsafeAction,
+  formatArducopterEkfFailsafeAction,
+  formatArducopterGcsFailsafe,
   formatArducopterBatteryVoltageSource,
   formatArducopterFlightModeChannel,
   formatArducopterFlightMode,
@@ -2829,6 +2831,27 @@ function buildFailsafeRows(input: {
       paramId: 'BATT_FS_CRT_ACT',
       formatted: formatArducopterBatteryFailsafeAction(input.batteryCriticalFailsafe),
       isSynced: input.batteryCriticalFailsafe !== undefined
+    },
+    {
+      source: 'GCS failsafe',
+      paramId: 'FS_GCS_ENABLE',
+      formatted: formatArducopterGcsFailsafe(readRoundedParameter(input.snapshot, 'FS_GCS_ENABLE')),
+      isSynced: readParameterValue(input.snapshot, 'FS_GCS_ENABLE') !== undefined
+    },
+    {
+      source: 'EKF failsafe',
+      paramId: 'FS_EKF_ACTION',
+      formatted: formatArducopterEkfFailsafeAction(readRoundedParameter(input.snapshot, 'FS_EKF_ACTION')),
+      isSynced: readParameterValue(input.snapshot, 'FS_EKF_ACTION') !== undefined
+    },
+    {
+      source: 'EKF failsafe',
+      paramId: 'FS_EKF_THRESH',
+      formatted: (() => {
+        const value = readParameterValue(input.snapshot, 'FS_EKF_THRESH')
+        return value !== undefined ? value.toFixed(1) : 'Not synced'
+      })(),
+      isSynced: readParameterValue(input.snapshot, 'FS_EKF_THRESH') !== undefined
     },
     {
       source: 'Advanced',
