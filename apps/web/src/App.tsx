@@ -134,6 +134,7 @@ import { VtxView } from './views/Vtx'
 import { OsdView } from './views/Osd'
 import { PowerView, type PowerDraftItem, type PowerFieldSpec } from './views/Power'
 import { PresetsView, type PresetsCard, type PresetsGroup } from './views/Presets'
+import { OutputsView } from './views/Outputs'
 import {
   loadStoredProvisioningProfiles,
   persistProvisioningProfiles,
@@ -12330,32 +12331,12 @@ export function App() {
       ) : null}
 
       {activeViewId === 'outputs' ? (
-      <div id="setup-panel-outputs">
-        <Panel
-          title="Airframe & Outputs"
-          subtitle="Review frame geometry, output assignments, and key motor/peripheral settings before any output testing."
-        >
-        <div className="telemetry-stack telemetry-stack--outputs">
-          <div className="outputs-summary-grid">
-            {outputTaskCards.map((task) => (
-              <button
-                key={task.id}
-                type="button"
-                data-testid={`outputs-summary-${task.id}`}
-                className={`outputs-summary-card${task.id === activeOutputTaskId ? ' is-active' : ''}`}
-                onClick={() => setOutputTaskOverride(task.id)}
-              >
-                <div className="outputs-summary-card__header">
-                  <span>{task.label}</span>
-                  <StatusBadge tone={task.tone}>{task.value}</StatusBadge>
-                </div>
-                <p>{task.detail}</p>
-              </button>
-            ))}
-          </div>
-
-          <div className="outputs-workspace outputs-workspace--task-deck">
-            <div className="outputs-workspace__overview outputs-overview">
+      <OutputsView
+        taskCards={outputTaskCards}
+        activeTaskId={activeOutputTaskId}
+        activeTask={activeOutputTask}
+        onSelectTask={setOutputTaskOverride}
+        overviewSlot={
               <div className="outputs-overview__sticky">
                 <div className="telemetry-header">
                   <div>
@@ -12473,31 +12454,9 @@ export function App() {
                   </p>
                 ) : null}
               </div>
-            </div>
-
-            <div className="outputs-workspace__task outputs-task-deck">
-              <div className="outputs-task-deck__header">
-                <div>
-                  <h3>{activeOutputTask.label}</h3>
-                  <p>{activeOutputTask.detail}</p>
-                </div>
-                <StatusBadge tone={activeOutputTask.tone}>{activeOutputTask.value}</StatusBadge>
-              </div>
-
-              <div className="outputs-task-nav" data-testid="outputs-task-nav">
-                {outputTaskCards.map((task) => (
-                  <button
-                    key={`outputs-task-nav:${task.id}`}
-                    type="button"
-                    className={`outputs-task-nav__button${task.id === activeOutputTaskId ? ' is-active' : ''}`}
-                    onClick={() => setOutputTaskOverride(task.id)}
-                  >
-                    <span>{task.label}</span>
-                    <small>{task.value}</small>
-                  </button>
-                ))}
-              </div>
-
+        }
+        taskBodySlot={
+          <>
               {activeOutputTaskId === 'motor-setup' ? (
                 <div className="outputs-task-panel outputs-task-panel--stack">
                   <section className="bf-gui-box">
@@ -13683,48 +13642,45 @@ export function App() {
                   ) : null}
                 </div>
               ) : null}
+          </>
+        }
+        reviewDockSlot={outputHasPendingReview ? (
+          <div className="outputs-review-dock">
+            <div className="outputs-review-dock__summary">
+              <strong>Output changes pending</strong>
+              <div className="config-pills">
+                {outputAssignmentStagedDrafts.length > 0 ? <span>{outputAssignmentStagedDrafts.length} motor setup staged</span> : null}
+                {outputAssignmentInvalidDrafts.length > 0 ? <span className="is-pending">{outputAssignmentInvalidDrafts.length} motor setup invalid</span> : null}
+                {outputReviewStagedDrafts.length > 0 ? <span>{outputReviewStagedDrafts.length} ESC staged</span> : null}
+                {outputReviewInvalidDrafts.length > 0 ? <span className="is-pending">{outputReviewInvalidDrafts.length} ESC invalid</span> : null}
+                {outputPeripheralStagedDraftCount > 0 ? <span>{outputPeripheralStagedDraftCount} peripheral staged</span> : null}
+                {outputPeripheralInvalidDraftCount > 0 ? <span className="is-pending">{outputPeripheralInvalidDraftCount} peripheral invalid</span> : null}
+              </div>
+            </div>
+
+            <div className="outputs-review-dock__actions">
+              <button style={buttonStyle()} onClick={() => setOutputTaskOverride('review')}>
+                Open Review
+              </button>
+              {(outputAssignmentStagedDrafts.length > 0 || outputAssignmentInvalidDrafts.length > 0) ? (
+                <button style={buttonStyle()} onClick={() => setOutputTaskOverride('motor-setup')}>
+                  Open Motor Setup
+                </button>
+              ) : null}
+              {(outputReviewStagedDrafts.length > 0 || outputReviewInvalidDrafts.length > 0) ? (
+                <button style={buttonStyle()} onClick={() => setOutputTaskOverride('esc-protocol')}>
+                  Open ESC & Protocol
+                </button>
+              ) : null}
+              {(outputPeripheralStagedDraftCount > 0 || outputPeripheralInvalidDraftCount > 0) ? (
+                <button style={buttonStyle()} onClick={() => setOutputTaskOverride('peripherals')}>
+                  Open Peripherals & Alerts
+                </button>
+              ) : null}
             </div>
           </div>
-
-          {outputHasPendingReview ? (
-            <div className="outputs-review-dock">
-              <div className="outputs-review-dock__summary">
-                <strong>Output changes pending</strong>
-                <div className="config-pills">
-                  {outputAssignmentStagedDrafts.length > 0 ? <span>{outputAssignmentStagedDrafts.length} motor setup staged</span> : null}
-                  {outputAssignmentInvalidDrafts.length > 0 ? <span className="is-pending">{outputAssignmentInvalidDrafts.length} motor setup invalid</span> : null}
-                  {outputReviewStagedDrafts.length > 0 ? <span>{outputReviewStagedDrafts.length} ESC staged</span> : null}
-                  {outputReviewInvalidDrafts.length > 0 ? <span className="is-pending">{outputReviewInvalidDrafts.length} ESC invalid</span> : null}
-                  {outputPeripheralStagedDraftCount > 0 ? <span>{outputPeripheralStagedDraftCount} peripheral staged</span> : null}
-                  {outputPeripheralInvalidDraftCount > 0 ? <span className="is-pending">{outputPeripheralInvalidDraftCount} peripheral invalid</span> : null}
-                </div>
-              </div>
-
-              <div className="outputs-review-dock__actions">
-                <button style={buttonStyle()} onClick={() => setOutputTaskOverride('review')}>
-                  Open Review
-                </button>
-                {(outputAssignmentStagedDrafts.length > 0 || outputAssignmentInvalidDrafts.length > 0) ? (
-                  <button style={buttonStyle()} onClick={() => setOutputTaskOverride('motor-setup')}>
-                    Open Motor Setup
-                  </button>
-                ) : null}
-                {(outputReviewStagedDrafts.length > 0 || outputReviewInvalidDrafts.length > 0) ? (
-                  <button style={buttonStyle()} onClick={() => setOutputTaskOverride('esc-protocol')}>
-                    Open ESC & Protocol
-                  </button>
-                ) : null}
-                {(outputPeripheralStagedDraftCount > 0 || outputPeripheralInvalidDraftCount > 0) ? (
-                  <button style={buttonStyle()} onClick={() => setOutputTaskOverride('peripherals')}>
-                    Open Peripherals & Alerts
-                  </button>
-                ) : null}
-              </div>
-            </div>
-          ) : null}
-        </div>
-        </Panel>
-      </div>
+        ) : null}
+      />
       ) : null}
 
       {activeViewId === 'snapshots' ? (
