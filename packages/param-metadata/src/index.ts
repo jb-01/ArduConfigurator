@@ -1,5 +1,6 @@
 export * from './arducopter.js'
 export * from './arducopter-enums.js'
+export * from './arduplane-enums.js'
 export * from './boards.js'
 export * from './catalog.js'
 export * from './types.js'

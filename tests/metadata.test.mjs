@@ -2,12 +2,15 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  ARDUPLANE_FLIGHT_MODE_LABELS,
   BOARD_CATALOG,
   arducopterMetadata,
+  arduplaneFlightModeLabel,
   findBoardCatalogEntry,
   formatArducopterNotificationLedBrightness,
   formatArducopterOsdType,
   formatArducopterVtxEnable,
+  formatArduplaneFlightMode,
   normalizeFirmwareMetadata
 } from '../packages/param-metadata/dist/index.js'
 
@@ -89,4 +92,23 @@ test('VTX enable formatting stays user-facing', () => {
 test('OSD and notification formatting stays user-facing', () => {
   assert.equal(formatArducopterOsdType(5), 'MSP DisplayPort')
   assert.equal(formatArducopterNotificationLedBrightness(2), 'Medium')
+})
+
+test('ArduPlane flight-mode labels resolve common Plane and QuadPlane modes', () => {
+  // Core Plane fixed-wing modes
+  assert.equal(arduplaneFlightModeLabel(0), 'Manual')
+  assert.equal(arduplaneFlightModeLabel(5), 'FBWA')
+  assert.equal(arduplaneFlightModeLabel(10), 'Auto')
+  assert.equal(arduplaneFlightModeLabel(11), 'RTL')
+
+  // QuadPlane modes (the 17-23 range)
+  assert.equal(arduplaneFlightModeLabel(17), 'QStabilize')
+  assert.equal(arduplaneFlightModeLabel(20), 'QLand')
+
+  // Unknown mode falls through to the numbered placeholder
+  assert.equal(formatArduplaneFlightMode(99), 'Mode 99')
+  assert.equal(formatArduplaneFlightMode(undefined), 'Unknown')
+
+  // The label table itself exposes the expected size for the current Plane build
+  assert.equal(Object.keys(ARDUPLANE_FLIGHT_MODE_LABELS).length, 25)
 })
