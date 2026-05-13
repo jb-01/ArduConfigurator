@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import type { ParameterState } from '@arduconfig/ardupilot-core'
 
 export interface ScopedFieldDraftStatus {
@@ -44,10 +45,11 @@ export function ScopedSelectField(props: CommonScopedFieldProps) {
 
 interface ScopedNumberFieldProps extends CommonScopedFieldProps {
   stepFallback?: number
+  caption?: ReactNode
 }
 
 export function ScopedNumberField(props: ScopedNumberFieldProps) {
-  const { parameter, liveValue, editedValues, draftStatusById, onChange, compact = true, stepFallback = 1 } = props
+  const { parameter, liveValue, editedValues, draftStatusById, onChange, compact = true, stepFallback = 1, caption } = props
   return (
     <label className={fieldClassName(draftStatusById, parameter.id, compact)}>
       <span>{parameter.definition?.label ?? parameter.id}</span>
@@ -59,6 +61,7 @@ export function ScopedNumberField(props: ScopedNumberFieldProps) {
         value={editedValues[parameter.id] ?? String(liveValue ?? '')}
         onChange={(event) => onChange(parameter.id, event.target.value)}
       />
+      {caption ? <small>{caption}</small> : null}
     </label>
   )
 }

@@ -1,6 +1,8 @@
 import { Panel, StatusBadge, buttonStyle } from '@arduconfig/ui-kit'
 import type { ParameterState } from '@arduconfig/ardupilot-core'
 
+import { ScopedSelectField, type ScopedFieldDraftMap } from './ScopedField'
+
 export interface OsdLinkPort {
   portNumber: number
   label: string
@@ -54,7 +56,7 @@ export interface OsdViewProps {
   mspOptionsField: OsdMspOptionsField | undefined
   editedValues: Record<string, string>
   onEditChange: (paramId: string, value: string) => void
-  draftStatusById: ReadonlyMap<string, { status: string }>
+  draftStatusById: ScopedFieldDraftMap
   stagedCount: number
   invalidCount: number
   draftCount: number
@@ -65,32 +67,8 @@ export interface OsdViewProps {
   onRevert: () => void
 }
 
-function fieldStatusClass(draftStatusById: ReadonlyMap<string, { status: string }>, paramId: string): string {
+function fieldStatusClass(draftStatusById: ScopedFieldDraftMap, paramId: string): string {
   return draftStatusById.get(paramId)?.status ?? 'unchanged'
-}
-
-function renderSelectField(
-  field: OsdSelectField,
-  editedValues: Record<string, string>,
-  onEditChange: (paramId: string, value: string) => void,
-  draftStatusById: ReadonlyMap<string, { status: string }>
-) {
-  const paramId = field.parameter.id
-  return (
-    <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${fieldStatusClass(draftStatusById, paramId)}`}>
-      <span>{field.parameter.definition?.label ?? paramId}</span>
-      <select
-        value={editedValues[paramId] ?? String(field.liveValue ?? '')}
-        onChange={(event) => onEditChange(paramId, event.target.value)}
-      >
-        {(field.parameter.definition?.options ?? []).map((valueOption) => (
-          <option key={`${paramId}:${valueOption.value}`} value={String(valueOption.value)}>
-            {valueOption.label}
-          </option>
-        ))}
-      </select>
-    </label>
-  )
 }
 
 export function OsdView(props: OsdViewProps) {
@@ -141,9 +119,33 @@ export function OsdView(props: OsdViewProps) {
               <div className="bf-gui-box__body">
                 <p className="setup-gui-box__note">ArduPilot currently exposes backend, page channel, and switching mode first. A fuller selectable element list still needs broader OSD metadata coverage.</p>
                 <div className="bf-compact-field-grid">
-                  {typeField ? renderSelectField(typeField, editedValues, onEditChange, draftStatusById) : null}
-                  {channelField ? renderSelectField(channelField, editedValues, onEditChange, draftStatusById) : null}
-                  {switchMethodField ? renderSelectField(switchMethodField, editedValues, onEditChange, draftStatusById) : null}
+                  {typeField ? (
+                    <ScopedSelectField
+                      parameter={typeField.parameter}
+                      liveValue={typeField.liveValue}
+                      editedValues={editedValues}
+                      onChange={onEditChange}
+                      draftStatusById={draftStatusById}
+                    />
+                  ) : null}
+                  {channelField ? (
+                    <ScopedSelectField
+                      parameter={channelField.parameter}
+                      liveValue={channelField.liveValue}
+                      editedValues={editedValues}
+                      onChange={onEditChange}
+                      draftStatusById={draftStatusById}
+                    />
+                  ) : null}
+                  {switchMethodField ? (
+                    <ScopedSelectField
+                      parameter={switchMethodField.parameter}
+                      liveValue={switchMethodField.liveValue}
+                      editedValues={editedValues}
+                      onChange={onEditChange}
+                      draftStatusById={draftStatusById}
+                    />
+                  ) : null}
                 </div>
               </div>
             </article>
@@ -205,7 +207,15 @@ export function OsdView(props: OsdViewProps) {
                     : <span>No active display link</span>}
                 </div>
 
-                {cellCountField ? renderSelectField(cellCountField, editedValues, onEditChange, draftStatusById) : null}
+                {cellCountField ? (
+                  <ScopedSelectField
+                    parameter={cellCountField.parameter}
+                    liveValue={cellCountField.liveValue}
+                    editedValues={editedValues}
+                    onChange={onEditChange}
+                    draftStatusById={draftStatusById}
+                  />
+                ) : null}
 
                 {mspOptionsField ? (
                   <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${fieldStatusClass(draftStatusById, mspOptionsField.parameter.id)}`}>

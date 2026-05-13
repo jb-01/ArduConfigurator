@@ -1,6 +1,8 @@
 import { Panel, StatusBadge, buttonStyle } from '@arduconfig/ui-kit'
 import type { ParameterState } from '@arduconfig/ardupilot-core'
 
+import { ScopedSelectField, ScopedNumberField, type ScopedFieldDraftMap } from './ScopedField'
+
 export interface VtxLinkPort {
   label: string
   protocolLabel: string
@@ -21,7 +23,7 @@ export interface VtxViewProps {
   optionsField: VtxField | undefined
   editedValues: Record<string, string>
   onEditChange: (paramId: string, value: string) => void
-  draftStatusById: ReadonlyMap<string, { status: string }>
+  draftStatusById: ScopedFieldDraftMap
   stagedCount: number
   invalidCount: number
   draftCount: number
@@ -30,10 +32,6 @@ export interface VtxViewProps {
   isBusy: boolean
   onApply: () => void
   onRevert: () => void
-}
-
-function fieldStatusClass(draftStatusById: ReadonlyMap<string, { status: string }>, paramId: string): string {
-  return draftStatusById.get(paramId)?.status ?? 'unchanged'
 }
 
 export function VtxView(props: VtxViewProps) {
@@ -58,7 +56,6 @@ export function VtxView(props: VtxViewProps) {
     onRevert
   } = props
 
-  const enabled = enableField?.liveValue
   const frequency = frequencyField?.liveValue
   const power = powerField?.liveValue
   const maxPower = maxPowerField?.liveValue
@@ -95,61 +92,43 @@ export function VtxView(props: VtxViewProps) {
 
                 <div className="bf-compact-field-grid">
                   {enableField ? (
-                    <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${fieldStatusClass(draftStatusById, enableField.parameter.id)}`}>
-                      <span>{enableField.parameter.definition?.label ?? enableField.parameter.id}</span>
-                      <select
-                        value={editedValues[enableField.parameter.id] ?? String(enabled ?? '')}
-                        onChange={(event) => onEditChange(enableField.parameter.id, event.target.value)}
-                      >
-                        {(enableField.parameter.definition?.options ?? []).map((valueOption) => (
-                          <option key={`${enableField.parameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                            {valueOption.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                    <ScopedSelectField
+                      parameter={enableField.parameter}
+                      liveValue={enableField.liveValue}
+                      editedValues={editedValues}
+                      onChange={onEditChange}
+                      draftStatusById={draftStatusById}
+                    />
                   ) : null}
 
                   {frequencyField ? (
-                    <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${fieldStatusClass(draftStatusById, frequencyField.parameter.id)}`}>
-                      <span>{frequencyField.parameter.definition?.label ?? frequencyField.parameter.id}</span>
-                      <input
-                        type="number"
-                        min={frequencyField.parameter.definition?.minimum}
-                        max={frequencyField.parameter.definition?.maximum}
-                        step={frequencyField.parameter.definition?.step ?? 1}
-                        value={editedValues[frequencyField.parameter.id] ?? String(frequency ?? '')}
-                        onChange={(event) => onEditChange(frequencyField.parameter.id, event.target.value)}
-                      />
-                    </label>
+                    <ScopedNumberField
+                      parameter={frequencyField.parameter}
+                      liveValue={frequencyField.liveValue}
+                      editedValues={editedValues}
+                      onChange={onEditChange}
+                      draftStatusById={draftStatusById}
+                    />
                   ) : null}
 
                   {powerField ? (
-                    <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${fieldStatusClass(draftStatusById, powerField.parameter.id)}`}>
-                      <span>{powerField.parameter.definition?.label ?? powerField.parameter.id}</span>
-                      <input
-                        type="number"
-                        min={powerField.parameter.definition?.minimum}
-                        max={powerField.parameter.definition?.maximum}
-                        step={powerField.parameter.definition?.step ?? 1}
-                        value={editedValues[powerField.parameter.id] ?? String(power ?? '')}
-                        onChange={(event) => onEditChange(powerField.parameter.id, event.target.value)}
-                      />
-                    </label>
+                    <ScopedNumberField
+                      parameter={powerField.parameter}
+                      liveValue={powerField.liveValue}
+                      editedValues={editedValues}
+                      onChange={onEditChange}
+                      draftStatusById={draftStatusById}
+                    />
                   ) : null}
 
                   {maxPowerField ? (
-                    <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${fieldStatusClass(draftStatusById, maxPowerField.parameter.id)}`}>
-                      <span>{maxPowerField.parameter.definition?.label ?? maxPowerField.parameter.id}</span>
-                      <input
-                        type="number"
-                        min={maxPowerField.parameter.definition?.minimum}
-                        max={maxPowerField.parameter.definition?.maximum}
-                        step={maxPowerField.parameter.definition?.step ?? 1}
-                        value={editedValues[maxPowerField.parameter.id] ?? String(maxPower ?? '')}
-                        onChange={(event) => onEditChange(maxPowerField.parameter.id, event.target.value)}
-                      />
-                    </label>
+                    <ScopedNumberField
+                      parameter={maxPowerField.parameter}
+                      liveValue={maxPowerField.liveValue}
+                      editedValues={editedValues}
+                      onChange={onEditChange}
+                      draftStatusById={draftStatusById}
+                    />
                   ) : null}
                 </div>
               </div>
@@ -197,18 +176,14 @@ export function VtxView(props: VtxViewProps) {
                 <p className="setup-gui-box__note">ArduPilot currently exposes frequency, power, max power, and an advanced options bitmask here instead of a full band/channel table.</p>
                 <div className="bf-vtx-advanced-grid">
                   {optionsField ? (
-                    <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${fieldStatusClass(draftStatusById, optionsField.parameter.id)}`}>
-                      <span>{optionsField.parameter.definition?.label ?? optionsField.parameter.id}</span>
-                      <input
-                        type="number"
-                        min={optionsField.parameter.definition?.minimum}
-                        max={optionsField.parameter.definition?.maximum}
-                        step={optionsField.parameter.definition?.step ?? 1}
-                        value={editedValues[optionsField.parameter.id] ?? String(options ?? '')}
-                        onChange={(event) => onEditChange(optionsField.parameter.id, event.target.value)}
-                      />
-                      <small>Keep this exposed so the ArduPilot gap stays obvious instead of hidden.</small>
-                    </label>
+                    <ScopedNumberField
+                      parameter={optionsField.parameter}
+                      liveValue={optionsField.liveValue}
+                      editedValues={editedValues}
+                      onChange={onEditChange}
+                      draftStatusById={draftStatusById}
+                      caption="Keep this exposed so the ArduPilot gap stays obvious instead of hidden."
+                    />
                   ) : null}
 
                   <div className="bf-vtx-callout">
