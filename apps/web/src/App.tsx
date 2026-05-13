@@ -133,6 +133,7 @@ import { FailsafeView, type FailsafeViewRow } from './views/Failsafe'
 import { VtxView } from './views/Vtx'
 import { OsdView } from './views/Osd'
 import { PowerView, type PowerDraftItem, type PowerFieldSpec } from './views/Power'
+import { PresetsView, type PresetsCard, type PresetsGroup } from './views/Presets'
 import {
   loadStoredProvisioningProfiles,
   persistProvisioningProfiles,
@@ -15677,335 +15678,105 @@ export function App() {
       ) : null}
 
       {activeViewId === 'presets' ? (
-      <section className="grid one-up">
-        <Panel
-          title="Presets"
-          subtitle="Curated tuning bundles built on the same verified write path and snapshot safety system as the rest of the configurator."
-        >
-          <div className="telemetry-stack">
-            <div className="telemetry-header">
-              <div>
-                <h3>Preset library</h3>
-                <p>
-                  Presets stay intentionally narrow: they touch only the small, high-value tuning controls already exposed in this product. Every
-                  apply requires diff review, and a pre-apply snapshot is captured automatically before any write is sent.
-                </p>
-              </div>
-              <StatusBadge tone={toneForPresetApplicability(selectedPresetApplicability.status)}>
-                {selectedPresetInvalidEntries.length > 0
-                  ? `${selectedPresetInvalidEntries.length} invalid`
-                  : selectedPresetChangedEntries.length > 0
-                    ? `${selectedPresetChangedEntries.length} diff`
-                    : `${presetDefinitions.length} presets`}
-              </StatusBadge>
-            </div>
-
-            {presetNotice ? (
-              <div className="parameter-review__notice">
-                <StatusBadge tone={presetNotice.tone}>{presetNotice.tone}</StatusBadge>
-                <p>{presetNotice.text}</p>
-              </div>
-            ) : null}
-
-            {parameterFollowUp ? (
-              <div className="parameter-follow-up">
-                <StatusBadge tone={parameterFollowUp.requiresReboot ? 'warning' : 'neutral'}>
-                  {parameterFollowUp.requiresReboot ? 'reboot' : 'refresh'}
-                </StatusBadge>
-                <p>{parameterFollowUp.text}</p>
-                <small>Use the header session strip to complete the pending reboot or refresh after a preset apply.</small>
-              </div>
-            ) : null}
-
-            <div className="telemetry-metric-grid">
-              <article className="telemetry-metric-card">
-                <span>Preset families</span>
-                <strong>{presetGroups.length}</strong>
-              </article>
-              <article className="telemetry-metric-card">
-                <span>Total presets</span>
-                <strong>{presetDefinitions.length}</strong>
-              </article>
-              <article className="telemetry-metric-card">
-                <span>Changed vs live</span>
-                <strong>{selectedPresetDiff?.changedCount ?? 0}</strong>
-              </article>
-              <article className="telemetry-metric-card">
-                <span>Auto backups</span>
-                <strong>{savedSnapshots.filter((snapshotEntry) => snapshotEntry.tags.includes('auto-backup')).length}</strong>
-              </article>
-            </div>
-
-            {presetGroups.length > 0 ? (
-              <div className="preset-group-grid">
-                {presetGroups.map((group) => (
-                  <section key={group.id} className="preset-group">
-                    <header className="preset-group__header">
-                      <div>
-                        <strong>{group.label}</strong>
-                        <p>{group.description}</p>
-                      </div>
-                      <StatusBadge tone="neutral">{metadataCatalog.presetsByGroup[group.id]?.length ?? 0} presets</StatusBadge>
-                    </header>
-
-                    <div className="preset-card-grid">
-                      {(metadataCatalog.presetsByGroup[group.id] ?? []).map((preset) => {
-                        const preview = presetPreviewById.get(preset.id)
-                        const isActive = preset.id === selectedPreset?.id
-                        const changedCount = preview?.diff.changedCount ?? 0
-                        const invalidCount = deriveParameterDraftEntries(snapshot.parameters, preview?.diff.draftValues ?? {}).filter(
-                          (entry) => entry.status === 'invalid'
-                        ).length
-
-                        return (
-                          <button
-                            key={preset.id}
-                            type="button"
-                            data-testid={`preset-card-${preset.id}`}
-                            className={`preset-card${isActive ? ' is-active' : ''}`}
-                            onClick={() => setSelectedPresetId(preset.id)}
-                          >
-                            <div className="preset-card__header">
-                              <div>
-                                <strong>{preset.label}</strong>
-                                <small>{preset.description}</small>
-                              </div>
-                              <StatusBadge
-                                tone={
-                                  invalidCount > 0
-                                    ? 'danger'
-                                    : preview
-                                      ? toneForPresetApplicability(preview.applicability.status)
-                                      : 'neutral'
-                                }
-                              >
-                                {invalidCount > 0
-                                  ? `${invalidCount} invalid`
-                                  : preview?.applicability.status === 'blocked'
-                                    ? 'blocked'
-                                    : changedCount > 0
-                                      ? `${changedCount} diff`
-                                      : 'matches'}
-                              </StatusBadge>
-                            </div>
-
-                            <div className="config-pills">
-                              <span>{preset.values.length} params</span>
-                              {preset.tags.slice(0, 3).map((tag) => (
-                                <span key={`${preset.id}:${tag}`}>#{tag}</span>
-                              ))}
-                            </div>
-
-                            {preset.note ? <p>{preset.note}</p> : null}
-                          </button>
-                        )
-                      })}
-                    </div>
-                  </section>
-                ))}
-              </div>
-            ) : (
-              <p className="telemetry-note">No presets are defined in the current firmware metadata bundle yet.</p>
-            )}
-
-            {selectedPreset ? (
-              <div className="preset-selected">
-                <div className="telemetry-header">
-                  <div>
-                    <h3>{selectedPreset.label}</h3>
-                    <p>{selectedPreset.description}</p>
-                  </div>
-                  <div className="preset-selected__badges">
-                    <StatusBadge tone="neutral">{selectedPreset.groupDefinition.label}</StatusBadge>
-                    <StatusBadge tone={toneForPresetApplicability(selectedPresetApplicability.status)}>
-                      {selectedPresetApplicability.status}
-                    </StatusBadge>
-                  </div>
-                </div>
-
-                <div className="telemetry-metric-grid">
-                  <article className="telemetry-metric-card">
-                    <span>Touched params</span>
-                    <strong>{selectedPreset.values.length}</strong>
-                  </article>
-                  <article className="telemetry-metric-card">
-                    <span>Changed on live</span>
-                    <strong>{selectedPresetChangedEntries.length}</strong>
-                  </article>
-                  <article className="telemetry-metric-card">
-                    <span>Already matched</span>
-                    <strong>{selectedPresetDiff?.unchangedCount ?? 0}</strong>
-                  </article>
-                  <article className="telemetry-metric-card">
-                    <span>Unknown on live</span>
-                    <strong>{selectedPresetDiff?.unknownParameterIds.length ?? 0}</strong>
-                  </article>
-                </div>
-
-                <div className="config-pills">
-                  <span>{selectedPreset.groupDefinition.label}</span>
-                  {selectedPreset.tags.map((tag) => (
-                    <span key={`${selectedPreset.id}:tag:${tag}`}>#{tag}</span>
-                  ))}
-                </div>
-
-                {selectedPreset.note ? <p className="snapshot-selected__note">{selectedPreset.note}</p> : null}
-
-                {selectedPreset.prerequisites && selectedPreset.prerequisites.length > 0 ? (
-                  <div className="preset-notes">
-                    <strong>Before you apply</strong>
-                    <ul className="output-note-list">
-                      {selectedPreset.prerequisites.map((item) => (
-                        <li key={`${selectedPreset.id}:prereq:${item}`}>{item}</li>
-                      ))}
-                    </ul>
-                  </div>
-                ) : null}
-
-                {selectedPresetApplicability.reasons.length > 0 ? (
-                  <div
-                    className={`parameter-follow-up${
-                      selectedPresetApplicability.status === 'blocked' ? ' parameter-follow-up--warning' : ''
-                    }`}
-                  >
-                    <StatusBadge tone={toneForPresetApplicability(selectedPresetApplicability.status)}>
-                      {selectedPresetApplicability.status}
-                    </StatusBadge>
-                    <p>{selectedPresetApplicability.reasons.join(' ')}</p>
-                  </div>
-                ) : null}
-
-                {selectedPreset.cautions && selectedPreset.cautions.length > 0 ? (
-                  <div className="preset-notes">
-                    <strong>Cautions</strong>
-                    <ul className="output-note-list">
-                      {selectedPreset.cautions.map((item) => (
-                        <li key={`${selectedPreset.id}:caution:${item}`}>{item}</li>
-                      ))}
-                    </ul>
-                  </div>
-                ) : null}
-
-                {selectedPresetDiff && selectedPresetDiff.unknownParameterIds.length > 0 ? (
-                  <div className="parameter-follow-up parameter-follow-up--warning">
-                    <StatusBadge tone="warning">partial</StatusBadge>
-                    <p>
-                      {selectedPresetDiff.unknownParameterIds.length} preset parameter(s) do not exist in the current live metadata set and will be
-                      ignored.
-                    </p>
-                  </div>
-                ) : null}
-
-                {selectedPresetChangedEntries.length > 0 ? (
-                  <div className="parameter-diff-grid">
-                    {selectedPresetDiffGroups.map((group) => (
-                      <section key={group.category} className="parameter-diff-group">
-                        <header>
-                          <strong>{formatCategoryLabel(group.category)}</strong>
-                          <span>{group.entries.length} changed</span>
-                        </header>
-
-                        {group.entries.map((draft) => (
-                          <div key={draft.id} className="parameter-diff-item">
-                            <span>
-                              <strong>{draft.id}</strong>
-                              <small>{draft.label}</small>
-                            </span>
-                            <span className="parameter-diff-values">
-                              {formatParameterValue(draft.currentValue, draft.definition?.unit)} to{' '}
-                              {formatParameterValue(draft.nextValue, draft.definition?.unit)}
-                            </span>
-                            <span className="parameter-diff-delta">{formatParameterDelta(draft.delta, draft.definition?.unit)}</span>
-                          </div>
-                        ))}
-                      </section>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="telemetry-note">
-                    This preset already matches the currently synced values, so there is nothing to apply right now.
-                  </p>
-                )}
-
-                {selectedPresetInvalidEntries.length > 0 ? (
-                  <div className="parameter-diff-grid parameter-diff-grid--invalid">
-                    <section className="parameter-diff-group parameter-diff-group--invalid">
-                      <header>
-                        <strong>Invalid preset values</strong>
-                        <span>{selectedPresetInvalidEntries.length} blocked</span>
-                      </header>
-
-                      {selectedPresetInvalidEntries.map((draft) => (
-                        <div key={draft.id} className="parameter-diff-item">
-                          <span>
-                            <strong>{draft.id}</strong>
-                            <small>{draft.label}</small>
-                          </span>
-                          <span className="parameter-diff-values">{draft.rawValue || 'Empty draft'}</span>
-                          <span className="parameter-diff-delta">{draft.reason ?? 'Invalid value'}</span>
-                        </div>
-                      ))}
-                    </section>
-                  </div>
-                ) : null}
-
-                <div className="parameter-follow-up parameter-follow-up--warning">
-                  <StatusBadge tone="warning">backup</StatusBadge>
-                  <p>
-                    Applying a preset writes only the diff shown above, verifies every write, and automatically captures a pre-apply snapshot in the
-                    Snapshots library before sending anything to the controller.
-                  </p>
-                </div>
-
-                <label className="snapshot-restore-ack">
-                  <input
-                    data-testid="preset-apply-ack"
-                    type="checkbox"
-                    checked={presetApplyAcknowledged}
-                    onChange={(event) => setPresetApplyAcknowledged(event.target.checked)}
-                    disabled={busyAction !== undefined || selectedPresetChangedEntries.length === 0}
-                  />
-                  <span>I reviewed this preset diff and want ArduConfigurator to capture a backup and apply these changes to the live controller.</span>
-                </label>
-
-                <div className="switch-exercise-controls">
-                  <button
-                    data-testid="apply-preset-button"
-                    style={buttonStyle('primary')}
-                    onClick={() => void handleApplySelectedPreset()}
-                    disabled={
-                      busyAction !== undefined ||
-                      selectedPresetChangedEntries.length === 0 ||
-                      selectedPresetInvalidEntries.length > 0 ||
-                      selectedPresetApplicability.status === 'blocked' ||
-                      !presetApplyAcknowledged ||
-                      !canApplyDraftParameters
-                    }
-                  >
-                    {busyAction === 'presets:apply' ? 'Applying…' : `Apply Preset (${selectedPresetChangedEntries.length})`}
-                  </button>
-                  <button
-                    style={buttonStyle()}
-                    onClick={handleStageSelectedPresetDiff}
-                    disabled={
-                      busyAction !== undefined ||
-                      selectedPresetChangedEntries.length === 0 ||
-                      selectedPresetApplicability.status === 'blocked'
-                    }
-                  >
-                    Load as Manual Tuning Draft
-                  </button>
-                </div>
-              </div>
-            ) : null}
-
-            <p className="telemetry-note">
-              Presets are designed to stay explainable and reversible. They are not broad tune dumps, and they intentionally stop at the first small
-              set of flight-feel and rate/expo controls.
-            </p>
-          </div>
-        </Panel>
-      </section>
+      <PresetsView
+        headerTone={toneForPresetApplicability(selectedPresetApplicability.status)}
+        headerBadgeLabel={
+          selectedPresetInvalidEntries.length > 0
+            ? `${selectedPresetInvalidEntries.length} invalid`
+            : selectedPresetChangedEntries.length > 0
+              ? `${selectedPresetChangedEntries.length} diff`
+              : `${presetDefinitions.length} presets`
+        }
+        notice={presetNotice ? { tone: presetNotice.tone, toneLabel: presetNotice.tone, text: presetNotice.text } : null}
+        followUp={parameterFollowUp ? { requiresReboot: parameterFollowUp.requiresReboot, text: parameterFollowUp.text } : null}
+        familiesCount={presetGroups.length}
+        totalCount={presetDefinitions.length}
+        changedCount={selectedPresetDiff?.changedCount ?? 0}
+        autoBackupCount={savedSnapshots.filter((snapshotEntry) => snapshotEntry.tags.includes('auto-backup')).length}
+        groups={presetGroups.map((group): PresetsGroup => ({
+          id: group.id,
+          label: group.label,
+          description: group.description,
+          cardCount: metadataCatalog.presetsByGroup[group.id]?.length ?? 0,
+          cards: (metadataCatalog.presetsByGroup[group.id] ?? []).map((preset): PresetsCard => {
+            const preview = presetPreviewById.get(preset.id)
+            const isActive = preset.id === selectedPreset?.id
+            const cardChangedCount = preview?.diff.changedCount ?? 0
+            const cardInvalidCount = deriveParameterDraftEntries(snapshot.parameters, preview?.diff.draftValues ?? {}).filter(
+              (entry) => entry.status === 'invalid'
+            ).length
+            return {
+              id: preset.id,
+              label: preset.label,
+              description: preset.description,
+              paramCount: preset.values.length,
+              tags: preset.tags ?? [],
+              note: preset.note,
+              changedCount: cardChangedCount,
+              invalidCount: cardInvalidCount,
+              badgeLabel:
+                cardInvalidCount > 0
+                  ? `${cardInvalidCount} invalid`
+                  : preview?.applicability.status === 'blocked'
+                    ? 'blocked'
+                    : cardChangedCount > 0
+                      ? `${cardChangedCount} diff`
+                      : 'matches',
+              badgeTone:
+                cardInvalidCount > 0
+                  ? 'danger'
+                  : preview
+                    ? toneForPresetApplicability(preview.applicability.status)
+                    : 'neutral',
+              isActive
+            }
+          })
+        }))}
+        selected={selectedPreset ? {
+          label: selectedPreset.label,
+          description: selectedPreset.description,
+          groupLabel: selectedPreset.groupDefinition.label,
+          applicabilityStatus: selectedPresetApplicability.status,
+          applicabilityTone: toneForPresetApplicability(selectedPresetApplicability.status),
+          applicabilityReasons: selectedPresetApplicability.reasons,
+          paramCount: selectedPreset.values.length,
+          changedCount: selectedPresetChangedEntries.length,
+          unchangedCount: selectedPresetDiff?.unchangedCount ?? 0,
+          unknownCount: selectedPresetDiff?.unknownParameterIds.length ?? 0,
+          tags: selectedPreset.tags ?? [],
+          note: selectedPreset.note,
+          prerequisites: selectedPreset.prerequisites ?? [],
+          cautions: selectedPreset.cautions ?? [],
+          diffGroups: selectedPresetDiffGroups.map((group) => ({
+            category: group.category,
+            categoryLabel: formatCategoryLabel(group.category),
+            changedCount: group.entries.length,
+            entries: group.entries.map((draft) => ({
+              id: draft.id,
+              label: draft.label,
+              fromToText: `${formatParameterValue(draft.currentValue, draft.definition?.unit)} to ${formatParameterValue(draft.nextValue, draft.definition?.unit)}`,
+              deltaText: formatParameterDelta(draft.delta, draft.definition?.unit)
+            }))
+          })),
+          invalidEntries: selectedPresetInvalidEntries.map((draft) => ({
+            id: draft.id,
+            label: draft.label,
+            rawValue: draft.rawValue,
+            reason: draft.reason ?? 'Invalid value'
+          }))
+        } : null}
+        applyAcknowledged={presetApplyAcknowledged}
+        onAcknowledgedChange={setPresetApplyAcknowledged}
+        onSelectPreset={setSelectedPresetId}
+        onApplyPreset={() => void handleApplySelectedPreset()}
+        onStageDraft={handleStageSelectedPresetDiff}
+        isApplying={busyAction === 'presets:apply'}
+        isBusy={busyAction !== undefined}
+        canApply={canApplyDraftParameters}
+        applicabilityBlocked={selectedPresetApplicability.status === 'blocked'}
+        hasChanges={selectedPresetChangedEntries.length > 0}
+        hasInvalid={selectedPresetInvalidEntries.length > 0}
+      />
       ) : null}
 
       {activeViewId === 'parameters' ? (
