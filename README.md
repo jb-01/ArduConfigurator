@@ -11,6 +11,12 @@ The project is aiming at the same category as `app.betaflight.com`, but for Ardu
 
 ## UI Preview
 
+Pre-connect landing:
+
+![ArduConfigurator disconnected landing](docs/images/configurator-landing-ui.png)
+
+Connected Setup view, with Betaflight-style header sensor row and the curated configuration sidebar:
+
 ![ArduConfigurator setup UI](docs/images/configurator-setup-ui.png)
 
 ## How This Differs
@@ -42,14 +48,21 @@ What is already real:
 - a thin Electron desktop shell that hosts the same web app over localhost, including native snapshot-library open/save/export dialogs inside the shared `Snapshots` view
 - real MAVLink v2 framing/parsing
 - shared runtime for sync, writes, guided setup, snapshots, and presets
-- guided setup now includes in-flow orientation checks, motor verification, and accelerometer calibration posture guidance instead of forcing users to hunt through the workbench manually
+- a dedicated pre-connect landing surface that hosts the transport picker, supported-board grid, and capability overview while the user has not yet attached a flight controller
+- a Betaflight-style header sensor row (gyro, accel, mag, baro, GPS, RC, rangefinder) wired to live runtime state
+- read-only OSD preview HUD that renders live flight mode, battery, attitude, and link state in their conventional FPV positions
+- dedicated `Modes` and `Failsafe` views that summarize FLTMODE assignments and RC/battery/advanced failsafe configuration in one place each
+- guided setup with in-flow orientation checks, motor verification, and accelerometer calibration posture guidance
 - live FC validation in the browser for `Ports`, `Receiver`, `Outputs`, `Snapshots`, `Presets`, and guarded motor test
 - live FC validation for accelerometer calibration startup and first-pose progression, with QGroundControl-derived posture reference images in the web UI
+- curated FPV tuning preset library (Cinematic Glide, Smooth Explorer, Balanced Baseline, Crisp Response, Gentle Acro, Balanced Acro, Sport Acro, Race Acro)
 - automated mock, replay-session, and true SITL validation paths
+- continuous integration on every PR running typecheck, the `node --test` unit suite, and the Playwright end-to-end suite
 
 What is still missing:
 
-- broader metadata/configuration coverage
+- broader metadata/configuration coverage (GCS / EKF failsafe, multi-firmware mode tables, full per-element OSD parameter coverage)
+- multi-firmware support beyond ArduCopter (Plane/Rover mode labels and curated views)
 - packaging/distribution for the desktop shell
 - release automation and packaged desktop artifacts
 
@@ -61,9 +74,13 @@ Primary views today:
 
 - `Setup`
 - `Ports`
+- `VTX`
+- `OSD`
 - `Receiver`
+- `Modes`
 - `Outputs`
 - `Power`
+- `Failsafe`
 - `Snapshots`
 - `Tuning`
 - `Presets`
@@ -73,7 +90,7 @@ The current tuning scope is intentionally narrow and curated. The main product f
 
 ## Workspace Layout
 
-- `apps/web`: browser UI
+- `apps/web`: browser UI, including `apps/web/src/views/` for the per-view components (`Modes`, `Failsafe`, `Vtx`, `Osd`, `Power`, `Presets`, `Outputs`) and `ScopedField` shared editor helper
 - `apps/desktop`: thin Electron shell plus native adapters, CLI/runtime tooling, and SITL/live validation entrypoints
 - `packages/transport`: transport adapters including mock, Web Serial, WebSocket, and replay
 - `packages/protocol-mavlink`: MAVLink codec and session layer
@@ -81,7 +98,7 @@ The current tuning scope is intentionally narrow and curated. The main product f
 - `packages/param-metadata`: metadata catalog, grouped views, curated parameter coverage
 - `packages/mock-sitl`: deterministic mock runtime harness
 - `packages/sitl-harness`: true ArduPilot SITL launch/attach utilities
-- `tests`: integration and regression tests against built packages
+- `tests`: integration and regression tests against built packages, including the Playwright end-to-end suite under `tests/e2e`
 
 ## Quick Start
 
@@ -116,10 +133,16 @@ Run typecheck:
 npm run typecheck
 ```
 
-Run the full automated suite:
+Run the unit suite:
 
 ```bash
 npm run test
+```
+
+Run the Playwright end-to-end suite (builds the workspace, starts the preview server and the demo WebSocket bridge, runs the browser tests):
+
+```bash
+npm run test:e2e
 ```
 
 Run true SITL validation with a local ArduPilot checkout:
@@ -132,10 +155,11 @@ ARDUPILOT_REPO_PATH=/path/to/ardupilot npm run test:sitl
 
 - Mock runtime: fast regression coverage without hardware
 - Replay transport: deterministic recorded-session validation without a live FC or SITL process
+- Playwright end-to-end: browser-level regression coverage against the demo transport and the bundled WebSocket bridge, exercised in CI on every PR
 - True SITL: direct-binary ArduPilot validation for real write/readback behavior
 - Live FC: browser `Web Serial` and desktop runtime validation against actual hardware
 
-Use the mock runtime, replay transport, true SITL, and live FC paths above as the validation ladder for changes, starting with the lowest-risk option that can prove the behavior.
+Use the mock runtime, replay transport, Playwright e2e, true SITL, and live FC paths above as the validation ladder for changes, starting with the lowest-risk option that can prove the behavior.
 
 ## Safety
 
