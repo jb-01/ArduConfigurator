@@ -131,6 +131,7 @@ import { DisconnectedLanding } from './disconnected-landing'
 import { ModesView } from './views/Modes'
 import { FailsafeView, type FailsafeViewRow } from './views/Failsafe'
 import { VtxView } from './views/Vtx'
+import { OsdView } from './views/Osd'
 import {
   loadStoredProvisioningProfiles,
   persistProvisioningProfiles,
@@ -11104,241 +11105,69 @@ export function App() {
         ) : null}
 
         {activeViewId === 'osd' ? (
-      <section className="grid one-up">
-        <Panel
-          title="OSD"
-          subtitle="Use a dedicated OSD workspace while keeping the current ArduPilot capability boundary explicit."
-        >
-          <div className="bf-tab-stack">
-            <div className="bf-note">
-              <p>Assign the matching serial role in Ports first. This tab owns the pilot-facing overlay workflow after the transport path is in place.</p>
-              <p>
-                {osdLinkPorts.length > 0
-                  ? `Detected display path: ${osdLinkPorts.map((port) => `${port.label} (${port.protocolLabel})`).join(', ')}`
-                  : 'No MSP / DisplayPort OSD link detected in current port roles.'}
-              </p>
-            </div>
-
-            <div className="bf-osd-grid">
-              <article className="bf-gui-box bf-osd-grid__left">
-                <div className="bf-gui-box__titlebar">
-                  <strong>Elements / Backend</strong>
-                </div>
-                <div className="bf-gui-box__body">
-                  <p className="setup-gui-box__note">ArduPilot currently exposes backend, page channel, and switching mode first. A fuller selectable element list still needs broader OSD metadata coverage.</p>
-                  <div className="bf-compact-field-grid">
-                    {osdTypeParameter ? (
-                      <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(osdTypeParameter.id)?.status ?? 'unchanged'}`}>
-                        <span>{osdTypeParameter.definition?.label ?? osdTypeParameter.id}</span>
-                        <select
-                          value={editedValues[osdTypeParameter.id] ?? String(osdType ?? '')}
-                          onChange={(event) =>
-                            setEditedValues((existing) => ({
-                              ...existing,
-                              [osdTypeParameter.id]: event.target.value
-                            }))
-                          }
-                        >
-                          {(osdTypeParameter.definition?.options ?? []).map((valueOption) => (
-                            <option key={`${osdTypeParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                              {valueOption.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    ) : null}
-
-                    {osdChannelParameter ? (
-                      <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(osdChannelParameter.id)?.status ?? 'unchanged'}`}>
-                        <span>{osdChannelParameter.definition?.label ?? osdChannelParameter.id}</span>
-                        <select
-                          value={editedValues[osdChannelParameter.id] ?? String(osdChannel ?? '')}
-                          onChange={(event) =>
-                            setEditedValues((existing) => ({
-                              ...existing,
-                              [osdChannelParameter.id]: event.target.value
-                            }))
-                          }
-                        >
-                          {(osdChannelParameter.definition?.options ?? []).map((valueOption) => (
-                            <option key={`${osdChannelParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                              {valueOption.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    ) : null}
-
-                    {osdSwitchMethodParameter ? (
-                      <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(osdSwitchMethodParameter.id)?.status ?? 'unchanged'}`}>
-                        <span>{osdSwitchMethodParameter.definition?.label ?? osdSwitchMethodParameter.id}</span>
-                        <select
-                          value={editedValues[osdSwitchMethodParameter.id] ?? String(osdSwitchMethod ?? '')}
-                          onChange={(event) =>
-                            setEditedValues((existing) => ({
-                              ...existing,
-                              [osdSwitchMethodParameter.id]: event.target.value
-                            }))
-                          }
-                        >
-                          {(osdSwitchMethodParameter.definition?.options ?? []).map((valueOption) => (
-                            <option key={`${osdSwitchMethodParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                              {valueOption.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    ) : null}
-                  </div>
-                </div>
-              </article>
-
-              <article className="bf-gui-box bf-osd-grid__center">
-                <div className="bf-gui-box__titlebar">
-                  <strong>Preview</strong>
-                </div>
-                <div className="bf-gui-box__body">
-                  <div className="bf-osd-preview-toolbar">
-                    <span>Backend {formatArducopterOsdType(osdType)}</span>
-                    <span>Switching {formatArducopterOsdSwitchMethod(osdSwitchMethod)}</span>
-                    <span>Cells {formatArducopterMspOsdCellCount(mspOsdCellCount)}</span>
-                  </div>
-                  <div className="bf-osd-preview-screen">
-                    <div className="bf-osd-preview-screen__hud">
-                      <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--top-left">
-                        LINK {osdLinkPorts.length > 0 ? osdLinkPorts[0]?.label : 'NONE'}
-                      </span>
-                      <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--top-center">
-                        {snapshot.vehicle?.flightMode ?? 'STABILIZE'}
-                      </span>
-                      <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--top-right">
-                        {formatArducopterOsdType(osdType)}
-                      </span>
-                      <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--mid-left">
-                        ALT {(snapshot.liveVerification.globalPosition.relativeAltitudeM ?? snapshot.liveVerification.globalPosition.altitudeM)?.toFixed(1) ?? '0.0'}m
-                      </span>
-                      <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--center" aria-hidden="true">+</span>
-                      <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--mid-right">
-                        HDG {snapshot.liveVerification.attitudeTelemetry.yawDeg !== undefined ? Math.round(((snapshot.liveVerification.attitudeTelemetry.yawDeg % 360) + 360) % 360) : 0}&deg;
-                      </span>
-                      <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--bottom-left">
-                        BAT {snapshot.liveVerification.batteryTelemetry.voltageV !== undefined ? `${formatVoltage(snapshot.liveVerification.batteryTelemetry.voltageV)}` : '0.0 V'}
-                      </span>
-                      <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--bottom-center">
-                        {formatArducopterMspOsdCellCount(mspOsdCellCount)}
-                      </span>
-                      <span className="bf-osd-preview-screen__item bf-osd-preview-screen__item--bottom-right">
-                        RSSI {snapshot.liveVerification.rcInput.rssi ?? 0}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="bf-osd-preview-footer">
-                    <StatusBadge tone="neutral">read-only preview</StatusBadge>
-                    <p>Live battery, attitude, and link telemetry render here. Element positions are illustrative until per-element OSD parameters are wired through.</p>
-                  </div>
-                </div>
-              </article>
-
-              <article className="bf-gui-box bf-osd-grid__right">
-                <div className="bf-gui-box__titlebar">
-                  <strong>MSP / DisplayPort</strong>
-                </div>
-                <div className="bf-gui-box__body">
-                  <div className="config-pills">
-                    {osdLinkPorts.length > 0
-                      ? osdLinkPorts.map((port) => <span key={`osd-tab-link:${port.portNumber}`}>{port.label}: {port.protocolLabel}</span>)
-                      : <span>No active display link</span>}
-                    {mspOptionsParameter ? <span>MSP options: {describeBitmaskSelections(mspOptions, ARDUCOPTER_MSP_OPTION_BIT_LABELS, 'No special options')}</span> : null}
-                  </div>
-
-                  {mspOsdCellCountParameter ? (
-                    <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(mspOsdCellCountParameter.id)?.status ?? 'unchanged'}`}>
-                      <span>{mspOsdCellCountParameter.definition?.label ?? mspOsdCellCountParameter.id}</span>
-                      <select
-                        value={editedValues[mspOsdCellCountParameter.id] ?? String(mspOsdCellCount ?? '')}
-                        onChange={(event) =>
-                          setEditedValues((existing) => ({
-                            ...existing,
-                            [mspOsdCellCountParameter.id]: event.target.value
-                          }))
-                        }
-                      >
-                        {(mspOsdCellCountParameter.definition?.options ?? []).map((valueOption) => (
-                          <option key={`${mspOsdCellCountParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                            {valueOption.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  ) : null}
-
-                  {mspOptionsParameter ? (
-                    <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(mspOptionsParameter.id)?.status ?? 'unchanged'}`}>
-                      <span>{mspOptionsParameter.definition?.label ?? mspOptionsParameter.id}</span>
-                      <div className="scoped-checkbox-list">
-                        {Object.entries(ARDUCOPTER_MSP_OPTION_BIT_LABELS).map(([bit, label]) => {
-                          const numericBit = Number(bit)
-                          return (
-                            <label key={`${mspOptionsParameter.id}:${bit}`} className="scoped-checkbox-option">
-                              <input
-                                type="checkbox"
-                                checked={hasBitmaskFlag(editedMspOptions, numericBit)}
-                                onChange={(event) =>
-                                  setEditedValues((existing) => {
-                                    const currentValue = normalizeBitmaskValue(existing[mspOptionsParameter.id], mspOptions)
-                                    const nextValue = event.target.checked
-                                      ? currentValue | (1 << numericBit)
-                                      : currentValue & ~(1 << numericBit)
-
-                                    return {
-                                      ...existing,
-                                      [mspOptionsParameter.id]: String(nextValue)
-                                    }
-                                  })
-                                }
-                              />
-                              <span>{label}</span>
-                            </label>
-                          )
-                        })}
-                      </div>
-                      <small>
-                        {parameterDraftById.get(mspOptionsParameter.id)?.status === 'staged'
-                          ? `Staged ${describeBitmaskSelections(parameterDraftById.get(mspOptionsParameter.id)?.nextValue, ARDUCOPTER_MSP_OPTION_BIT_LABELS, 'No special options')}`
-                          : parameterDraftById.get(mspOptionsParameter.id)?.reason ??
-                            `Current ${describeBitmaskSelections(mspOptions, ARDUCOPTER_MSP_OPTION_BIT_LABELS, 'No special options')}`}
-                      </small>
-                    </label>
-                  ) : null}
-                </div>
-              </article>
-            </div>
-
-            <div className="bf-toolbar">
-              <div className="bf-toolbar__status">
-                <span>{osdStagedDrafts.length} staged</span>
-                <span>{osdInvalidDrafts.length} invalid</span>
-              </div>
-              <button
-                type="button"
-                style={buttonStyle('primary')}
-                onClick={() => void handleApplyScopedParameterDrafts(osdDraftEntries, 'osd:apply', 'OSD')}
-                disabled={busyAction !== undefined || osdStagedDrafts.length === 0 || osdInvalidDrafts.length > 0 || !canApplyDraftParameters}
-              >
-                {busyAction === 'osd:apply' ? 'Applying…' : `Save OSD (${osdStagedDrafts.length})`}
-              </button>
-              <button
-                type="button"
-                style={buttonStyle()}
-                onClick={() => handleDiscardScopedParameterDrafts(osdDraftEntries.map((entry) => entry.id), 'OSD')}
-                disabled={busyAction !== undefined || osdDraftEntries.length === 0}
-              >
-                Revert
-              </button>
-            </div>
-          </div>
-        </Panel>
-      </section>
+        <OsdView
+          linkPorts={osdLinkPorts}
+          typeField={osdTypeParameter ? { parameter: osdTypeParameter, liveValue: osdType } : undefined}
+          channelField={osdChannelParameter ? { parameter: osdChannelParameter, liveValue: osdChannel } : undefined}
+          switchMethodField={osdSwitchMethodParameter ? { parameter: osdSwitchMethodParameter, liveValue: osdSwitchMethod } : undefined}
+          previewToolbar={{
+            backendText: `Backend ${formatArducopterOsdType(osdType)}`,
+            switchingText: `Switching ${formatArducopterOsdSwitchMethod(osdSwitchMethod)}`,
+            cellsText: `Cells ${formatArducopterMspOsdCellCount(mspOsdCellCount)}`
+          }}
+          previewHud={{
+            linkText: `LINK ${osdLinkPorts.length > 0 ? osdLinkPorts[0]?.label ?? 'NONE' : 'NONE'}`,
+            flightModeText: snapshot.vehicle?.flightMode ?? 'STABILIZE',
+            backendText: formatArducopterOsdType(osdType),
+            altitudeText: `ALT ${(snapshot.liveVerification.globalPosition.relativeAltitudeM ?? snapshot.liveVerification.globalPosition.altitudeM)?.toFixed(1) ?? '0.0'}m`,
+            headingText: `HDG ${snapshot.liveVerification.attitudeTelemetry.yawDeg !== undefined ? Math.round(((snapshot.liveVerification.attitudeTelemetry.yawDeg % 360) + 360) % 360) : 0}°`,
+            batteryText: `BAT ${snapshot.liveVerification.batteryTelemetry.voltageV !== undefined ? formatVoltage(snapshot.liveVerification.batteryTelemetry.voltageV) : '0.0 V'}`,
+            cellsText: formatArducopterMspOsdCellCount(mspOsdCellCount),
+            rssiText: `RSSI ${snapshot.liveVerification.rcInput.rssi ?? 0}`
+          }}
+          mspConfigPills={(() => {
+            const pills: string[] = osdLinkPorts.map((port) => `${port.label}: ${port.protocolLabel}`)
+            if (mspOptionsParameter) {
+              pills.push(`MSP options: ${describeBitmaskSelections(mspOptions, ARDUCOPTER_MSP_OPTION_BIT_LABELS, 'No special options')}`)
+            }
+            return pills
+          })()}
+          cellCountField={mspOsdCellCountParameter ? { parameter: mspOsdCellCountParameter, liveValue: mspOsdCellCount } : undefined}
+          mspOptionsField={mspOptionsParameter ? {
+            parameter: mspOptionsParameter,
+            bits: Object.entries(ARDUCOPTER_MSP_OPTION_BIT_LABELS).map(([bitString, label]) => {
+              const bit = Number(bitString)
+              return { bit, label, isChecked: hasBitmaskFlag(editedMspOptions, bit) }
+            }),
+            captionText: (() => {
+              const draft = parameterDraftById.get(mspOptionsParameter.id)
+              if (draft?.status === 'staged') {
+                return `Staged ${describeBitmaskSelections(draft.nextValue, ARDUCOPTER_MSP_OPTION_BIT_LABELS, 'No special options')}`
+              }
+              return draft?.reason ?? `Current ${describeBitmaskSelections(mspOptions, ARDUCOPTER_MSP_OPTION_BIT_LABELS, 'No special options')}`
+            })(),
+            onToggleBit: (bit, on) => {
+              setEditedValues((existing) => {
+                const currentValue = normalizeBitmaskValue(existing[mspOptionsParameter.id], mspOptions)
+                const nextValue = on ? currentValue | (1 << bit) : currentValue & ~(1 << bit)
+                return { ...existing, [mspOptionsParameter.id]: String(nextValue) }
+              })
+            }
+          } : undefined}
+          editedValues={editedValues}
+          onEditChange={(paramId, value) =>
+            setEditedValues((existing) => ({ ...existing, [paramId]: value }))
+          }
+          draftStatusById={parameterDraftById}
+          stagedCount={osdStagedDrafts.length}
+          invalidCount={osdInvalidDrafts.length}
+          draftCount={osdDraftEntries.length}
+          canApply={canApplyDraftParameters}
+          isApplying={busyAction === 'osd:apply'}
+          isBusy={busyAction !== undefined}
+          onApply={() => void handleApplyScopedParameterDrafts(osdDraftEntries, 'osd:apply', 'OSD')}
+          onRevert={() => handleDiscardScopedParameterDrafts(osdDraftEntries.map((entry) => entry.id), 'OSD')}
+        />
         ) : null}
 
 	      {(activeViewId === 'receiver' || activeViewId === 'modes' || activeViewId === 'power') ? (
