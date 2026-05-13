@@ -48,12 +48,14 @@ async function completeAccelerometerCalibrationFromSetup(page: Page): Promise<vo
 }
 
 test.describe('browser configurator regression flows', () => {
-  test('setup actions explain when they are blocked', async ({ page }) => {
+  test('disconnected landing replaces the Setup view pre-connect', async ({ page }) => {
     await page.goto('/')
 
-    await expect(page.getByRole('heading', { name: 'Setup' })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Calibrate Accelerometer' })).toBeDisabled()
-    await expect(page.getByText('Connect to a vehicle first.').first()).toBeVisible()
+    // The DisconnectedLanding screen now covers the Setup surface pre-connect,
+    // so Setup actions like Calibrate Accelerometer should not be reachable from the main content.
+    await expect(page.getByTestId('disconnected-landing')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Calibrate Accelerometer' })).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Configure your ArduPilot flight controller.' })).toBeVisible()
   })
 
   test('setup overview shows the inline accelerometer pose guide while calibration is active', async ({ page }) => {
@@ -107,6 +109,9 @@ test.describe('browser configurator regression flows', () => {
     await connectToVehicle(page, 'demo')
 
     await openView(page, 'outputs')
+    // The demo's recommendedOutputTaskId resolves to esc-protocol; the motor-test sliders
+    // live under the direction-test task, so navigate there explicitly first.
+    await page.getByTestId('outputs-summary-direction-test').click()
     await page.getByLabel('All propellers are removed.').check()
     await page.getByLabel('The vehicle is restrained and the test area is clear.').check()
     await page.getByTestId('motor-test-sliders').getByText('ALL', { exact: true }).click()
@@ -154,6 +159,7 @@ test.describe('browser configurator regression flows', () => {
     await connectToVehicle(page, 'demo')
 
     await openView(page, 'outputs')
+    await page.getByTestId('outputs-summary-direction-test').click()
     await page.getByLabel('All propellers are removed.').check()
     await page.getByLabel('The vehicle is restrained and the test area is clear.').check()
     await page.getByTestId('motor-test-sliders').getByRole('button', { name: 'Test' }).click()
@@ -223,7 +229,9 @@ test.describe('browser configurator regression flows', () => {
     await openView(page, 'osd')
     await expectWorkspaceViewTitle(page, 'OSD')
     await expect(page.getByText('Preview', { exact: true })).toBeVisible()
-    await expect(page.getByText('Drag-and-drop editor pending')).toBeVisible()
+    // PR #5 replaced the "Drag-and-drop editor pending" placeholder with a live
+    // read-only HUD preview surfaced under a neutral "read-only preview" badge.
+    await expect(page.getByText('read-only preview', { exact: true })).toBeVisible()
 
     await openView(page, 'receiver')
     await expect(page.getByText('Live monitor')).toBeVisible()
