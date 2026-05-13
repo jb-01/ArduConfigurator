@@ -1,25 +1,88 @@
 # Security Policy
 
+## About This Repository
+
+`jaw07/ArduConfigurator` is a personal fork of
+[`GeneralTrajectory/ArduConfigurator`](https://github.com/GeneralTrajectory/ArduConfigurator).
+This policy applies to code that lives in this fork. If a vulnerability also exists
+upstream, please consider filing it there as well so other downstreams can pick up the
+fix.
+
+This is a configurator for **real flight controllers**. The browser tab can open serial
+or USB connections to live hardware, read calibration and parameter state, and write
+changes back. That means certain classes of issue matter more here than in a typical
+web app:
+
+- credential or telemetry leakage from a connected flight controller
+- unintended or unconfirmed writes to a live FC (parameter, mode, output, or arming state)
+- misleading UI that could plausibly induce an unsafe in-field configuration
+- transport / framing bugs that could corrupt parameter writes mid-stream
+- code paths that bypass the project's "verify after write" or snapshot guards
+
+If you have found something that falls in or near those categories, please treat it as a
+security report rather than a regular bug.
+
+## Scope
+
+In scope for this policy:
+
+- code in this repository (the web app, the desktop shell, the bundled bridge, the
+  shared runtime / transport / metadata packages)
+- the published build artifacts produced from this repository
+
+Out of scope here:
+
+- vulnerabilities in the underlying **ArduPilot firmware** — those belong with the
+  ArduPilot project at <https://github.com/ArduPilot/ardupilot/security>
+- vulnerabilities in third-party dependencies that have their own disclosure channels
+  (please report to the upstream project; if you also want a heads-up filed here, that
+  is welcome but secondary)
+- issues that are specific to the original `GeneralTrajectory/ArduConfigurator` fork
+  point and have not been touched in this fork — those are better filed upstream
+
 ## Supported Versions
 
-Security fixes are currently expected to land on `main`.
-
-Because the project is still pre-1.0, treat the latest `main` branch state as the supported line unless a maintainer explicitly states otherwise.
+The project is pre-1.0 and hobbyist-maintained. The latest `main` is the supported line.
+Security fixes land on `main`; there is no LTS branch and no backport program.
 
 ## Reporting A Vulnerability
 
-Do not open a public issue for vulnerabilities that could affect connected aircraft, host machines, or user data.
+Please do **not** open a public GitHub issue, public PR, or public discussion thread for
+anything that could affect connected aircraft, host machines, or user data.
 
-Report security issues privately by either:
+Preferred channel: **GitHub private vulnerability reporting** on this repository.
 
-- using GitHub private vulnerability reporting or a draft security advisory, if enabled for the repository
-- or emailing `joshuabelofsky@gmail.com` with the subject line `[ArduConfigurator security]`
+1. Go to the [Security tab](https://github.com/jaw07/ArduConfigurator/security) of this
+   repo.
+2. Choose "Report a vulnerability".
+3. File a private advisory draft. The maintainer is notified directly.
 
-When reporting, include:
+If GitHub's private reporting is unavailable to you for some reason, opening a minimal
+public issue that says only "requesting a private security contact" (with no details) is
+acceptable as a fallback.
 
-- affected component or view
-- impact and attack scenario
-- reproduction steps or proof of concept
-- whether the issue affects browser, desktop shell, bundled bridge, or shared runtime behavior
+When you report, it helps to include:
 
-We will aim to acknowledge reports promptly, reproduce the issue, and coordinate a fix before public disclosure.
+- which component or view is affected (web app, desktop shell, bridge, a specific
+  package under `packages/`, etc.)
+- the impact and a plausible attack or misuse scenario
+- reproduction steps or a proof of concept, ideally against the current `main`
+- whether the issue requires a real flight controller to be connected, or whether it
+  reproduces against the demo / replay transport
+- any suggested fix direction, if you have one
+
+## What To Expect Back
+
+This is a side-project fork maintained by one person in spare time. There is **no SLA**.
+In practical terms:
+
+- a maintainer will look at the report when time allows, usually within a couple of
+  weeks
+- you will get an acknowledgement, an assessment of whether it is in scope here vs.
+  upstream / ArduPilot, and a rough plan
+- if a fix is warranted, it will land on `main` and be called out in the commit message
+  or release notes
+- coordinated disclosure timing is fine; please do not publish full details before a fix
+  is available if the issue has real-world flight-safety impact
+
+Thanks for taking the time to report responsibly.
