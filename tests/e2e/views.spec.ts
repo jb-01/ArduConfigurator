@@ -95,3 +95,30 @@ test.describe('Failsafe view', () => {
     await expect(page.getByTestId('workspace-view-title')).toHaveText('Power')
   })
 })
+
+test.describe('Logs view', () => {
+  test('renders the logging summary table populated from the demo scenario', async ({ page }) => {
+    await page.goto('/')
+    await connectViaHeader(page)
+    await openView(page, 'logs')
+
+    await expect(page.getByTestId('workspace-view-title')).toHaveText('Logs')
+    await expect(page.getByTestId('logs-summary-table')).toBeVisible()
+
+    // Demo scenario seeds LOG_BACKEND_TYPE=1 (File) and LOG_FILE_DSRMROT=1.
+    await expect(page.getByTestId('logs-row-LOG_BACKEND_TYPE')).toContainText('File')
+    await expect(page.getByTestId('logs-row-LOG_FILE_DSRMROT')).toContainText('Enabled')
+
+    await expect(page.getByTestId('logs-go-to-parameters')).toBeVisible()
+  })
+
+  test('deep-link button navigates to Parameters view', async ({ page }) => {
+    await page.goto('/')
+    await connectViaHeader(page)
+    await openView(page, 'logs')
+
+    await page.getByTestId('logs-go-to-parameters').click()
+
+    await expect(page.getByTestId('workspace-view-title')).toHaveText('Parameters')
+  })
+})

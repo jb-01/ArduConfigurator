@@ -87,6 +87,7 @@ import {
   formatArducopterGpsPrimary,
   formatArducopterGpsRateMs,
   formatArducopterGpsType,
+  formatArducopterLogBackend,
   formatArducopterMspOsdCellCount,
   formatArducopterNotificationLedBrightness,
   formatArducopterNotificationLedOverride,
@@ -132,6 +133,7 @@ import { RateCurveGraph } from './rate-curve-graph'
 import { DisconnectedLanding } from './disconnected-landing'
 import { ModesView } from './views/Modes'
 import { FailsafeView, type FailsafeViewRow } from './views/Failsafe'
+import { LogsView, type LogsViewRow } from './views/Logs'
 import { VtxView } from './views/Vtx'
 import { OsdView } from './views/Osd'
 import { PowerView, type PowerDraftItem, type PowerFieldSpec } from './views/Power'
@@ -698,6 +700,8 @@ function viewMonogram(viewId: AppViewId): string {
       return 'PWR'
     case 'failsafe':
       return 'FS'
+    case 'logs':
+      return 'LOG'
     case 'snapshots':
       return 'SNP'
     case 'tuning':
@@ -731,6 +735,8 @@ function missionTitleForView(viewId: AppViewId): string {
       return 'Power'
     case 'failsafe':
       return 'Failsafe'
+    case 'logs':
+      return 'Logs'
     case 'snapshots':
       return 'Snapshots'
     case 'tuning':
@@ -3093,6 +3099,12 @@ export function App() {
   const notificationLedOverride = readRoundedParameter(snapshot, 'NTF_LED_OVERRIDE')
   const notificationBuzzTypes = readRoundedParameter(snapshot, 'NTF_BUZZ_TYPES')
   const notificationBuzzVolume = readRoundedParameter(snapshot, 'NTF_BUZZ_VOLUME')
+  const logBackendType = readRoundedParameter(snapshot, 'LOG_BACKEND_TYPE')
+  const logBitmask = readRoundedParameter(snapshot, 'LOG_BITMASK')
+  const logFileRotateOnDisarm = readRoundedParameter(snapshot, 'LOG_FILE_DSRMROT')
+  const logFileMbFree = readRoundedParameter(snapshot, 'LOG_FILE_MB_FREE')
+  const logReplayEnabled = readRoundedParameter(snapshot, 'LOG_REPLAY')
+  const logDisarmedEnabled = readRoundedParameter(snapshot, 'LOG_DISARMED')
   const activePreArmIssues = snapshot.preArmStatus.issues
   const configuredOutputs = [...outputMapping.motorOutputs, ...outputMapping.configuredAuxOutputs].sort(
     (left, right) => left.channelNumber - right.channelNumber
@@ -12349,6 +12361,95 @@ export function App() {
             batteryCriticalVoltage
           })}
           onOpenPower={() => setActiveViewId('power')}
+        />
+      </section>
+      ) : null}
+
+      {activeViewId === 'logs' ? (
+      <section className="grid one-up">
+        <LogsView
+          backendLabel={formatArducopterLogBackend(logBackendType)}
+          backendDetailText={
+            logBackendType === undefined
+              ? 'LOG_BACKEND_TYPE not yet retrieved from the autopilot.'
+              : `LOG_BACKEND_TYPE = ${logBackendType}.`
+          }
+          retentionLabel={
+            logFileMbFree !== undefined
+              ? `${logFileMbFree} MB reserved`
+              : 'Unknown'
+          }
+          retentionDetailText={
+            logFileRotateOnDisarm === undefined
+              ? 'LOG_FILE_DSRMROT not yet retrieved.'
+              : logFileRotateOnDisarm === 1
+                ? 'A new log file is started each disarm (LOG_FILE_DSRMROT = 1).'
+                : 'Logs continue across disarms (LOG_FILE_DSRMROT = 0).'
+          }
+          replayLabel={
+            logReplayEnabled === undefined
+              ? 'Unknown'
+              : logReplayEnabled === 1
+                ? 'Enabled'
+                : 'Disabled'
+          }
+          replayDetailText={
+            logReplayEnabled === 1
+              ? 'Replay-quality logging is on. Expect larger log files.'
+              : 'Replay logging is off. Enable only when capturing logs for offline replay.'
+          }
+          rows={(() => {
+            const formatBool = (value: number | undefined): string => {
+              if (value === undefined) return 'Unknown'
+              return value === 1 ? 'Enabled' : 'Disabled'
+            }
+            const isSynced = (id: string): boolean => editedValues[id] === undefined
+            return [
+              {
+                paramId: 'LOG_BACKEND_TYPE',
+                label: 'Log backend',
+                formatted: formatArducopterLogBackend(logBackendType),
+                isSynced: isSynced('LOG_BACKEND_TYPE')
+              },
+              {
+                paramId: 'LOG_BITMASK',
+                label: 'Message bitmask',
+                formatted:
+                  logBitmask === undefined
+                    ? 'Unknown'
+                    : `0x${(logBitmask >>> 0).toString(16).toUpperCase()}`,
+                isSynced: isSynced('LOG_BITMASK')
+              },
+              {
+                paramId: 'LOG_FILE_DSRMROT',
+                label: 'Rotate on disarm',
+                formatted: formatBool(logFileRotateOnDisarm),
+                isSynced: isSynced('LOG_FILE_DSRMROT')
+              },
+              {
+                paramId: 'LOG_FILE_MB_FREE',
+                label: 'Minimum free space (MB)',
+                formatted: logFileMbFree !== undefined ? String(logFileMbFree) : 'Unknown',
+                isSynced: isSynced('LOG_FILE_MB_FREE')
+              },
+              {
+                paramId: 'LOG_REPLAY',
+                label: 'Replay logging',
+                formatted: formatBool(logReplayEnabled),
+                isSynced: isSynced('LOG_REPLAY')
+              },
+              {
+                paramId: 'LOG_DISARMED',
+                label: 'Log while disarmed',
+                formatted: formatBool(logDisarmedEnabled),
+                isSynced: isSynced('LOG_DISARMED')
+              }
+            ] satisfies LogsViewRow[]
+          })()}
+          onOpenParameters={() => {
+            setProductMode('expert')
+            setActiveViewId('parameters')
+          }}
         />
       </section>
       ) : null}

@@ -448,28 +448,34 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       order: 9
     },
     {
+      id: 'logs',
+      label: 'Logs',
+      description: 'Onboard log backend, retention, and replay summary.',
+      order: 10
+    },
+    {
       id: 'snapshots',
       label: 'Snapshots',
       description: 'Capture, compare, and restore known-good parameter sets.',
-      order: 10
+      order: 11
     },
     {
       id: 'tuning',
       label: 'Tuning',
       description: 'Beginner-safe flight-feel and acro-rate tuning.',
-      order: 11
+      order: 12
     },
     {
       id: 'presets',
       label: 'Presets',
       description: 'Curated, explainable tuning bundles with automatic backup.',
-      order: 12
+      order: 13
     },
     {
       id: 'parameters',
       label: 'Parameters',
       description: 'Low-level parameter editing and backup work.',
-      order: 13
+      order: 14
     }
   ],
   categories: {

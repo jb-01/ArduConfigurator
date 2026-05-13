@@ -16,6 +16,7 @@ export type AppViewId =
   | 'outputs'
   | 'power'
   | 'failsafe'
+  | 'logs'
   | 'snapshots'
   | 'tuning'
   | 'presets'
