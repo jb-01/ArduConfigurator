@@ -117,6 +117,11 @@ const mspOsdNotes = [
   'If the FPV overlay is missing or garbled, verify both the serial protocol assignment and the selected OSD backend.'
 ]
 
+const osdElementNotes = [
+  'OSD element placement is measured in character cells on the active video format. Confirm the layout in goggles or on a bench display before flight.',
+  'Set the matching enable flag to 0 to hide the element entirely; the X/Y coordinates remain for when it is re-enabled.'
+]
+
 const batteryMonitorNotes = [
   'Changing the battery monitor source typically requires a reboot before live telemetry matches the new configuration.',
   'Use a live powered session to confirm that the selected battery monitor is actually producing telemetry.'
@@ -246,6 +251,63 @@ function enumOptions(labelMap: Record<number, string>): ParameterValueOption[] {
       label
     }))
     .sort((left, right) => left.value - right.value)
+}
+
+type OsdElementDescriptor = {
+  paramSuffix: string
+  label: string
+}
+
+const osdLayoutElements: readonly OsdElementDescriptor[] = [
+  { paramSuffix: 'BAT_VOLT', label: 'Battery Voltage' },
+  { paramSuffix: 'RSSI', label: 'RC RSSI' },
+  { paramSuffix: 'ALTITUDE', label: 'Altitude' },
+  { paramSuffix: 'THROTTLE', label: 'Throttle' },
+  { paramSuffix: 'CURRENT', label: 'Battery Current' }
+]
+
+function buildOsdElementParameterDefinitions(screenNumber: number): FirmwareMetadataBundle['parameters'] {
+  const definitions: FirmwareMetadataBundle['parameters'] = {}
+  const screenLabel = `OSD${screenNumber}`
+
+  for (const element of osdLayoutElements) {
+    const baseId = `${screenLabel}_${element.paramSuffix}`
+
+    definitions[`${baseId}_EN`] = {
+      id: `${baseId}_EN`,
+      label: `${screenLabel} ${element.label} Enabled`,
+      description: `Whether the ${element.label.toLowerCase()} element is drawn on ${screenLabel}.`,
+      category: 'osd',
+      minimum: 0,
+      maximum: 1,
+      notes: osdElementNotes,
+      options: enabledDisabledOptions
+    }
+
+    definitions[`${baseId}_X`] = {
+      id: `${baseId}_X`,
+      label: `${screenLabel} ${element.label} Column`,
+      description: `Horizontal character-cell position for the ${element.label.toLowerCase()} element on ${screenLabel}.`,
+      category: 'osd',
+      minimum: 0,
+      maximum: 29,
+      step: 1,
+      notes: osdElementNotes
+    }
+
+    definitions[`${baseId}_Y`] = {
+      id: `${baseId}_Y`,
+      label: `${screenLabel} ${element.label} Row`,
+      description: `Vertical character-cell position for the ${element.label.toLowerCase()} element on ${screenLabel}.`,
+      category: 'osd',
+      minimum: 0,
+      maximum: 15,
+      step: 1,
+      notes: osdElementNotes
+    }
+  }
+
+  return definitions
 }
 
 function buildSerialPortParameterDefinitions(maxPortNumber: number): FirmwareMetadataBundle['parameters'] {
@@ -830,6 +892,7 @@ export const arducopterMetadata: FirmwareMetadataBundle = {
       notes: osdSwitchNotes,
       options: enumOptions(ARDUCOPTER_OSD_SWITCH_METHOD_LABELS)
     },
+    ...buildOsdElementParameterDefinitions(1),
     MSP_OPTIONS: {
       id: 'MSP_OPTIONS',
       label: 'MSP Options',

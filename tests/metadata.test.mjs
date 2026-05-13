@@ -112,3 +112,26 @@ test('ArduPlane flight-mode labels resolve common Plane and QuadPlane modes', ()
   // The label table itself exposes the expected size for the current Plane build
   assert.equal(Object.keys(ARDUPLANE_FLIGHT_MODE_LABELS).length, 25)
 })
+
+test('metadata catalog exposes per-element OSD layout parameters on the OSD surface', () => {
+  const metadata = normalizeFirmwareMetadata(arducopterMetadata)
+
+  const batEnable = metadata.parameters.OSD1_BAT_VOLT_EN
+  assert.equal(batEnable.categoryDefinition.viewId, 'osd')
+  assert.equal(batEnable.options.length, 2)
+  assert.equal(batEnable.options[0].label, 'Disabled')
+  assert.equal(batEnable.options[1].label, 'Enabled')
+
+  assert.equal(metadata.parameters.OSD1_RSSI_X.minimum, 0)
+  assert.equal(metadata.parameters.OSD1_RSSI_X.maximum, 29)
+  assert.equal(metadata.parameters.OSD1_RSSI_Y.minimum, 0)
+  assert.equal(metadata.parameters.OSD1_RSSI_Y.maximum, 15)
+
+  for (const element of ['BAT_VOLT', 'RSSI', 'ALTITUDE', 'THROTTLE', 'CURRENT']) {
+    for (const suffix of ['EN', 'X', 'Y']) {
+      const entry = metadata.parameters[`OSD1_${element}_${suffix}`]
+      assert.ok(entry, `expected OSD1_${element}_${suffix} in catalog`)
+      assert.equal(entry.categoryDefinition.viewId, 'osd')
+    }
+  }
+})
