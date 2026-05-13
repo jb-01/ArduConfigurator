@@ -130,6 +130,7 @@ import { RateCurveGraph } from './rate-curve-graph'
 import { DisconnectedLanding } from './disconnected-landing'
 import { ModesView } from './views/Modes'
 import { FailsafeView, type FailsafeViewRow } from './views/Failsafe'
+import { VtxView } from './views/Vtx'
 import {
   loadStoredProvisioningProfiles,
   persistProvisioningProfiles,
@@ -11078,211 +11079,28 @@ export function App() {
 	      ) : null}
 
         {activeViewId === 'vtx' ? (
-      <section className="grid one-up">
-        <Panel
-          title="VTX"
-          subtitle="Use a dedicated VTX workflow while keeping the actual ArduPilot-backed controls visible and honest."
-        >
-          <div className="bf-tab-stack">
-            <div className="bf-note">
-              <p>Assign the control UART in Ports first. This tab is for transmitter-facing behavior, not the serial-role assignment itself.</p>
-              <p>
-                {vtxLinkPorts.length > 0
-                  ? `Detected control path: ${vtxLinkPorts.map((port) => `${port.label} (${port.protocolLabel})`).join(', ')}`
-                  : 'No VTX control link detected in current port roles.'}
-              </p>
-            </div>
-
-            <div className="bf-vtx-grid">
-              <article className="bf-gui-box bf-vtx-grid__config">
-                <div className="bf-gui-box__titlebar">
-                  <strong>Selected Mode</strong>
-                </div>
-                <div className="bf-gui-box__body">
-                  <div className="config-pills">
-                    {vtxEnableParameter ? <span>Control: {formatArducopterVtxEnable(vtxEnabled)}</span> : null}
-                    {vtxFrequencyParameter ? <span>Frequency: {vtxFrequency !== undefined ? `${vtxFrequency} MHz` : 'Unknown'}</span> : null}
-                    {vtxPowerParameter ? <span>Power: {vtxPower !== undefined ? `${vtxPower} mW` : 'Unknown'}</span> : null}
-                    {vtxMaxPowerParameter ? <span>Max power: {vtxMaxPower !== undefined ? `${vtxMaxPower} mW` : 'Unknown'}</span> : null}
-                  </div>
-
-                  <div className="bf-compact-field-grid">
-                    {vtxEnableParameter ? (
-                      <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(vtxEnableParameter.id)?.status ?? 'unchanged'}`}>
-                        <span>{vtxEnableParameter.definition?.label ?? vtxEnableParameter.id}</span>
-                        <select
-                          value={editedValues[vtxEnableParameter.id] ?? String(vtxEnabled ?? '')}
-                          onChange={(event) =>
-                            setEditedValues((existing) => ({
-                              ...existing,
-                              [vtxEnableParameter.id]: event.target.value
-                            }))
-                          }
-                        >
-                          {(vtxEnableParameter.definition?.options ?? []).map((valueOption) => (
-                            <option key={`${vtxEnableParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                              {valueOption.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    ) : null}
-
-                    {vtxFrequencyParameter ? (
-                      <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(vtxFrequencyParameter.id)?.status ?? 'unchanged'}`}>
-                        <span>{vtxFrequencyParameter.definition?.label ?? vtxFrequencyParameter.id}</span>
-                        <input
-                          type="number"
-                          min={vtxFrequencyParameter.definition?.minimum}
-                          max={vtxFrequencyParameter.definition?.maximum}
-                          step={vtxFrequencyParameter.definition?.step ?? 1}
-                          value={editedValues[vtxFrequencyParameter.id] ?? String(vtxFrequency ?? '')}
-                          onChange={(event) =>
-                            setEditedValues((existing) => ({
-                              ...existing,
-                              [vtxFrequencyParameter.id]: event.target.value
-                            }))
-                          }
-                        />
-                      </label>
-                    ) : null}
-
-                    {vtxPowerParameter ? (
-                      <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(vtxPowerParameter.id)?.status ?? 'unchanged'}`}>
-                        <span>{vtxPowerParameter.definition?.label ?? vtxPowerParameter.id}</span>
-                        <input
-                          type="number"
-                          min={vtxPowerParameter.definition?.minimum}
-                          max={vtxPowerParameter.definition?.maximum}
-                          step={vtxPowerParameter.definition?.step ?? 1}
-                          value={editedValues[vtxPowerParameter.id] ?? String(vtxPower ?? '')}
-                          onChange={(event) =>
-                            setEditedValues((existing) => ({
-                              ...existing,
-                              [vtxPowerParameter.id]: event.target.value
-                            }))
-                          }
-                        />
-                      </label>
-                    ) : null}
-
-                    {vtxMaxPowerParameter ? (
-                      <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(vtxMaxPowerParameter.id)?.status ?? 'unchanged'}`}>
-                        <span>{vtxMaxPowerParameter.definition?.label ?? vtxMaxPowerParameter.id}</span>
-                        <input
-                          type="number"
-                          min={vtxMaxPowerParameter.definition?.minimum}
-                          max={vtxMaxPowerParameter.definition?.maximum}
-                          step={vtxMaxPowerParameter.definition?.step ?? 1}
-                          value={editedValues[vtxMaxPowerParameter.id] ?? String(vtxMaxPower ?? '')}
-                          onChange={(event) =>
-                            setEditedValues((existing) => ({
-                              ...existing,
-                              [vtxMaxPowerParameter.id]: event.target.value
-                            }))
-                          }
-                        />
-                      </label>
-                    ) : null}
-                  </div>
-                </div>
-              </article>
-
-              <article className="bf-gui-box bf-vtx-grid__status">
-                <div className="bf-gui-box__titlebar">
-                  <strong>Actual State</strong>
-                </div>
-                <div className="bf-gui-box__body">
-                  <div className="bf-gui-box__kv-list">
-                    <div className="bf-gui-box__kv-row">
-                      <span>Device ready</span>
-                      <strong>{vtxLinkPorts.length > 0 ? 'Linked' : 'Not detected'}</strong>
-                    </div>
-                    <div className="bf-gui-box__kv-row">
-                      <span>Control</span>
-                      <strong>{formatArducopterVtxEnable(vtxEnabled)}</strong>
-                    </div>
-                    <div className="bf-gui-box__kv-row">
-                      <span>Frequency</span>
-                      <strong>{vtxFrequency !== undefined ? `${vtxFrequency} MHz` : 'Unknown'}</strong>
-                    </div>
-                    <div className="bf-gui-box__kv-row">
-                      <span>Power</span>
-                      <strong>{vtxPower !== undefined ? `${vtxPower} mW` : 'Unknown'}</strong>
-                    </div>
-                    <div className="bf-gui-box__kv-row">
-                      <span>Max power</span>
-                      <strong>{vtxMaxPower !== undefined ? `${vtxMaxPower} mW` : 'Unknown'}</strong>
-                    </div>
-                    <div className="bf-gui-box__kv-row">
-                      <span>Advanced</span>
-                      <strong>{vtxOptions !== undefined ? String(vtxOptions) : 'N/A'}</strong>
-                    </div>
-                  </div>
-                </div>
-              </article>
-
-              <article className="bf-gui-box bf-vtx-grid__advanced">
-                <div className="bf-gui-box__titlebar">
-                  <strong>VTX Table / Advanced</strong>
-                </div>
-                <div className="bf-gui-box__body">
-                  <p className="setup-gui-box__note">ArduPilot currently exposes frequency, power, max power, and an advanced options bitmask here instead of a full band/channel table.</p>
-                  <div className="bf-vtx-advanced-grid">
-                    {vtxOptionsParameter ? (
-                      <label className={`scoped-editor-field scoped-editor-field--compact scoped-editor-field--${parameterDraftById.get(vtxOptionsParameter.id)?.status ?? 'unchanged'}`}>
-                        <span>{vtxOptionsParameter.definition?.label ?? vtxOptionsParameter.id}</span>
-                        <input
-                          type="number"
-                          min={vtxOptionsParameter.definition?.minimum}
-                          max={vtxOptionsParameter.definition?.maximum}
-                          step={vtxOptionsParameter.definition?.step ?? 1}
-                          value={editedValues[vtxOptionsParameter.id] ?? String(vtxOptions ?? '')}
-                          onChange={(event) =>
-                            setEditedValues((existing) => ({
-                              ...existing,
-                              [vtxOptionsParameter.id]: event.target.value
-                            }))
-                          }
-                        />
-                        <small>Keep this exposed so the ArduPilot gap stays obvious instead of hidden.</small>
-                      </label>
-                    ) : null}
-
-                    <div className="bf-vtx-callout">
-                      <StatusBadge tone="warning">Table not available</StatusBadge>
-                      <p>When ArduPilot grows explicit VTX band/channel table support, this box should turn into a full table editor instead of staying a placeholder.</p>
-                    </div>
-                  </div>
-                </div>
-              </article>
-            </div>
-
-            <div className="bf-toolbar">
-              <div className="bf-toolbar__status">
-                <span>{vtxStagedDrafts.length} staged</span>
-                <span>{vtxInvalidDrafts.length} invalid</span>
-              </div>
-              <button
-                type="button"
-                style={buttonStyle('primary')}
-                onClick={() => void handleApplyScopedParameterDrafts(vtxDraftEntries, 'vtx:apply', 'VTX')}
-                disabled={busyAction !== undefined || vtxStagedDrafts.length === 0 || vtxInvalidDrafts.length > 0 || !canApplyDraftParameters}
-              >
-                {busyAction === 'vtx:apply' ? 'Applying…' : `Save VTX (${vtxStagedDrafts.length})`}
-              </button>
-              <button
-                type="button"
-                style={buttonStyle()}
-                onClick={() => handleDiscardScopedParameterDrafts(vtxDraftEntries.map((entry) => entry.id), 'VTX')}
-                disabled={busyAction !== undefined || vtxDraftEntries.length === 0}
-              >
-                Revert
-              </button>
-            </div>
-          </div>
-        </Panel>
-      </section>
+        <VtxView
+          linkPorts={vtxLinkPorts}
+          enabledLabel={formatArducopterVtxEnable(vtxEnabled)}
+          enableField={vtxEnableParameter ? { parameter: vtxEnableParameter, liveValue: vtxEnabled } : undefined}
+          frequencyField={vtxFrequencyParameter ? { parameter: vtxFrequencyParameter, liveValue: vtxFrequency } : undefined}
+          powerField={vtxPowerParameter ? { parameter: vtxPowerParameter, liveValue: vtxPower } : undefined}
+          maxPowerField={vtxMaxPowerParameter ? { parameter: vtxMaxPowerParameter, liveValue: vtxMaxPower } : undefined}
+          optionsField={vtxOptionsParameter ? { parameter: vtxOptionsParameter, liveValue: vtxOptions } : undefined}
+          editedValues={editedValues}
+          onEditChange={(paramId, value) =>
+            setEditedValues((existing) => ({ ...existing, [paramId]: value }))
+          }
+          draftStatusById={parameterDraftById}
+          stagedCount={vtxStagedDrafts.length}
+          invalidCount={vtxInvalidDrafts.length}
+          draftCount={vtxDraftEntries.length}
+          canApply={canApplyDraftParameters}
+          isApplying={busyAction === 'vtx:apply'}
+          isBusy={busyAction !== undefined}
+          onApply={() => void handleApplyScopedParameterDrafts(vtxDraftEntries, 'vtx:apply', 'VTX')}
+          onRevert={() => handleDiscardScopedParameterDrafts(vtxDraftEntries.map((entry) => entry.id), 'VTX')}
+        />
         ) : null}
 
         {activeViewId === 'osd' ? (
