@@ -132,6 +132,7 @@ import { ModesView } from './views/Modes'
 import { FailsafeView, type FailsafeViewRow } from './views/Failsafe'
 import { VtxView } from './views/Vtx'
 import { OsdView } from './views/Osd'
+import { PowerView, type PowerDraftItem, type PowerFieldSpec } from './views/Power'
 import {
   loadStoredProvisioningProfiles,
   persistProvisioningProfiles,
@@ -12211,433 +12212,83 @@ export function App() {
         ) : null}
 
         {activeViewId === 'power' ? (
-        <div id="setup-panel-power">
-          <Panel
-            title="Power & Failsafe"
-            subtitle="Live battery telemetry plus local review/apply controls for the key battery- and failsafe-related settings on the vehicle."
-          >
-          <div className="telemetry-stack">
-            <div className="telemetry-header">
-              <div>
-                <h3>Battery monitor</h3>
-                <p>
-                  {snapshot.liveVerification.batteryTelemetry.verified
-                    ? 'Live power telemetry is present, so battery and failsafe setup can move beyond parameter-only review.'
-                    : 'Battery monitor telemetry has not been verified yet. Keep the power train and battery sensing path active.'}
-                </p>
-              </div>
-              <StatusBadge tone={batteryHealthTone(snapshot)}>{batteryHealthLabel(snapshot)}</StatusBadge>
-            </div>
-
-            {parameterNotice ? (
-              <div className="parameter-review__notice">
-                <StatusBadge tone={parameterNotice.tone}>{parameterNotice.tone}</StatusBadge>
-                <p>{parameterNotice.text}</p>
-              </div>
-            ) : null}
-
-            <div className="telemetry-metric-grid">
-              <article className="telemetry-metric-card">
-                <span>Voltage</span>
-                <strong>{formatVoltage(snapshot.liveVerification.batteryTelemetry.voltageV)}</strong>
-              </article>
-              <article className="telemetry-metric-card">
-                <span>Current</span>
-                <strong>{formatCurrent(snapshot.liveVerification.batteryTelemetry.currentA)}</strong>
-              </article>
-              <article className="telemetry-metric-card">
-                <span>Remaining</span>
-                <strong>{formatRemaining(snapshot.liveVerification.batteryTelemetry.remainingPercent)}</strong>
-              </article>
-              <article className="telemetry-metric-card">
-                <span>Capacity</span>
-                <strong>{batteryCapacity !== undefined ? `${batteryCapacity} mAh` : 'Unknown'}</strong>
-              </article>
-            </div>
-
-            <div className="config-pills">
-              <span>Battery monitor: {describeBatteryMonitor(batteryMonitor)}</span>
-              <span>Failsafe voltage source: {formatArducopterBatteryVoltageSource(batteryVoltageSource)}</span>
-              <span>Low battery action: {formatArducopterBatteryFailsafeAction(batteryFailsafe)}</span>
-              <span>Critical battery action: {formatArducopterBatteryFailsafeAction(batteryCriticalFailsafe)}</span>
-              <span>Throttle failsafe: {formatArducopterThrottleFailsafe(throttleFailsafe)}</span>
-              <span>Throttle failsafe PWM: {throttleFailsafeValue !== undefined ? `${throttleFailsafeValue} us` : 'Unknown'}</span>
-            </div>
-
-            <div className="scoped-review-card">
-              <div className="switch-exercise-card__header">
-                <div>
-                  <strong>Power & failsafe configuration</strong>
-                  <p>
-                    Keep routine battery-monitor and failsafe changes local to this view. Apply them here, then verify live telemetry and pre-arm state
-                    before first flight.
-                  </p>
-                </div>
-                <StatusBadge tone={toneForScopedDraftReview(powerStagedDrafts.length, powerInvalidDrafts.length)}>
-                  {powerInvalidDrafts.length > 0
-                    ? `${powerInvalidDrafts.length} invalid`
-                    : powerStagedDrafts.length > 0
-                      ? `${powerStagedDrafts.length} staged`
-                      : 'in sync'}
-                </StatusBadge>
-              </div>
-
-              <div className="scoped-editor-grid">
-                {batteryMonitorParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryMonitorParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{batteryMonitorParameter.definition?.label ?? batteryMonitorParameter.id}</span>
-                    <select
-                      value={editedValues[batteryMonitorParameter.id] ?? String(batteryMonitor ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [batteryMonitorParameter.id]: event.target.value
-                        }))
-                      }
-                    >
-                      {(batteryMonitorParameter.definition?.options ?? []).map((valueOption) => (
-                        <option key={`${batteryMonitorParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                          {valueOption.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-
-                {batteryCapacityParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryCapacityParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{batteryCapacityParameter.definition?.label ?? batteryCapacityParameter.id}</span>
-                    <input
-                      type="number"
-                      min={batteryCapacityParameter.definition?.minimum}
-                      max={batteryCapacityParameter.definition?.maximum}
-                      step={batteryCapacityParameter.definition?.step ?? 1}
-                      value={editedValues[batteryCapacityParameter.id] ?? String(batteryCapacity ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [batteryCapacityParameter.id]: event.target.value
-                        }))
-                      }
-                    />
-                  </label>
-                ) : null}
-
-                {batteryArmVoltageParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryArmVoltageParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{batteryArmVoltageParameter.definition?.label ?? batteryArmVoltageParameter.id}</span>
-                    <input
-                      type="number"
-                      min={batteryArmVoltageParameter.definition?.minimum}
-                      max={batteryArmVoltageParameter.definition?.maximum}
-                      step={batteryArmVoltageParameter.definition?.step ?? 0.1}
-                      value={editedValues[batteryArmVoltageParameter.id] ?? String(batteryArmVoltage ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [batteryArmVoltageParameter.id]: event.target.value
-                        }))
-                      }
-                    />
-                  </label>
-                ) : null}
-
-                {batteryArmMahParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryArmMahParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{batteryArmMahParameter.definition?.label ?? batteryArmMahParameter.id}</span>
-                    <input
-                      type="number"
-                      min={batteryArmMahParameter.definition?.minimum}
-                      max={batteryArmMahParameter.definition?.maximum}
-                      step={batteryArmMahParameter.definition?.step ?? 1}
-                      value={editedValues[batteryArmMahParameter.id] ?? String(batteryArmMah ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [batteryArmMahParameter.id]: event.target.value
-                        }))
-                      }
-                    />
-                  </label>
-                ) : null}
-
-                {batteryVoltageSourceParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryVoltageSourceParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{batteryVoltageSourceParameter.definition?.label ?? batteryVoltageSourceParameter.id}</span>
-                    <select
-                      value={editedValues[batteryVoltageSourceParameter.id] ?? String(batteryVoltageSource ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [batteryVoltageSourceParameter.id]: event.target.value
-                        }))
-                      }
-                    >
-                      {(batteryVoltageSourceParameter.definition?.options ?? []).map((valueOption) => (
-                        <option key={`${batteryVoltageSourceParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                          {valueOption.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-
-                {batteryLowVoltageParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryLowVoltageParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{batteryLowVoltageParameter.definition?.label ?? batteryLowVoltageParameter.id}</span>
-                    <input
-                      type="number"
-                      min={batteryLowVoltageParameter.definition?.minimum}
-                      max={batteryLowVoltageParameter.definition?.maximum}
-                      step={batteryLowVoltageParameter.definition?.step ?? 0.1}
-                      value={editedValues[batteryLowVoltageParameter.id] ?? String(batteryLowVoltage ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [batteryLowVoltageParameter.id]: event.target.value
-                        }))
-                      }
-                    />
-                  </label>
-                ) : null}
-
-                {batteryLowMahParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryLowMahParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{batteryLowMahParameter.definition?.label ?? batteryLowMahParameter.id}</span>
-                    <input
-                      type="number"
-                      min={batteryLowMahParameter.definition?.minimum}
-                      max={batteryLowMahParameter.definition?.maximum}
-                      step={batteryLowMahParameter.definition?.step ?? 1}
-                      value={editedValues[batteryLowMahParameter.id] ?? String(batteryLowMah ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [batteryLowMahParameter.id]: event.target.value
-                        }))
-                      }
-                    />
-                  </label>
-                ) : null}
-
-                {batteryFailsafeParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryFailsafeParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{batteryFailsafeParameter.definition?.label ?? batteryFailsafeParameter.id}</span>
-                    <select
-                      value={editedValues[batteryFailsafeParameter.id] ?? String(batteryFailsafe ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [batteryFailsafeParameter.id]: event.target.value
-                        }))
-                      }
-                    >
-                      {(batteryFailsafeParameter.definition?.options ?? []).map((valueOption) => (
-                        <option key={`${batteryFailsafeParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                          {valueOption.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-
-                {batteryCriticalVoltageParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryCriticalVoltageParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{batteryCriticalVoltageParameter.definition?.label ?? batteryCriticalVoltageParameter.id}</span>
-                    <input
-                      type="number"
-                      min={batteryCriticalVoltageParameter.definition?.minimum}
-                      max={batteryCriticalVoltageParameter.definition?.maximum}
-                      step={batteryCriticalVoltageParameter.definition?.step ?? 0.1}
-                      value={editedValues[batteryCriticalVoltageParameter.id] ?? String(batteryCriticalVoltage ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [batteryCriticalVoltageParameter.id]: event.target.value
-                        }))
-                      }
-                    />
-                  </label>
-                ) : null}
-
-                {batteryCriticalMahParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryCriticalMahParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{batteryCriticalMahParameter.definition?.label ?? batteryCriticalMahParameter.id}</span>
-                    <input
-                      type="number"
-                      min={batteryCriticalMahParameter.definition?.minimum}
-                      max={batteryCriticalMahParameter.definition?.maximum}
-                      step={batteryCriticalMahParameter.definition?.step ?? 1}
-                      value={editedValues[batteryCriticalMahParameter.id] ?? String(batteryCriticalMah ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [batteryCriticalMahParameter.id]: event.target.value
-                        }))
-                      }
-                    />
-                  </label>
-                ) : null}
-
-                {batteryCriticalFailsafeParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(batteryCriticalFailsafeParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{batteryCriticalFailsafeParameter.definition?.label ?? batteryCriticalFailsafeParameter.id}</span>
-                    <select
-                      value={editedValues[batteryCriticalFailsafeParameter.id] ?? String(batteryCriticalFailsafe ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [batteryCriticalFailsafeParameter.id]: event.target.value
-                        }))
-                      }
-                    >
-                      {(batteryCriticalFailsafeParameter.definition?.options ?? []).map((valueOption) => (
-                        <option key={`${batteryCriticalFailsafeParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                          {valueOption.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-
-                {throttleFailsafeParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(throttleFailsafeParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{throttleFailsafeParameter.definition?.label ?? throttleFailsafeParameter.id}</span>
-                    <select
-                      value={editedValues[throttleFailsafeParameter.id] ?? String(throttleFailsafe ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [throttleFailsafeParameter.id]: event.target.value
-                        }))
-                      }
-                    >
-                      {(throttleFailsafeParameter.definition?.options ?? []).map((valueOption) => (
-                        <option key={`${throttleFailsafeParameter.id}:${valueOption.value}`} value={String(valueOption.value)}>
-                          {valueOption.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-
-                {throttleFailsafeValueParameter ? (
-                  <label className={`scoped-editor-field scoped-editor-field--${parameterDraftById.get(throttleFailsafeValueParameter.id)?.status ?? 'unchanged'}`}>
-                    <span>{throttleFailsafeValueParameter.definition?.label ?? throttleFailsafeValueParameter.id}</span>
-                    <input
-                      type="number"
-                      min={throttleFailsafeValueParameter.definition?.minimum}
-                      max={throttleFailsafeValueParameter.definition?.maximum}
-                      step={throttleFailsafeValueParameter.definition?.step ?? 1}
-                      value={editedValues[throttleFailsafeValueParameter.id] ?? String(throttleFailsafeValue ?? '')}
-                      onChange={(event) =>
-                        setEditedValues((existing) => ({
-                          ...existing,
-                          [throttleFailsafeValueParameter.id]: event.target.value
-                        }))
-                      }
-                    />
-                  </label>
-                ) : null}
-              </div>
-
-              <ul className="output-note-list">
-                <li>Battery thresholds set to `0` deliberately disable that threshold path; do not leave them at zero accidentally.</li>
-                <li>After changing battery monitor source, voltage source, or failsafe thresholds, verify live telemetry before first flight.</li>
-                <li>After changing throttle failsafe settings, bench-check receiver-loss behavior again before flight.</li>
-              </ul>
-
-              {powerDraftEntries.length > 0 ? (
-                <div className="scoped-draft-list">
-                  {powerDraftEntries.map((draft) => (
-                    <article key={draft.id} className={`scoped-draft-item scoped-draft-item--${draft.status}`}>
-                      <div className="scoped-draft-item__header">
-                        <strong>{draft.label}</strong>
-                        <StatusBadge tone={toneForParameterDraftStatus(draft.status)}>{draft.status}</StatusBadge>
-                      </div>
-                      <p>{draft.id}</p>
-                      <small>
-                        {draft.status === 'staged'
-                          ? `${formatParameterValue(draft.currentValue, draft.definition?.unit)} to ${formatParameterValue(
-                              draft.nextValue,
-                              draft.definition?.unit
-                            )}`
-                          : draft.reason ?? 'Draft matches the live controller value.'}
-                      </small>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <p className="success-copy">No power or failsafe changes are staged right now.</p>
-              )}
-
-              <div className="switch-exercise-controls">
-                <button
-                  style={buttonStyle('primary')}
-                  onClick={() => void handleApplyScopedParameterDrafts(powerDraftEntries, 'power:apply', 'Power & failsafe')}
-                  disabled={
-                    busyAction !== undefined ||
-                    powerStagedDrafts.length === 0 ||
-                    powerInvalidDrafts.length > 0 ||
-                    !canApplyDraftParameters
-                  }
-                >
-                  {busyAction === 'power:apply' ? 'Applying…' : `Apply Power Changes (${powerStagedDrafts.length})`}
-                </button>
-                <button
-                  style={buttonStyle()}
-                  onClick={() => handleDiscardScopedParameterDrafts(powerDraftEntries.map((entry) => entry.id), 'power')}
-                  disabled={busyAction !== undefined || powerDraftEntries.length === 0}
-                >
-                  Discard Power Changes
-                </button>
-              </div>
-            </div>
-
-            {renderAdditionalSettingsCard(
-              'Additional power & failsafe settings',
-              'These metadata-backed safety settings extend the Power view so advanced battery and RC-loss behavior can stay in-context.',
-              powerAdditionalGroups,
-              powerAdditionalDraftEntries,
-              powerAdditionalStagedDrafts,
-              powerAdditionalInvalidDrafts,
-              'power:additional',
-              'Apply Additional Power Changes',
-              'additional power settings'
-            )}
-
-            <div className="prearm-card">
-              <div className="switch-exercise-card__header">
-                <div>
-                  <strong>Pre-arm safety</strong>
-                  <p>
-                    {activePreArmIssues.length === 0
-                      ? 'No active pre-arm issues are present in the shared runtime state.'
-                      : `${activePreArmIssues.length} active pre-arm issue(s) need to be cleared before first flight.`}
-                  </p>
-                </div>
-                <StatusBadge tone={activePreArmIssues.length === 0 ? 'success' : 'warning'}>
-                  {activePreArmIssues.length === 0 ? 'Clear' : `${activePreArmIssues.length} issues`}
-                </StatusBadge>
-              </div>
-
-              {activePreArmIssues.length > 0 ? (
-                <ul className="output-note-list">
-                  {activePreArmIssues.map((issue) => (
-                    <li key={issue.text}>{issue.text}</li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="telemetry-note">Keep the FC powered and watch this card for new pre-arm warnings as setup changes are applied.</p>
-              )}
-            </div>
-
-            <p className="telemetry-note">
-              The setup checklist now treats these sections as truly complete only when both the configuration values and the live telemetry agree.
-            </p>
-          </div>
-          </Panel>
-        </div>
+        <PowerView
+          isBatteryVerified={snapshot.liveVerification.batteryTelemetry.verified}
+          batteryHealthLabel={batteryHealthLabel(snapshot)}
+          batteryHealthTone={batteryHealthTone(snapshot)}
+          parameterNotice={parameterNotice ? { tone: parameterNotice.tone, toneLabel: parameterNotice.tone, text: parameterNotice.text } : null}
+          liveMetrics={{
+            voltageText: formatVoltage(snapshot.liveVerification.batteryTelemetry.voltageV),
+            currentText: formatCurrent(snapshot.liveVerification.batteryTelemetry.currentA),
+            remainingText: formatRemaining(snapshot.liveVerification.batteryTelemetry.remainingPercent),
+            capacityText: batteryCapacity !== undefined ? `${batteryCapacity} mAh` : 'Unknown'
+          }}
+          configPills={{
+            monitor: describeBatteryMonitor(batteryMonitor),
+            voltageSource: formatArducopterBatteryVoltageSource(batteryVoltageSource),
+            lowAction: formatArducopterBatteryFailsafeAction(batteryFailsafe),
+            criticalAction: formatArducopterBatteryFailsafeAction(batteryCriticalFailsafe),
+            throttleFailsafe: formatArducopterThrottleFailsafe(throttleFailsafe),
+            throttleFailsafePwm: throttleFailsafeValue !== undefined ? `${throttleFailsafeValue} us` : 'Unknown'
+          }}
+          fields={([
+            batteryMonitorParameter ? { parameter: batteryMonitorParameter, liveValue: batteryMonitor, kind: 'select' } : null,
+            batteryCapacityParameter ? { parameter: batteryCapacityParameter, liveValue: batteryCapacity, kind: 'number' } : null,
+            batteryArmVoltageParameter ? { parameter: batteryArmVoltageParameter, liveValue: batteryArmVoltage, kind: 'number', stepFallback: 0.1 } : null,
+            batteryArmMahParameter ? { parameter: batteryArmMahParameter, liveValue: batteryArmMah, kind: 'number' } : null,
+            batteryVoltageSourceParameter ? { parameter: batteryVoltageSourceParameter, liveValue: batteryVoltageSource, kind: 'select' } : null,
+            batteryLowVoltageParameter ? { parameter: batteryLowVoltageParameter, liveValue: batteryLowVoltage, kind: 'number', stepFallback: 0.1 } : null,
+            batteryLowMahParameter ? { parameter: batteryLowMahParameter, liveValue: batteryLowMah, kind: 'number' } : null,
+            batteryFailsafeParameter ? { parameter: batteryFailsafeParameter, liveValue: batteryFailsafe, kind: 'select' } : null,
+            batteryCriticalVoltageParameter ? { parameter: batteryCriticalVoltageParameter, liveValue: batteryCriticalVoltage, kind: 'number', stepFallback: 0.1 } : null,
+            batteryCriticalMahParameter ? { parameter: batteryCriticalMahParameter, liveValue: batteryCriticalMah, kind: 'number' } : null,
+            batteryCriticalFailsafeParameter ? { parameter: batteryCriticalFailsafeParameter, liveValue: batteryCriticalFailsafe, kind: 'select' } : null,
+            throttleFailsafeParameter ? { parameter: throttleFailsafeParameter, liveValue: throttleFailsafe, kind: 'select' } : null,
+            throttleFailsafeValueParameter ? { parameter: throttleFailsafeValueParameter, liveValue: throttleFailsafeValue, kind: 'number' } : null
+          ] as Array<PowerFieldSpec | null>).filter((field): field is PowerFieldSpec => field !== null)}
+          editedValues={editedValues}
+          onEditChange={(paramId, value) =>
+            setEditedValues((existing) => ({ ...existing, [paramId]: value }))
+          }
+          draftStatusById={parameterDraftById}
+          scopedReviewStatusLabel={
+            powerInvalidDrafts.length > 0
+              ? `${powerInvalidDrafts.length} invalid`
+              : powerStagedDrafts.length > 0
+                ? `${powerStagedDrafts.length} staged`
+                : 'in sync'
+          }
+          scopedReviewTone={toneForScopedDraftReview(powerStagedDrafts.length, powerInvalidDrafts.length)}
+          draftItems={powerDraftEntries.map((draft): PowerDraftItem => ({
+            id: draft.id,
+            label: draft.label,
+            status: draft.status,
+            badgeTone: toneForParameterDraftStatus(draft.status),
+            summary: draft.status === 'staged'
+              ? `${formatParameterValue(draft.currentValue, draft.definition?.unit)} to ${formatParameterValue(draft.nextValue, draft.definition?.unit)}`
+              : draft.reason ?? 'Draft matches the live controller value.'
+          }))}
+          stagedCount={powerStagedDrafts.length}
+          draftCount={powerDraftEntries.length}
+          invalidCount={powerInvalidDrafts.length}
+          canApply={canApplyDraftParameters}
+          isApplying={busyAction === 'power:apply'}
+          isBusy={busyAction !== undefined}
+          onApply={() => void handleApplyScopedParameterDrafts(powerDraftEntries, 'power:apply', 'Power & failsafe')}
+          onDiscard={() => handleDiscardScopedParameterDrafts(powerDraftEntries.map((entry) => entry.id), 'power')}
+          additionalSettingsSlot={renderAdditionalSettingsCard(
+            'Additional power & failsafe settings',
+            'These metadata-backed safety settings extend the Power view so advanced battery and RC-loss behavior can stay in-context.',
+            powerAdditionalGroups,
+            powerAdditionalDraftEntries,
+            powerAdditionalStagedDrafts,
+            powerAdditionalInvalidDrafts,
+            'power:additional',
+            'Apply Additional Power Changes',
+            'additional power settings'
+          )}
+          preArmIssues={activePreArmIssues.map((issue) => issue.text)}
+        />
         ) : null}
       </section>
       ) : null}
